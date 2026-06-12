@@ -1,0 +1,62 @@
+cff-version: 1.2.0
+title: "IESA-Opt.jl"
+message: >-
+  If you use IESA-Opt.jl in academic or policy work, please cite both core
+  IESA-Opt model papers listed in this file.
+type: software
+authors:
+  - name: "TNO IESA team"
+repository-code: "https://github.com/IESA-Opt/IESA-Opt.jl"
+abstract: >-
+  IESA-Opt.jl is the Julia implementation of the IESA-Opt integrated
+  energy-system optimization model for capacity-expansion and dispatch studies
+  with sector coupling, temporal detail, storage, flexibility, emissions, and
+  scenario comparison.
+keywords:
+  - energy system optimization
+  - integrated energy systems
+  - capacity expansion
+  - dispatch optimization
+  - sector coupling
+  - Julia
+  - JuMP
+license: Apache-2.0
+version: 0.1.0
+date-released: "2026-06-12"
+references:
+  - type: article
+    title: "Modelling of decarbonisation transition in national integrated energy system with hourly resolution"
+    authors:
+      - given-names: "M."
+        family-names: "Sánchez Diéguez"
+      - given-names: "A."
+        family-names: "Fattahi"
+      - given-names: "J."
+        family-names: "Sijm"
+      - given-names: "G."
+        family-names: "Morales España"
+      - given-names: "A."
+        family-names: "Faaij"
+    journal: "Advances in Applied Energy"
+    volume: 3
+    pages: "100043"
+    year: 2021
+    doi: "10.1016/j.adapen.2021.100043"
+  - type: article
+    title: "Measuring accuracy and computational capacity trade-offs in an hourly integrated energy system model"
+    authors:
+      - given-names: "A."
+        family-names: "Fattahi"
+      - given-names: "M."
+        family-names: "Sánchez Diéguez"
+      - given-names: "J."
+        family-names: "Sijm"
+      - given-names: "G."
+        family-names: "Morales España"
+      - given-names: "A."
+        family-names: "Faaij"
+    journal: "Advances in Applied Energy"
+    volume: 1
+    pages: "100009"
+    year: 2021
+    doi: "10.1016/j.adapen.2020.100009"

@@ -1,0 +1,42 @@
+name = "IESA_J"
+uuid = "b1c2d3e4-0000-0000-0000-000000000001"
+version = "0.1.0"
+authors = ["TNO IESA team"]
+license = "Apache-2.0"
+
+[deps]
+CSV = "336ed68f-0bac-5ca0-87d4-7b16caf5d00b"
+Clustering = "aaaa29a8-35af-508c-8bc3-b662a17a0fe5"
+DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+Gurobi = "2e9cd046-0924-5485-92f1-d5272153d98b"
+HiGHS = "87dc4568-4c63-4d18-b0c0-bb2238e4078b"
+JuMP = "4076af6c-e467-56ae-b986-b466b2749572"
+LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+MathOptInterface = "b8f27783-ece8-5eb3-8dc8-9495eed66fee"
+Parquet2 = "98572fba-bba0-415d-956f-fa77e587d26d"
+Printf = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+SparseArrays = "2f01184e-e22b-5df5-ae63-d93ebab69eaf"
+Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+XLSX = "fdbf4ff8-1666-58a4-91e7-1b58723a45e0"
+
+[compat]
+CSV = "0.10"
+Clustering = "0.15"
+DataFrames = "1"
+Gurobi = "1"
+HiGHS = "1"
+JuMP = "1"
+Parquet2 = "0.2.33"
+XLSX = "0.10"
+julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
