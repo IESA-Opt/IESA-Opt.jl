@@ -12,6 +12,15 @@
   margin: 0 0 1.5rem;
 }
 
+.docs-sidebar .docs-package-name::before {
+  content: "";
+  display: block;
+  width: 100%;
+  height: 4rem;
+  margin: 0 0 0.35rem;
+  background: url("iesa-opt-logo.png") center / contain no-repeat;
+}
+
 .iesa-symbol {
   font-weight: 650;
   white-space: nowrap;
