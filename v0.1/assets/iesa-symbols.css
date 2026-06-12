@@ -5,6 +5,13 @@
   --iesa-symbol-constraint: #111827;
 }
 
+#documenter-page img[alt="IESA-Opt.jl logo"] {
+  display: block;
+  width: min(100%, 42rem);
+  height: auto;
+  margin: 0 0 1.5rem;
+}
+
 .iesa-symbol {
   font-weight: 650;
   white-space: nowrap;
