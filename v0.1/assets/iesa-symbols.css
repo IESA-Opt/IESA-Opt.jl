@@ -57,3 +57,9 @@
   margin: 0.1rem 0.2rem 0.1rem 0;
   background: #fff;
 }
+
+.docs-footer .footer-message::before {
+  content: "This documentation is generated with AI.";
+  display: block;
+  margin-bottom: 0.35rem;
+}
