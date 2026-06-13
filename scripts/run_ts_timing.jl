@@ -6,7 +6,6 @@ Pkg.activate(joinpath(@__DIR__, ".."))
 using IESA_J
 using JuMP
 using DataFrames
-using CSV
 using Dates
 using Printf
 
@@ -141,39 +140,52 @@ function main()
     )
 
     written = Dict{Symbol,String}()
-    _, write_s = elapsed() do
-        merge!(written, IESA_J.write_parquet_results(rr, vars, md, OUT_DIR; mode = :ts))
-    end
-    total_s = round(time() - total_start, digits = 3)
-    @info "results written" seconds = write_s files = sort(collect(keys(written)))
+    db_path = joinpath(OUT_DIR, IESA_J.IESA_RESULTS_DUCKDB_FILE)
+    IESA_J._remove_duckdb_database!(db_path)
+    write_started = time()
+    write_s = 0.0
+    total_s = 0.0
 
-    timing = DataFrame(
-        engine = ["Julia"],
-        scenario = [SCENARIO],
-        period = [PERIOD],
-        n_repDays = [md.params.n_repDays],
-        threads = [THREADS],
-        dataRead_sec = [data_read_s],
-        derive_sec = [derive_s],
-        cluster_sec = [cluster_s],
-        generation_sec = [generation_s],
-        solve_sec = [solve_s],
-        resultsWrite_sec = [write_s],
-        total_sec = [total_s],
-        n_rows = [n_rows],
-        n_cols = [n_cols],
-        objective = [obj],
-        termination_status = [term],
-    )
-    timing_path = joinpath(OUT_DIR, "timing_summary.csv")
-    CSV.write(timing_path, timing)
+    IESA_J._with_duckdb_write_connection(db_path) do
+        merge!(written, IESA_J.write_duckdb_results(rr, vars, md, OUT_DIR; mode = :ts, reset = false))
+        write_s = round(time() - write_started, digits = 3)
+        total_s = round(time() - total_start, digits = 3)
+        timing = DataFrame(
+            engine = ["Julia"],
+            scenario = [SCENARIO],
+            period = [PERIOD],
+            n_repDays = [md.params.n_repDays],
+            threads = [THREADS],
+            dataRead_sec = [data_read_s],
+            derive_sec = [derive_s],
+            cluster_sec = [cluster_s],
+            generation_sec = [generation_s],
+            solve_sec = [solve_s],
+            resultsWrite_sec = [write_s],
+            total_sec = [total_s],
+            n_rows = [n_rows],
+            n_cols = [n_cols],
+            objective = [obj],
+            termination_status = [term],
+        )
+        timing_path = IESA_J._duckdb_table_uri(db_path, "timing_summary")
+        IESA_J._write_table(timing, timing_path)
+
+        solver_settings = DataFrame(
+            attribute = string.(sort(collect(keys(attrs)))),
+            value = [string(attrs[key]) for key in sort(collect(keys(attrs)))],
+        )
+        IESA_J._write_table(solver_settings, IESA_J._duckdb_table_uri(db_path, "solver_settings"))
+    end
+    @info "results written" seconds = write_s files = sort(collect(keys(written)))
 
     println()
     println("="^72)
     @printf("Objective: %.6f\n", obj)
     @printf("Timing seconds: read=%.3f derive=%.3f cluster=%.3f gen=%.3f solve=%.3f write=%.3f total=%.3f\n",
             data_read_s, derive_s, cluster_s, generation_s, solve_s, write_s, total_s)
-    println("Timing CSV: ", timing_path)
+    println("Results DuckDB: ", db_path)
+    println("Timing table: timing_summary")
     println("Output dir: ", OUT_DIR)
     println("="^72)
 end

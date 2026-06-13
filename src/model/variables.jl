@@ -77,6 +77,10 @@ mutable struct AnnualVars
     deltaQ_backlog_BE::Any
     deltaW_UP::Any                # DenseAxisArray (h, tw, ps)
     deltaW_S::Any
+    # IESA-Opt 1.0 day-aggregated long-term flex deltas (FH; Variable-with-Definition,
+    # IESA-Opt.ams lines 4129/4134). Domain (d, tfl, ps) where tfl = tech_flexLT.
+    deltaQd_UP::Any               # ≤ 0  defining
+    deltaQd_DW::Any               # ≥ 0  defining
 
     # Phase 5 TS (rep-day clustered) variables — populated by add_ts_variables!
     # All indexed by `hc` (cluster hour) instead of `h`.
@@ -121,6 +125,7 @@ function AnnualVars(tu, ts, ci, ed, ds, rt)
         nothing, nothing, nothing,              # deltaQ_UP/DW/S
         nothing, nothing,                       # deltaQ_backlog_DR/BE
         nothing, nothing,                       # deltaW_UP/S
+        nothing, nothing,                       # deltaQd_UP, deltaQd_DW (FH)
         # Phase 5 TS (24 fields)
         nothing, nothing,                       # tech_useHourly_TS, tech_useDaily_TS
         nothing, nothing, nothing,              # deltaB_UP/DW/S_TS
@@ -245,11 +250,11 @@ function add_hourly_variables!(model::JuMP.Model, vars::AnnualVars, md::ModelDat
         vars.tech_useDaily = tech_useDaily
     end
 
-    # ------ Gas buffer (d, tg, ps): deltaB_UP <= 0, deltaB_DW >= 0, deltaB_S free
+    # ------ Gas buffer (d, tg, ps): deltaB_UP <= 0, deltaB_DW >= 0, deltaB_S <= 0
     if !isempty(s.tech_gasBuffer)
         @variable(model, deltaB_UP[d = s.days, tg = s.tech_gasBuffer, ps = pss] <= 0)
         @variable(model, deltaB_DW[d = s.days, tg = s.tech_gasBuffer, ps = pss] >= 0)
-        @variable(model, deltaB_S[d = s.days, tg = s.tech_gasBuffer, ps = pss])
+        @variable(model, deltaB_S[d = s.days, tg = s.tech_gasBuffer, ps = pss] <= 0)
         vars.deltaB_UP = deltaB_UP
         vars.deltaB_DW = deltaB_DW
         vars.deltaB_S  = deltaB_S
@@ -275,6 +280,20 @@ function add_hourly_variables!(model::JuMP.Model, vars::AnnualVars, md::ModelDat
         @variable(model, deltaQ_DW[h = s.hours, tf = s.tech_flexible, ps = pss] >= 0)
         vars.deltaQ_UP = deltaQ_UP
         vars.deltaQ_DW = deltaQ_DW
+    end
+
+    # ------ Day-aggregated long-term flex deltas (d, tfl, ps).
+    # IESA-Opt 1.0 lines 4129/4134:
+    #   Variable deltaQd_UP { IndexDomain: (d,tfl,ps); Range: nonpositive;
+    #     Definition: sum[ih | dayPer_hour(ih)=d, deltaQ_UP(ih,tfl,ps)] }
+    #   Variable deltaQd_DW { IndexDomain: (d,tfl,ps); Range: nonnegative;
+    #     Definition: sum[ih | dayPer_hour(ih)=d, deltaQ_DW(ih,tfl,ps)] }
+    # Used by balanceD/R/W/M/S/B/Y_deltaQd (IESA-Opt.ams lines 4203-4232).
+    if !isempty(s.tech_flexLT)
+        @variable(model, deltaQd_UP[d = s.days, tfl = s.tech_flexLT, ps = pss] <= 0)
+        @variable(model, deltaQd_DW[d = s.days, tfl = s.tech_flexLT, ps = pss] >= 0)
+        vars.deltaQd_UP = deltaQd_UP
+        vars.deltaQd_DW = deltaQd_DW
     end
 
     # ------ Storage state (h, tfwb, ps): deltaQ_S <= 0

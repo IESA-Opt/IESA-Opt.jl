@@ -60,7 +60,51 @@ For repeated study runs, keep local run wrappers under `local/`, which is ignore
 
 IESA-Opt.jl reads Excel workbooks from paths relative to the repository root. The tracked example input is [data/default_data.xlsx](data/default_data.xlsx). Additional local study workbooks can be placed in `data/` or `data_Batch/`; those folders are configured so private scenario files stay out of Git.
 
-Solve results are written under `Output/` or `Output_Batch/`. Parquet is the primary output format, and most writers also create CSV sidecars for quick inspection. Common result tables include run statistics, total costs, cost breakdowns, technology stock, technology use, representative-day dispatch, cluster maps, and emission-price outputs. See the [outputs guide](https://iesa-opt.github.io/IESA-Opt.jl/v0.1/user-guide/outputs/) for details.
+Solve results are written under `Output/` or `Output_Batch/`. New runs store model outputs in a single DuckDB database named `results.duckdb` in each run folder. Common result tables include run statistics, solve timings, total costs, cost breakdowns, technology stock, technology use, representative-day dispatch, cluster maps, and emission-price outputs. The Excel workbook remains the editable input source; repeated runs automatically reuse a compiled DuckDB input cache and rebuild it when the workbook changes. See the [outputs guide](https://iesa-opt.github.io/IESA-Opt.jl/v0.1/user-guide/outputs/) for details.
+
+## Local UI Dashboard
+
+IESA-Opt.jl ships with a local browser-based UI for configuring runs, monitoring solver progress, and exploring results. The UI runs as a small HTTP server on `http://127.0.0.1:8123` and reads/writes the same workbooks and `Output/` folders that the command-line scripts use, so anything you do in the UI stays reproducible from the terminal.
+
+### Launching the UI
+
+Make sure dependencies are installed once (`julia --project=. -e "using Pkg; Pkg.instantiate()"`), then start the UI with one of the following options:
+
+- **Windows (one-click):** double-click [start-ui.bat](start-ui.bat) in the repository root. A PowerShell window opens, starts the server, and your default browser is launched at `http://127.0.0.1:8123`. Keep the window open while using the UI; closing it stops the server.
+- **PowerShell:** right-click [start-ui.ps1](start-ui.ps1) and choose *Run with PowerShell*, or from a PowerShell prompt in the repository root run `./start-ui.ps1`.
+- **Cross-platform terminal:** from the repository root run `julia --threads=auto --project=. scripts/serve_ui.jl`. The same script works on Windows, macOS, and Linux.
+- **From inside Julia:** `using IESA_J; serve_ui!()` (defaults: `host="127.0.0.1"`, `port=8123`, `open_browser=true`). To run headless (no auto-open), use `serve_ui!(open_browser=false)`.
+
+The first launch precompiles the package and warms an input cache for `data/default_data.xlsx`; subsequent launches start in a few seconds.
+
+### Using the UI
+
+The UI has three tabs:
+
+- **Run.** Pick an input workbook (Browse selects any `.xlsx` / `.xlsm` / `.xls` file under `data/`), choose temporal mode (annual, time-slice, or full-hourly), set periods, representative days, hours per day, solver, threads, and output name, then click *Run*. The right-hand panel streams live solver output and per-stage progress (read → prepare → cluster → generate → solve → write).
+- **Results.** Lists every folder under `Output/` and `Output_Batch/` that contains result files, sorted by most recent first. Click a run to inspect it; Ctrl/⌘-click adds runs to a compare set, Shift-click selects a range. Each panel has a *Show table* toggle for the underlying data.
+- **Compare.** When two or more runs are selected, the comparison panel displays side-by-side system costs, solve times, and component-cost breakdowns.
+
+All results charts are interactive (zoom, pan, click-to-toggle legend, save-as-PNG):
+
+- *System Costs* — stacked bars by cost component per period or per run.
+- *Solve Time And Solver Stats* — stacked bars by phase (read / prepare / cluster / generate / solve / write).
+- *CO₂ Price* — shadow price of the emission cap per period.
+- *Activity Prices* — shadow prices of balance constraints (table view).
+- *Power System Capacities* — stacked bars by technology per period.
+- *Hourly Dispatch* — full-year stacked-area chart with node and period selectors, From/To hour range, and box-zoom (drag a region to zoom; double-click to reset). Negative values (charging, consumption) stack below zero.
+- *Emissions* and *Supply / Demand* — vertical stacked bars with a black diamond marker for the per-period net total, grouped by sector / activity / tech.
+
+### Stopping the UI
+
+Close the launcher window, or press **Ctrl+C** in the terminal where Julia is running. The UI does not modify your input workbooks.
+
+### Troubleshooting
+
+- *Browser does not open automatically.* Open `http://127.0.0.1:8123` manually.
+- *Port 8123 already in use.* Stop the other process, or start the UI on a different port from Julia: `using IESA_J; serve_ui!(port=8800)`.
+- *"Julia was not found on PATH."* Install Julia 1.10 or newer from [julialang.org](https://julialang.org/), reopen the terminal, and run the launcher again.
+- *Solver missing.* The Run page only offers solvers that resolve at startup (HiGHS is bundled; Gurobi requires a valid license and `Gurobi.jl` available in the project).
 
 ## Repository Layout
 
@@ -73,6 +117,9 @@ data/             Default and local single-run input workbooks
 data_Batch/       Local batch input workbooks and scenario variants
 Output/           Generated single-run outputs, ignored by Git
 Output_Batch/     Generated batch outputs, ignored by Git
+ui/               Local UI dashboard assets (HTML, JS, CSS, vendored Plotly)
+start-ui.bat      Windows double-click launcher for the local UI
+start-ui.ps1      PowerShell launcher for the local UI
 docs/             User-facing documentation
 ```
 

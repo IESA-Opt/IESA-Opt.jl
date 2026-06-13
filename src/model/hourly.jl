@@ -490,10 +490,15 @@ function _add_gasbuffer!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 @constraint(m, dB_DW[d, tg, ps] <=  bDW * ts[tg, ps],
                             base_name = "capDW_dB[$tg,$d,$ps]")
             end
-            if bSt > 0.0 && bDW > 0.0
-                @constraint(m, dB_S[d, tg, ps] >= -ts[tg, ps] * bSt * bDW,
-                            base_name = "cumS_dB[$tg,$d,$ps]")
-            end
+            # IESA-Opt 1.0 line 3220-3223 `cummulativeS_dB`: UNCONDITIONAL bound
+            # deltaB_S(d,tg,ps) >= -techStock(tg,ps)*buffer_storage(tg)*bufferDW_capacity(tg)
+            # In default_data the `buffer_storage` parameter is 0 for ALL gas-buffer techs,
+            # so RHS collapses to 0 and the constraint becomes `deltaB_S >= 0`. This is
+            # NOT a no-op — together with the AIMMS nonpositive range it fixes the
+            # gas-buffer cumulative state at zero. Previously gated by
+            # `bSt > 0.0 && bDW > 0.0`, dropping 1,825 constraints vs AIMMS.
+            @constraint(m, dB_S[d, tg, ps] >= -ts[tg, ps] * bSt * bDW,
+                        base_name = "cumS_dB[$tg,$d,$ps]")
         end
     end
 end
@@ -508,17 +513,30 @@ end
 #                + deltaQ_DW(h)
 # prev_S(h=1) = deltaQ_S(card(hours)).
 #
-# Also adds cumulativeS_dQtfb (battery floor) — IESA-Opt 1.0 line 4515.
+# Adds the following lower-bound (battery floor) constraints (IESA-Opt 1.0):
+#   - cumulativeS_dQtfb  (line 4497) for tech_fStorage
+#   - cumulativeS_dQtfv  (line 4501) for tech_fEV
+#   - minSoC_dQtfv       (line 4522) for tech_fEV
+# Without the tfv constraints the EV-share of `deltaQ_S` (declared with
+# upper bound 0 only) is unbounded below, which makes the FH LP
+# INFEASIBLE_OR_UNBOUNDED. The TS path already emits the analogous
+# `_TS` versions in `_add_storage_state_TS!`.
 function _add_storage_state!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     s, p = md.sets, md.params
     vars.deltaQ_S === nothing && return
     pss = s.periods_solve
     ts   = vars.techStock
+    tu   = vars.tech_use
     dq_S = vars.deltaQ_S
     dqUP = vars.deltaQ_UP
     dqDW = vars.deltaQ_DW
     hours = s.hours
     isempty(hours) && return
+
+    tfs_set = Set(s.tech_fStorage)
+    tev_set = Set(s.tech_fEV)
+    tb_set  = Set(s.tech_balancers)
+    ev_min  = p.ev_min_soc_fraction_default
 
     for tfwb in s.tech_fWithBattery, ps in pss
         sl  = get(p.flex_standing_loss_effective, tfwb, 0.0)
@@ -540,15 +558,51 @@ function _add_storage_state!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
             end
             @constraint(m, expr == 0.0, base_name = "dQSrec[$tfwb,$h,$ps]")
         end
-        # cumulativeS_dQtfb: deltaQ_S(h) >= −techStock × flex_storage × flex_capacity(t,ps)
+
         fS = get(p.flex_storage, tfwb, 0.0)
         fC = get(p.flex_capacity, (tfwb, ps), 0.0)
-        if fS > 0.0 && fC > 0.0 && tfwb in s.tech_fStorage
+        (fS > 0.0 && fC > 0.0) || continue
+
+        if tfwb in tfs_set
+            # IESA-Opt 1.0 cumulativeS_dQtfb (line 4497):
+            #   deltaQ_S(h,tfb,ps) >= -techStock × flex_storage × flex_capacity
             for h in hours
-                @constraint(m, dq_S[h, tfwb, ps] >= -ts[tfwb, ps] * fS * fC,
+                @constraint(m, dq_S[h, tfwb, ps] + fS * fC * ts[tfwb, ps] >= 0.0,
                             base_name = "cumS_dQ[$tfwb,$h,$ps]")
             end
+        elseif tfwb in tev_set
+            # IESA-Opt 1.0 cumulativeS_dQtfv (line 4501) + minSoC_dQtfv (line 4522):
+            #   deltaQ_S(h,tfv,ps) >= -( fS*fC*(ts - tu*helper1) + tu*ab*helper2 )
+            #   deltaQ_S(h,tfv,ps) >= -(1 - ev_min)*ts*fS*fC
+            # where helper1 = hourly_profiles(h, profileType_EVuse(tfv)) /
+            #                  (avg_speed(tfv) * (24/hoursPerDayEffective(h)))
+            #     = profile / (avg_speed * slice_width_hours)
+            # and  helper2 = 0 (IESA-Opt 1.0 default).
+            prof_t = get(p.profileType_EVuse, tfwb, Symbol(""))
+            spd    = get(p.avg_speed, tfwb, 0.0)
+            in_tb  = tfwb in tb_set
+            for h in hours
+                sw = get(p.slice_width_hours, h, 1.0)
+                h1 = (spd > 0.0 && prof_t != Symbol("") && sw > 0.0) ?
+                     get(p.hourly_profiles, (h, prof_t), 0.0) / (spd * sw) : 0.0
+                # cumulativeS_dQtfv:   dq_S + fS*fC*ts - fS*fC*h1*tu >= 0   (h2=0)
+                expr = AffExpr(0.0)
+                add_to_expression!(expr, 1.0, dq_S[h, tfwb, ps])
+                add_to_expression!(expr, fS * fC, ts[tfwb, ps])
+                if in_tb && h1 != 0.0
+                    add_to_expression!(expr, -fS * fC * h1, tu[tfwb, ps])
+                end
+                @constraint(m, expr >= 0.0, base_name = "cumS_dQv[$tfwb,$h,$ps]")
+                # minSoC_dQtfv:   dq_S + (1 - ev_min)*ts*fS*fC >= 0
+                @constraint(m, dq_S[h, tfwb, ps] + (1.0 - ev_min) * fS * fC * ts[tfwb, ps] >= 0.0,
+                            base_name = "minSoC_dQv[$tfwb,$h,$ps]")
+            end
         end
+        # NOTE: For techs in tech_fWithBattery \ (tech_fStorage ∪ tech_fEV)
+        # (e.g. battery techs combined with DR/BE shifting), IESA-Opt 1.0 does
+        # not emit an explicit cumulative-state lower bound here either; if such
+        # techs appear in the dataset and would otherwise be unbounded, additional
+        # logic would be needed.  Leaving parity with IESA-Opt 1.0.
     end
 end
 
@@ -557,6 +611,24 @@ end
 # ============================================================================
 
 # IESA-Opt 1.0 lines 4257-4310 (capacityUP/DW_dQ*) + 4216-4253 (balanceQ/D/R/W/M/S/B/Y)
+#
+# CORRECTNESS NOTE (June 2026 audit): The original FH flex-bound implementation
+# used a single `if/elseif/else` dispatch over `tech_flexible` keyed on
+# `tech_fStorage` first.  That dispatch silently swapped the AIMMS Storage and
+# BE-shifting formulas:  Storage techs received the BE-shifting bound (with
+# `nnLoad` factor), and BE-shifting techs fell through to the DR-shifting bound
+# (no `nnLoad`).  TS module already has the correct separated per-set loops
+# (ts.jl `_add_flex_bounds_TS!`).  This rewrite mirrors the TS structure so FH
+# matches AIMMS:
+#   - capacityUP_dQtfe → tech_fBEshifting (nnLoad)
+#   - capacityUP_dQtfs → tech_fDRshifting (no nnLoad)
+#   - capacityUP_dQtfb → tech_fStorage (simple ts·fC)
+#   - capacityUP_dQtfv → tech_fEV
+#   - capacityDW_dQtfe → tech_fBEshifting (1-nnLoad)
+#   - capacityDW_dQtfs → tech_fDRshifting (1-nnLoad)
+#   - capacityDW_dQtfb → tech_fStorage (symmetric ts·fC)
+#   - capacityDW_dQtfvc → tech_fEVcharging (1-nnLoad)
+#   - capacityDW_dQtfvg → tech_fEVgrid (V2G with ev_v2g·fC·(stock-tu·profEV/speed))
 function _add_flex_bounds!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     s, p = md.sets, md.params
     vars.deltaQ_UP === nothing && return
@@ -567,158 +639,488 @@ function _add_flex_bounds!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     dqDW = vars.deltaQ_DW
     hours = s.hours
     tb_set = Set(s.tech_balancers)
+    ev_v2g = p.ev_v2g_power_fraction_default
 
-    fStorage_set = Set(s.tech_fStorage)
-    fEV_set      = Set(s.tech_fEV)
-    fBattery_set = Set(s.tech_fWithBattery)
+    # ── UP bounds ──
 
-    for tf in s.tech_flexible, ps in pss
-        nnLoad = get(p.flex_nnLoad, tf, 0.0)
-        fC     = get(p.flex_capacity, (tf, ps), 0.0)
-        prof_t = get(p.profileType_tech, tf, :Flat)
-        # flex_activity-based RHS coefficient (per ps)
-        fa = get(p.flex_activity, tf, Symbol(""))
-        ab_fa = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tf, fa, ps), 0.0)
-
+    # IESA-Opt 1.0 capacityUP_dQtfe (line 4234) for tech_fBEshifting (with nnLoad)
+    for tfe in s.tech_fBEshifting, ps in pss
+        tfe in tb_set || continue
+        nnLoad = get(p.flex_nnLoad, tfe, 0.0)
+        fC     = get(p.flex_capacity, (tfe, ps), 0.0)
+        prof_t = get(p.profileType_tech, tfe, :Flat)
+        fa     = get(p.flex_activity, tfe, Symbol(""))
+        ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfe, fa, ps), 0.0)
         for h in hours
             prof = get(p.hourly_profiles, (h, prof_t), 0.0)
-            # ── UP bounds ──
-            if tf in fStorage_set
-                # capacityUP_dQtfe: ≥ −(fC × stock + prof × ab_fa × tu) × nnLoad
-                if fC > 0.0 || (abs(prof * ab_fa) > _IJ_COEF_EPS)
-                    expr = AffExpr(0.0)
-                    add_to_expression!(expr, 1.0, dqUP[h, tf, ps])
-                    add_to_expression!(expr, nnLoad * fC, ts[tf, ps])
-                    if tf in tb_set
-                        add_to_expression!(expr, nnLoad * prof * ab_fa, tu[tf, ps])
-                    end
-                    @constraint(m, expr >= 0.0, base_name = "capUPdQe[$tf,$h,$ps]")
+            expr = AffExpr(0.0)
+            add_to_expression!(expr, 1.0, dqUP[h, tfe, ps])
+            add_to_expression!(expr, nnLoad * fC, ts[tfe, ps])
+            add_to_expression!(expr, nnLoad * prof * ab_fa, tu[tfe, ps])
+            @constraint(m, expr >= 0.0, base_name = "capUPdQe[$tfe,$h,$ps]")
+        end
+    end
+
+    # IESA-Opt 1.0 capacityUP_dQtfs (line 4245) for tech_fDRshifting (no nnLoad)
+    for tfs in s.tech_fDRshifting, ps in pss
+        tfs in tb_set || continue
+        fC     = get(p.flex_capacity, (tfs, ps), 0.0)
+        prof_t = get(p.profileType_tech, tfs, :Flat)
+        fa     = get(p.flex_activity, tfs, Symbol(""))
+        ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfs, fa, ps), 0.0)
+        for h in hours
+            prof = get(p.hourly_profiles, (h, prof_t), 0.0)
+            expr = AffExpr(0.0)
+            add_to_expression!(expr, 1.0, dqUP[h, tfs, ps])
+            add_to_expression!(expr, fC, ts[tfs, ps])
+            add_to_expression!(expr, prof * ab_fa, tu[tfs, ps])
+            @constraint(m, expr >= 0.0, base_name = "capUPdQs[$tfs,$h,$ps]")
+        end
+    end
+
+    # IESA-Opt 1.0 capacityUP_dQtfb (line 4254) for tech_fStorage
+    for tfb in s.tech_fStorage, ps in pss
+        fC = get(p.flex_capacity, (tfb, ps), 0.0)
+        for h in hours
+            @constraint(m, dqUP[h, tfb, ps] + fC * ts[tfb, ps] >= 0.0,
+                        base_name = "capUPdQb[$tfb,$h,$ps]")
+        end
+    end
+
+    # IESA-Opt 1.0 capacityUP_dQtfv (line 4258) for tech_fEV
+    for tfv in s.tech_fEV, ps in pss
+        tfv in tb_set || continue
+        fC     = get(p.flex_capacity, (tfv, ps), 0.0)
+        prof_t = get(p.profileType_tech, tfv, :Flat)
+        fa     = get(p.flex_activity, tfv, Symbol(""))
+        ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfv, fa, ps), 0.0)
+        for h in hours
+            prof = get(p.hourly_profiles, (h, prof_t), 0.0)
+            expr = AffExpr(0.0)
+            add_to_expression!(expr, 1.0, dqUP[h, tfv, ps])
+            add_to_expression!(expr, fC, ts[tfv, ps])
+            add_to_expression!(expr, prof * ab_fa, tu[tfv, ps])
+            @constraint(m, expr >= 0.0, base_name = "capUPdQv[$tfv,$h,$ps]")
+        end
+    end
+
+    # ── DW bounds ──
+
+    # IESA-Opt 1.0 capacityDW_dQtfe (line 4274) for tech_fBEshifting (1-nnLoad)
+    for tfe in s.tech_fBEshifting, ps in pss
+        tfe in tb_set || continue
+        nnLoad = get(p.flex_nnLoad, tfe, 0.0)
+        prof_t = get(p.profileType_tech, tfe, :Flat)
+        fa     = get(p.flex_activity, tfe, Symbol(""))
+        ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfe, fa, ps), 0.0)
+        for h in hours
+            prof = get(p.hourly_profiles, (h, prof_t), 0.0)
+            @constraint(m, dqDW[h, tfe, ps] + prof * ab_fa * (1.0 - nnLoad) * tu[tfe, ps] <= 0.0,
+                        base_name = "capDWdQe[$tfe,$h,$ps]")
+        end
+    end
+
+    # IESA-Opt 1.0 capacityDW_dQtfs (line 4282) for tech_fDRshifting (1-nnLoad)
+    for tfs in s.tech_fDRshifting, ps in pss
+        tfs in tb_set || continue
+        nnLoad = get(p.flex_nnLoad, tfs, 0.0)
+        prof_t = get(p.profileType_tech, tfs, :Flat)
+        fa     = get(p.flex_activity, tfs, Symbol(""))
+        ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfs, fa, ps), 0.0)
+        for h in hours
+            prof = get(p.hourly_profiles, (h, prof_t), 0.0)
+            @constraint(m, dqDW[h, tfs, ps] + prof * ab_fa * (1.0 - nnLoad) * tu[tfs, ps] <= 0.0,
+                        base_name = "capDWdQs[$tfs,$h,$ps]")
+        end
+    end
+
+    # IESA-Opt 1.0 capacityDW_dQtfb (line 4290) for tech_fStorage (symmetric)
+    for tfb in s.tech_fStorage, ps in pss
+        fC = get(p.flex_capacity, (tfb, ps), 0.0)
+        for h in hours
+            @constraint(m, dqDW[h, tfb, ps] - fC * ts[tfb, ps] <= 0.0,
+                        base_name = "capDWdQb[$tfb,$h,$ps]")
+        end
+    end
+
+    # IESA-Opt 1.0 capacityDW_dQtfvc (line 4297) for tech_fEVcharging
+    for tfvc in s.tech_fEVcharging, ps in pss
+        tfvc in tb_set || continue
+        nnLoad = get(p.flex_nnLoad, tfvc, 0.0)
+        prof_t = get(p.profileType_tech, tfvc, :Flat)
+        fa     = get(p.flex_activity, tfvc, Symbol(""))
+        ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfvc, fa, ps), 0.0)
+        for h in hours
+            prof = get(p.hourly_profiles, (h, prof_t), 0.0)
+            @constraint(m, dqDW[h, tfvc, ps] + prof * ab_fa * (1.0 - nnLoad) * tu[tfvc, ps] <= 0.0,
+                        base_name = "capDWdQvc[$tfvc,$h,$ps]")
+        end
+    end
+
+    # IESA-Opt 1.0 capacityDW_dQtfvg (line 4305) for tech_fEVgrid (V2G):
+    #   dqDW <= ev_v2g * fC * (ts - tu * prof_EVuse / (avg_speed * (24 / hoursPerDayEffective)))
+    for tfvg in s.tech_fEVgrid, ps in pss
+        tfvg in tb_set || continue
+        fC = get(p.flex_capacity, (tfvg, ps), 0.0)
+        prof_ev = get(p.profileType_EVuse, tfvg, Symbol(""))
+        spd = get(p.avg_speed, tfvg, 0.0)
+        for h in hours
+                hpde = get(p.hoursPerDayEffective, h, Float64(p.hoursPer_day))
+                ratio = (prof_ev != Symbol("") && spd > 0.0 && hpde > 0.0) ?
+                    get(p.hourly_profiles, (h, prof_ev), 0.0) / (spd * (24.0 / hpde)) : 0.0
+            expr = AffExpr(0.0)
+            add_to_expression!(expr, 1.0, dqDW[h, tfvg, ps])
+            add_to_expression!(expr, -ev_v2g * fC, ts[tfvg, ps])
+            add_to_expression!(expr,  ev_v2g * fC * ratio, tu[tfvg, ps])
+            @constraint(m, expr <= 0.0, base_name = "capDWdQvg[$tfvg,$h,$ps]")
+        end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────
+    # IESA-Opt 1.0 lines 4332-4378: cumulativeUP_dQtfs / cumulativeDW_dQtfs.
+    #
+    # Per-day cumulative bound on DR-shifting flex (tech_fDRshifting):
+    #   Σ_{ih∈d} deltaQ_UP(ih,tfs,ps) >=  Σ_{ih∈d} prof(ih)·ab(tfs,fa,ps)·tu(tfs,ps)
+    #   Σ_{ih∈d} deltaQ_DW(ih,tfs,ps) <= -Σ_{ih∈d} prof(ih)·ab(tfs,fa,ps)·tu(tfs,ps)
+    # The hourly per-h bounds (capUPdQs / capDWdQ) imply the cumulative bound
+    # algebraically, so adding it is *redundant* for satisfaction but matches
+    # AIMMS's pre-presolve row count and may sharpen LP relaxations during
+    # Gurobi's barrier+crossover.
+    # ─────────────────────────────────────────────────────────────────────
+    if !isempty(s.tech_fDRshifting)
+        # Group hours by day once.
+        hours_by_d = Dict{Int,Vector{Int}}()
+        for h in hours
+            push!(get!(() -> Int[], hours_by_d, get(p.dayPer_hour, h, 0)), h)
+        end
+        days_sorted = sort!(collect(keys(hours_by_d)))
+        for tfs in s.tech_fDRshifting, ps in pss
+            tfs in tb_set || continue
+            prof_t = get(p.profileType_tech, tfs, :Flat)
+            fa     = get(p.flex_activity, tfs, Symbol(""))
+            ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfs, fa, ps), 0.0)
+            abs(ab_fa) <= _IJ_COEF_EPS && continue
+            for d in days_sorted
+                d == 0 && continue
+                hs = hours_by_d[d]
+                isempty(hs) && continue
+                psum = 0.0
+                for ih in hs
+                    psum += get(p.hourly_profiles, (ih, prof_t), 0.0)
                 end
-            elseif tf in fBattery_set && !(tf in fEV_set)
-                # capacityUP_dQtfb battery: ≥ −techStock × flex_capacity
-                if fC > 0.0
-                    @constraint(m, dqUP[h, tf, ps] + fC * ts[tf, ps] >= 0.0,
-                                base_name = "capUPdQb[$tf,$h,$ps]")
+                # cumulativeUP_dQtfs:  Σ dq_UP - prof_sum·ab·tu >= 0
+                expr_up = AffExpr(0.0)
+                for ih in hs
+                    add_to_expression!(expr_up, 1.0, dqUP[ih, tfs, ps])
                 end
-            elseif tf in fEV_set
-                # capacityUP_dQtfv EV: ≥ −(fC × stock + tu × ab_fa × prof)
-                expr = AffExpr(0.0)
-                add_to_expression!(expr, 1.0, dqUP[h, tf, ps])
-                add_to_expression!(expr, fC, ts[tf, ps])
-                if tf in tb_set
-                    add_to_expression!(expr, prof * ab_fa, tu[tf, ps])
+                coef = psum * ab_fa
+                abs(coef) <= _IJ_COEF_EPS || add_to_expression!(expr_up, -coef, tu[tfs, ps])
+                @constraint(m, expr_up >= 0.0, base_name = "cumUP_dQs[$tfs,$d,$ps]")
+                # cumulativeDW_dQtfs:  Σ dq_DW + prof_sum·ab·tu <= 0
+                expr_dw = AffExpr(0.0)
+                for ih in hs
+                    add_to_expression!(expr_dw, 1.0, dqDW[ih, tfs, ps])
                 end
-                @constraint(m, expr >= 0.0, base_name = "capUPdQv[$tf,$h,$ps]")
-            else
-                # capacityUP_dQtfs (short shift): ≥ −(fC × stock + prof × ab_fa × tu)
-                expr = AffExpr(0.0)
-                add_to_expression!(expr, 1.0, dqUP[h, tf, ps])
-                add_to_expression!(expr, fC, ts[tf, ps])
-                if tf in tb_set
-                    add_to_expression!(expr, prof * ab_fa, tu[tf, ps])
-                end
-                @constraint(m, expr >= 0.0, base_name = "capUPdQs[$tf,$h,$ps]")
+                abs(coef) <= _IJ_COEF_EPS || add_to_expression!(expr_dw, coef, tu[tfs, ps])
+                @constraint(m, expr_dw <= 0.0, base_name = "cumDW_dQs[$tfs,$d,$ps]")
             end
-            # ── DW bounds ──
-            if tf in fBattery_set && !(tf in fEV_set) && tf in fStorage_set == false
-                # capacityDW_dQtfb battery: ≤ +techStock × flex_capacity (symmetric)
-                if fC > 0.0
-                    @constraint(m, dqDW[h, tf, ps] - fC * ts[tf, ps] <= 0.0,
-                                base_name = "capDWdQb[$tf,$h,$ps]")
+        end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────
+    # IESA-Opt 1.0 lines 4318-4391: cumulativeUP_dQtfe / cumulativeDW_dQtfe.
+    #
+    # Per-quarter cumulative bound on BE-shifting flex (tech_fBEshifting):
+    #   Σ_{ih∈(qLower,qUpper]} deltaQ_UP(ih,tfe,ps) >= cumulativeUP_rhs(q,tfe,ps) × tu
+    #   Σ_{ih∈(qLower,qUpper]} deltaQ_DW(ih,tfe,ps) <= -cumulativeDW_rhs(q,tfe,ps) × tu
+    # where the RHS prefix sums use AIMMS lines 9156-9176:
+    #   helper(h,tfe,ps) = profile(h, profType(tfe)) × ab(tfe, flex_activity(tfe), ps)
+    #   qPrefix(h,tfe,ps) = Σ_{ih≤h} helper(ih,tfe,ps)
+    #   qUpper = min(card(hours), hoursPer_quarter × q)
+    #   qLower = max(0, hoursPer_quarter × (q-1))
+    #   qLowerUP = min(qUpper, qLower + 1)             (UP excludes first hour of quarter)
+    #   cumulativeUP_rhs(q,tfe,ps) = qPrefix(qUpper) − qPrefix(qLowerUP)
+    #   cumulativeDW_rhs(q,tfe,ps) = qPrefix(qUpper) − qPrefix(qLower)
+    # ─────────────────────────────────────────────────────────────────────
+    if !isempty(s.tech_fBEshifting) && !isempty(s.q_hourWindow)
+        n_h    = length(hours)
+        # IESA-Opt 1.0 uses hoursPer_quarter (FH) = 4. Julia mirrors via hoursPer_quarter_cluster.
+        hpq = max(1, p.hoursPer_quarter_cluster)
+        for tfe in s.tech_fBEshifting, ps in pss
+            tfe in tb_set || continue
+            prof_t = get(p.profileType_tech, tfe, :Flat)
+            fa     = get(p.flex_activity, tfe, Symbol(""))
+            ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfe, fa, ps), 0.0)
+            abs(ab_fa) <= _IJ_COEF_EPS && continue
+            # Prefix sum of helper(h) = profile(h, prof_t) × ab_fa.
+            qPrefix = Vector{Float64}(undef, n_h + 1)
+            qPrefix[1] = 0.0
+            running = 0.0
+            for (i, h) in enumerate(hours)
+                running += get(p.hourly_profiles, (h, prof_t), 0.0) * ab_fa
+                qPrefix[i + 1] = running
+            end
+            # qPrefix[k] = sum over hours[1..k-1]; index by (1-based) hour position.
+            for q in s.q_hourWindow
+                qUpper   = min(n_h, hpq * q)
+                qLower   = max(0,   hpq * (q - 1))
+                qLowerUP = min(qUpper, qLower + 1)
+                qUpper > qLower || continue
+                rhs_dw = qPrefix[qUpper + 1] - qPrefix[qLower + 1]
+                rhs_up = qPrefix[qUpper + 1] - qPrefix[qLowerUP + 1]
+                # Build LHS sums on hours[qLower+1 .. qUpper].
+                expr_up = AffExpr(0.0)
+                expr_dw = AffExpr(0.0)
+                for k in (qLower + 1):qUpper
+                    h_k = hours[k]
+                    add_to_expression!(expr_up, 1.0, dqUP[h_k, tfe, ps])
+                    add_to_expression!(expr_dw, 1.0, dqDW[h_k, tfe, ps])
                 end
-            else
-                # capacityDW_dQtfe/tfs/tfvc: ≤ -prof × ab_fa × tu × (1-nnLoad)
-                if abs(prof * ab_fa) > _IJ_COEF_EPS && tf in tb_set
-                    @constraint(m, dqDW[h, tf, ps] + prof * ab_fa * (1.0 - nnLoad) * tu[tf, ps] <= 0.0,
-                                base_name = "capDWdQ[$tf,$h,$ps]")
+                # cumulativeUP_dQtfe:  expr_up - rhs_up·tu >= 0
+                if abs(rhs_up) > _IJ_COEF_EPS
+                    add_to_expression!(expr_up, -rhs_up, tu[tfe, ps])
                 end
+                @constraint(m, expr_up >= 0.0, base_name = "cumUP_dQe[$tfe,$q,$ps]")
+                # cumulativeDW_dQtfe:  expr_dw + rhs_dw·tu <= 0
+                if abs(rhs_dw) > _IJ_COEF_EPS
+                    add_to_expression!(expr_dw, rhs_dw, tu[tfe, ps])
+                end
+                @constraint(m, expr_dw <= 0.0, base_name = "cumDW_dQe[$tfe,$q,$ps]")
             end
         end
     end
 end
 
-# IESA-Opt 1.0 lines 4216-4253 — flex closed-loop annual balances per window-type.
-#   sum_{ih in window} [dqUP × (1-loss_charge) + dqDW / (1-loss_disc)] = 0
+# IESA-Opt 1.0 lines 4129-4232 — long-term flex closed-loop balances via the
+# day-aggregated `deltaQd_UP / deltaQd_DW` Variables.
+#
+# AIMMS structure (IESA-Opt.ams):
+#   L4129/4134  deltaQd_UP/DW(d,tfl,ps) Variable-with-Definition:
+#               deltaQd_UP(d,tfl) = sum_{ih: dayPer_hour(ih)=d} deltaQ_UP(ih,tfl)
+#               deltaQd_DW(d,tfl) = sum_{ih: dayPer_hour(ih)=d} deltaQ_DW(ih,tfl)
+#   L4203 balanceD_deltaQd(d,tf_d):  chg·dqdUP + (1/disc)·dqdDW = 0
+#   L4207 balanceR_deltaQd(r,tf_r):  Σ_{d∈r} (chg·dqdUP + (1/disc)·dqdDW) = 0
+#   L4211 balanceW_deltaQd(w,tf_w):  Σ_{d∈w} ... = 0
+#   L4215 balanceM_deltaQd(m,tf_m):  Σ_{d∈m} ... = 0  (no tf_m in default_data → 0 rows)
+#   L4219 balanceS_deltaQd(s,tf_s):  Σ_{d∈s} ... = 0  (no tf_s in default_data → 0 rows)
+#   L4224 balanceB_deltaQd(b,tf_b):  Σ_{d∈b} ... = 0  (no tf_b in default_data → 0 rows)
+#   L4230 balanceY_deltaQd(tf_y):    Σ_d   ... = 0
+#   L4196 balanceQ_deltaQtfe(q,tfe): Σ_{ih: quarterPer_hour(ih)=q} chg·dqUP + (1/disc)·dqDW = 0
+#                                    (kept hour-indexed, BE-shifting only)
+#
+# Pre-2026-06-13 Julia code attempted to inline the daily/weekly sums directly
+# from `deltaQ_UP/DW` per (d,t) using `flex_range(t)` symbol comparisons against
+# `:var"1 day"`, etc. Those compares ALWAYS failed because the actual symbols
+# carry the bracketed code (`:var"1 day [d]"`), so the function emitted ZERO
+# `balanceD/R/W/Y_deltaQd` rows. The new implementation matches AIMMS literally
+# (deltaQd Variable-Definitions + per-window balance constraints).
 function _add_flex_closed_loop!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     s, p = md.sets, md.params
     vars.deltaQ_UP === nothing && return
     pss = s.periods_solve
-    dqUP = vars.deltaQ_UP
-    dqDW = vars.deltaQ_DW
+    dqUP  = vars.deltaQ_UP
+    dqDW  = vars.deltaQ_DW
+    dqdUP = vars.deltaQd_UP
+    dqdDW = vars.deltaQd_DW
 
-    # Helper: build the equality for one tech, one period, one set of hours
-    function _closure!(t::Symbol, ps::Int, hs::Vector{Int}, label::String)
-        isempty(hs) && return
-        chg = 1.0 - get(p.flex_loss_charge, t, 0.0)
-        disc = 1.0 - get(p.flex_loss_discharge_eff, t, 0.0)
-        disc <= 0.0 && (disc = 1.0)
-        expr = AffExpr(0.0)
-        for h in hs
-            add_to_expression!(expr, chg, dqUP[h, t, ps])
-            add_to_expression!(expr, 1.0 / disc, dqDW[h, t, ps])
-        end
-        @constraint(m, expr == 0.0, base_name = label)
-    end
-
-    # Pre-group hours by various windows
-    hours_by_q = Dict{Int,Vector{Int}}()
+    # ---- Pre-group hours by day (for the deltaQd Variable-Definitions) ----
     hours_by_d = Dict{Int,Vector{Int}}()
-    hours_by_w = Dict{Int,Vector{Int}}()
-    hours_by_m = Dict{Int,Vector{Int}}()
-    hours_by_seas = Dict{Int,Vector{Int}}()
-    hours_by_sem  = Dict{Int,Vector{Int}}()
-    hours_by_r    = Dict{Int,Vector{Int}}()
     for h in s.hours
-        push!(get!(() -> Int[], hours_by_q, get(p.quarterPer_hour, h, 0)), h)
-        push!(get!(() -> Int[], hours_by_d, get(p.dayPer_hour, h, 0)), h)
-        push!(get!(() -> Int[], hours_by_w, get(p.weekPer_hour, h, 0)), h)
-        push!(get!(() -> Int[], hours_by_m, get(p.monthPer_hour, h, 0)), h)
-        push!(get!(() -> Int[], hours_by_seas, get(p.seasonPer_hour, h, 0)), h)
-        push!(get!(() -> Int[], hours_by_sem, get(p.semesterPer_hour, h, 0)), h)
-        push!(get!(() -> Int[], hours_by_r, get(p.rangePer_hour, h, 0)), h)
+        d = get(p.dayPer_hour, h, 0)
+        d == 0 && continue
+        push!(get!(() -> Int[], hours_by_d, d), h)
     end
 
-    # tech_fStorage uses quarter-hour window (balanceQ_deltaQtfe)
-    for t in s.tech_fStorage, ps in pss, (q, hs) in hours_by_q
+    # ---- Pre-group hours by quarter (for balanceQ_deltaQtfe) ----
+    hours_by_q = Dict{Int,Vector{Int}}()
+    for h in s.hours
+        q = get(p.quarterPer_hour, h, 0)
         q == 0 && continue
-        _closure!(t, ps, hs, "balQ_dQe[$t,$q,$ps]")
+        push!(get!(() -> Int[], hours_by_q, q), h)
     end
-    # Range membership by flex_range field per tech
-    for t in s.tech_flexible, ps in pss
-        rng = get(p.flex_range, t, Symbol(""))
-        if rng == :var"1 day"
-            for (d, hs) in hours_by_d
-                d == 0 && continue
-                _closure!(t, ps, hs, "balD_dQ[$t,$d,$ps]")
+
+    # ---- Helpers: per-tech charge / discharge factors ----
+    _chg(t)  = 1.0 - get(p.flex_loss_charge, t, 0.0)
+    _disc(t) = (d = 1.0 - get(p.flex_loss_discharge_eff, t, 0.0); d <= 0.0 ? 1.0 : d)
+
+    # ----------------------------------------------------------------------
+    # IESA-Opt 1.0 L4129/4134 — deltaQd_UP / deltaQd_DW Variable Definitions
+    #     deltaQd_UP(d,tfl,ps) - sum_{ih in d} deltaQ_UP(ih,tfl,ps) = 0
+    #     deltaQd_DW(d,tfl,ps) - sum_{ih in d} deltaQ_DW(ih,tfl,ps) = 0
+    # ----------------------------------------------------------------------
+    if dqdUP !== nothing && dqdDW !== nothing
+        for tfl in s.tech_flexLT, ps in pss, d in s.days
+            hs = get(hours_by_d, d, Int[])
+            isempty(hs) && continue
+
+            expr_up = AffExpr(0.0)
+            add_to_expression!(expr_up, 1.0, dqdUP[d, tfl, ps])
+            for h in hs
+                add_to_expression!(expr_up, -1.0, dqUP[h, tfl, ps])
             end
-        elseif rng == :var"3 days"
-            for (r, hs) in hours_by_r
-                r == 0 && continue
-                _closure!(t, ps, hs, "balR_dQ[$t,$r,$ps]")
+            @constraint(m, expr_up == 0.0,
+                        base_name = "deltaQd_UP_definition[$d,$tfl,$ps]")
+
+            expr_dw = AffExpr(0.0)
+            add_to_expression!(expr_dw, 1.0, dqdDW[d, tfl, ps])
+            for h in hs
+                add_to_expression!(expr_dw, -1.0, dqDW[h, tfl, ps])
             end
-        elseif rng == :var"1 week"
-            for (w, hs) in hours_by_w
-                w == 0 && continue
-                _closure!(t, ps, hs, "balW_dQ[$t,$w,$ps]")
-            end
-        elseif rng == :var"1 month"
-            for (mo, hs) in hours_by_m
-                mo == 0 && continue
-                _closure!(t, ps, hs, "balM_dQ[$t,$mo,$ps]")
-            end
-        elseif rng == :var"1 season"
-            for (sn, hs) in hours_by_seas
-                sn == 0 && continue
-                _closure!(t, ps, hs, "balS_dQ[$t,$sn,$ps]")
-            end
-        elseif rng == :var"6 months"
-            for (b, hs) in hours_by_sem
-                b == 0 && continue
-                _closure!(t, ps, hs, "balB_dQ[$t,$b,$ps]")
-            end
-        elseif rng == :var"1 year"
-            _closure!(t, ps, collect(s.hours), "balY_dQ[$t,$ps]")
+            @constraint(m, expr_dw == 0.0,
+                        base_name = "deltaQd_DW_definition[$d,$tfl,$ps]")
         end
+
+        # ------------------------------------------------------------------
+        # balanceD_deltaQd (L4203):  chg·dqdUP[d] + (1/disc)·dqdDW[d] = 0
+        # ------------------------------------------------------------------
+        for tf_d in s.tech_flexD, ps in pss, d in s.days
+            haskey(hours_by_d, d) || continue
+            chg = _chg(tf_d); disc = _disc(tf_d)
+            @constraint(m,
+                chg * dqdUP[d, tf_d, ps] + (1.0 / disc) * dqdDW[d, tf_d, ps] == 0.0,
+                base_name = "balanceD_deltaQd[$d,$tf_d,$ps]")
+        end
+
+        # ------------------------------------------------------------------
+        # balanceR_deltaQd (L4207):  Σ_{d ∈ r} (chg·dqdUP + (1/disc)·dqdDW) = 0
+        # ------------------------------------------------------------------
+        days_by_r = Dict{Int,Vector{Int}}()
+        for d in s.days
+            r = get(p.rangePer_day, d, 0)
+            r == 0 && continue
+            push!(get!(() -> Int[], days_by_r, r), d)
+        end
+        for tf_r in s.tech_flexR, ps in pss, r in s.r_dayWindow
+            ds = get(days_by_r, r, Int[])
+            isempty(ds) && continue
+            chg = _chg(tf_r); disc = _disc(tf_r)
+            terms = AffExpr(0.0)
+            for d in ds
+                add_to_expression!(terms, chg, dqdUP[d, tf_r, ps])
+                add_to_expression!(terms, 1.0 / disc, dqdDW[d, tf_r, ps])
+            end
+            @constraint(m, terms == 0.0, base_name = "balanceR_deltaQd[$r,$tf_r,$ps]")
+        end
+
+        # ------------------------------------------------------------------
+        # balanceW_deltaQd (L4211):  Σ_{d ∈ w} (chg·dqdUP + (1/disc)·dqdDW) = 0
+        # ------------------------------------------------------------------
+        days_by_w = Dict{Int,Vector{Int}}()
+        for d in s.days
+            w = get(p.weekPer_day, d, 0)
+            w == 0 && continue
+            push!(get!(() -> Int[], days_by_w, w), d)
+        end
+        for tf_w in s.tech_flexW, ps in pss, w in s.weeks
+            ds = get(days_by_w, w, Int[])
+            isempty(ds) && continue
+            chg = _chg(tf_w); disc = _disc(tf_w)
+            terms = AffExpr(0.0)
+            for d in ds
+                add_to_expression!(terms, chg, dqdUP[d, tf_w, ps])
+                add_to_expression!(terms, 1.0 / disc, dqdDW[d, tf_w, ps])
+            end
+            @constraint(m, terms == 0.0, base_name = "balanceW_deltaQd[$w,$tf_w,$ps]")
+        end
+
+        # ------------------------------------------------------------------
+        # balanceM_deltaQd (L4215):  Σ_{d ∈ m} ... = 0
+        # (no `tech_flexM` member in default_data → 0 rows; loop is a no-op)
+        # ------------------------------------------------------------------
+        if !isempty(s.tech_flexM)
+            days_by_m = Dict{Int,Vector{Int}}()
+            for d in s.days
+                mo = get(p.monthPer_day, d, 0)
+                mo == 0 && continue
+                push!(get!(() -> Int[], days_by_m, mo), d)
+            end
+            for tf_m in s.tech_flexM, ps in pss, mo in s.months
+                ds = get(days_by_m, mo, Int[])
+                isempty(ds) && continue
+                chg = _chg(tf_m); disc = _disc(tf_m)
+                terms = AffExpr(0.0)
+                for d in ds
+                    add_to_expression!(terms, chg, dqdUP[d, tf_m, ps])
+                    add_to_expression!(terms, 1.0 / disc, dqdDW[d, tf_m, ps])
+                end
+                @constraint(m, terms == 0.0, base_name = "balanceM_deltaQd[$mo,$tf_m,$ps]")
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # balanceS_deltaQd (L4219):  Σ_{d ∈ s} ... = 0   (default_data → 0 rows)
+        # ------------------------------------------------------------------
+        if !isempty(s.tech_flexS)
+            days_by_seas = Dict{Int,Vector{Int}}()
+            for d in s.days
+                sn = get(p.seasonPer_day, d, 0)
+                sn == 0 && continue
+                push!(get!(() -> Int[], days_by_seas, sn), d)
+            end
+            for tf_s in s.tech_flexS, ps in pss, sn in s.seasons
+                ds = get(days_by_seas, sn, Int[])
+                isempty(ds) && continue
+                chg = _chg(tf_s); disc = _disc(tf_s)
+                terms = AffExpr(0.0)
+                for d in ds
+                    add_to_expression!(terms, chg, dqdUP[d, tf_s, ps])
+                    add_to_expression!(terms, 1.0 / disc, dqdDW[d, tf_s, ps])
+                end
+                @constraint(m, terms == 0.0, base_name = "balanceS_deltaQd[$sn,$tf_s,$ps]")
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # balanceB_deltaQd (L4224):  Σ_{d ∈ b} ... = 0   (default_data → 0 rows)
+        # ------------------------------------------------------------------
+        if !isempty(s.tech_flexB)
+            days_by_sem = Dict{Int,Vector{Int}}()
+            for d in s.days
+                b = get(p.semesterPer_day, d, 0)
+                b == 0 && continue
+                push!(get!(() -> Int[], days_by_sem, b), d)
+            end
+            for tf_b in s.tech_flexB, ps in pss, b in s.semesters
+                ds = get(days_by_sem, b, Int[])
+                isempty(ds) && continue
+                chg = _chg(tf_b); disc = _disc(tf_b)
+                terms = AffExpr(0.0)
+                for d in ds
+                    add_to_expression!(terms, chg, dqdUP[d, tf_b, ps])
+                    add_to_expression!(terms, 1.0 / disc, dqdDW[d, tf_b, ps])
+                end
+                @constraint(m, terms == 0.0, base_name = "balanceB_deltaQd[$b,$tf_b,$ps]")
+            end
+        end
+
+        # ------------------------------------------------------------------
+        # balanceY_deltaQd (L4230):  Σ_d (chg·dqdUP + (1/disc)·dqdDW) = 0
+        # ------------------------------------------------------------------
+        for tf_y in s.tech_flexY, ps in pss
+            chg = _chg(tf_y); disc = _disc(tf_y)
+            terms = AffExpr(0.0)
+            for d in s.days
+                haskey(hours_by_d, d) || continue
+                add_to_expression!(terms, chg, dqdUP[d, tf_y, ps])
+                add_to_expression!(terms, 1.0 / disc, dqdDW[d, tf_y, ps])
+            end
+            @constraint(m, terms == 0.0, base_name = "balanceY_deltaQd[$tf_y,$ps]")
+        end
+    end
+
+    # ----------------------------------------------------------------------
+    # balanceQ_deltaQtfe (L4196) — BE-shifting quarter-hour closure.
+    # Hour-indexed (NOT via deltaQd because BE shifting uses sub-day windows).
+    #     Σ_{ih: quarterPer_hour(ih)=q} chg·dqUP[ih] + (1/disc)·dqDW[ih] = 0
+    # ----------------------------------------------------------------------
+    for tfe in s.tech_fBEshifting, ps in pss, (q, hs) in hours_by_q
+        chg = _chg(tfe); disc = _disc(tfe)
+        terms = AffExpr(0.0)
+        for h in hs
+            add_to_expression!(terms, chg, dqUP[h, tfe, ps])
+            add_to_expression!(terms, 1.0 / disc, dqDW[h, tfe, ps])
+        end
+        @constraint(m, terms == 0.0, base_name = "balQ_dQe[$tfe,$q,$ps]")
     end
 end
 
@@ -810,6 +1212,64 @@ function _add_shedding!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 coef = shedVol * prof
                 abs(coef) <= _IJ_COEF_EPS || add_to_expression!(expr, coef, tu[tsh, ps])
                 @constraint(m, expr >= 0.0, base_name = "balH_dS[$tsh,$h,$ps]")
+            end
+            # nonPos_Shed: AIMMS emits this as an explicit row in addition to the
+            # nonpositive variable range, so keep the row for solver-facing parity.
+            @constraint(m, dS[h, tsh, ps] <= 0.0, base_name = "nonPos_Shed[$h,$tsh,$ps]")
+        end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────
+    # IESA-Opt 1.0 lines 4163-4185: balanceW_deltaS
+    #
+    # Sliding-window weekly shedding budget for ts_w in tech_shedW.
+    # For each day d ∈ days, sum deltaS_shed over the (cyclic) window of
+    # `shed_budget_horizon_days(ts_w)` consecutive days ending at d:
+    #   Σ_{ih in window} deltaS_shed >= -tu(ts_w,ps) × shed_volume(ts_w)
+    #                                   × Σ_{ih in window} profile(ih, profType(ts_w))
+    # ─────────────────────────────────────────────────────────────────────
+    if !isempty(s.tech_shedW)
+        days  = s.days
+        n_d   = length(days)
+        # Pre-group hours by day for fast window assembly.
+        hours_by_d = Dict{Int,Vector{Int}}()
+        for h in s.hours
+            push!(get!(() -> Int[], hours_by_d, get(p.dayPer_hour, h, 0)), h)
+        end
+        for tsw in s.tech_shedW, ps in pss
+            tsw in s.tech_balancers || continue
+            horizon = get(p.shed_budget_horizon_days, tsw, 0)
+            horizon > 0 || continue
+            shedVol = get(p.shed_volume, tsw, 0.0)
+            prof_t  = get(p.profileType_tech, tsw, :Flat)
+            for d in days
+                # Cyclic window of `horizon` consecutive days ending at d.
+                window_days = Int[]
+                for k in 0:(horizon - 1)
+                    dd = d - k
+                    while dd <= 0
+                        dd += n_d
+                    end
+                    push!(window_days, dd)
+                end
+                # Collect hours in window + accumulate profile sum.
+                hs_w   = Int[]
+                psum   = 0.0
+                for dd in window_days
+                    hs_d = get(hours_by_d, dd, Int[])
+                    for ih in hs_d
+                        push!(hs_w, ih)
+                        psum += get(p.hourly_profiles, (ih, prof_t), 0.0)
+                    end
+                end
+                isempty(hs_w) && continue
+                expr = AffExpr(0.0)
+                for ih in hs_w
+                    add_to_expression!(expr, 1.0, dS[ih, tsw, ps])
+                end
+                coef = shedVol * psum
+                abs(coef) <= _IJ_COEF_EPS || add_to_expression!(expr, coef, tu[tsw, ps])
+                @constraint(m, expr >= 0.0, base_name = "balW_dS[$tsw,$d,$ps]")
             end
         end
     end
@@ -943,13 +1403,20 @@ function _add_chp!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
             h_prev = i == 1 ? hours[end] : hours[i - 1]
             prof = get(p.hourly_profiles, (h, prof_t), 0.0)
             # balanceH_deltaHchp: deltaU_CHP × ab_prod − (CHP_eta/CHP_eps) × deltaP_CHP = 0
-            if abs(ab_prod) > _IJ_COEF_EPS && eta > 0.0
+            # IESA-Opt 1.0 IndexDomain (h, tk_h, ps) where tk_h ∈ tech_hourlyCHPflexH
+            # (CHP_range='1 hour [h]'). Daily/weekly CHP techs balance via balanceD/W_deltaHchp.
+            if tk in s.tech_hourlyCHPflexH && abs(ab_prod) > _IJ_COEF_EPS && eta > 0.0
                 @constraint(m, ab_prod * duCHP[h, tk, ps] - (eta / eps_) * dpCHP[h, tk, ps] == 0.0,
                             base_name = "balH_chp[$tk,$h,$ps]")
             end
             # capacityUP_deltaUchp: deltaU_CHP <=  tu × prof × dev_u
             # capacityDW_deltaUchp: deltaU_CHP >= -tu × prof × dev_u
-            if abs(prof * dev_u) > _IJ_COEF_EPS && tk in s.tech_balancers
+            # IESA-Opt 1.0 (line 3529-3536) IndexDomain (h, tk, ps) is UNFILTERED —
+            # the constraints are emitted even when prof=0 or dev_u=0, in which case they
+            # pin deltaU_CHP(h,tk,ps) = 0. Filtering by `prof * dev_u > eps` (as Julia did
+            # previously) silently lets deltaU_CHP run free at zero-profile hours, a real
+            # LP divergence (see fh-parity notes).
+            if tk in s.tech_balancers
                 @constraint(m, duCHP[h, tk, ps] - prof * dev_u * tu[tk, ps] <= 0.0,
                             base_name = "capUP_dU[$tk,$h,$ps]")
                 @constraint(m, duCHP[h, tk, ps] + prof * dev_u * tu[tk, ps] >= 0.0,
@@ -994,6 +1461,63 @@ function _add_chp!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                                 base_name = "rmpDW_dP[$tk,$h,$ps]")
                 end
             end
+        end
+    end
+
+    # ─────────────────────────────────────────────────────────────────────
+    # IESA-Opt 1.0 lines 3507-3527: balanceD_deltaHchp + balanceW_deltaHchp
+    #
+    # Daily / weekly aggregated CHP heat balance:
+    #   Σ_{ih in W} [(tu × profile + deltaU_CHP) × ab_prod − (eta/eps) × deltaP_CHP]
+    #     = Σ_{ih in W} (tu × profile × ab_prod)
+    # The (tu × profile × ab_prod) terms cancel between LHS and RHS, leaving:
+    #   Σ_{ih in W} [ab_prod × deltaU_CHP − (eta/eps) × deltaP_CHP] = 0
+    # for each daily window W=d (tk_d) and weekly window W=w (tk_w).
+    # ─────────────────────────────────────────────────────────────────────
+    hours_by_d = Dict{Int,Vector{Int}}()
+    hours_by_w = Dict{Int,Vector{Int}}()
+    if !isempty(s.tech_hourlyCHPflexD) || !isempty(s.tech_hourlyCHPflexW)
+        for h in s.hours
+            push!(get!(() -> Int[], hours_by_d, get(p.dayPer_hour, h, 0)), h)
+            push!(get!(() -> Int[], hours_by_w, get(p.weekPer_hour, h, 0)), h)
+        end
+    end
+
+    # balanceD_deltaHchp (FH equivalent of ts.jl balanceD_deltaHchp_TS).
+    for tk_d in s.tech_hourlyCHPflexD, ps in pss
+        prod_a  = get(p.CHP_prod, tk_d, Symbol(""))
+        ab_prod = prod_a == Symbol("") ? 0.0 : get(p.activity_balances, (tk_d, prod_a, ps), 0.0)
+        eta     = get(p.CHP_eta, tk_d, 0.0)
+        eps_    = max(get(p.CHP_eps, (tk_d, ps), 0.0), 0.01)
+        (abs(ab_prod) <= _IJ_COEF_EPS && eta <= 0.0) && continue
+        for (d, hs) in hours_by_d
+            d == 0 && continue
+            isempty(hs) && continue
+            expr = AffExpr(0.0)
+            for ih in hs
+                add_to_expression!(expr, ab_prod, duCHP[ih, tk_d, ps])
+                add_to_expression!(expr, -(eta / eps_), dpCHP[ih, tk_d, ps])
+            end
+            @constraint(m, expr == 0.0, base_name = "balD_chp[$tk_d,$d,$ps]")
+        end
+    end
+
+    # balanceW_deltaHchp (FH equivalent of ts.jl balanceW_deltaHchp_TS).
+    for tk_w in s.tech_hourlyCHPflexW, ps in pss
+        prod_a  = get(p.CHP_prod, tk_w, Symbol(""))
+        ab_prod = prod_a == Symbol("") ? 0.0 : get(p.activity_balances, (tk_w, prod_a, ps), 0.0)
+        eta     = get(p.CHP_eta, tk_w, 0.0)
+        eps_    = max(get(p.CHP_eps, (tk_w, ps), 0.0), 0.01)
+        (abs(ab_prod) <= _IJ_COEF_EPS && eta <= 0.0) && continue
+        for (w, hs) in hours_by_w
+            w == 0 && continue
+            isempty(hs) && continue
+            expr = AffExpr(0.0)
+            for ih in hs
+                add_to_expression!(expr, ab_prod, duCHP[ih, tk_w, ps])
+                add_to_expression!(expr, -(eta / eps_), dpCHP[ih, tk_w, ps])
+            end
+            @constraint(m, expr == 0.0, base_name = "balW_chp[$tk_w,$w,$ps]")
         end
     end
 end

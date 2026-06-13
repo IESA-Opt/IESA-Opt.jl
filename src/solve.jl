@@ -64,7 +64,7 @@ function build_fh_lp!(m::JuMP.Model, md::ModelData)
     @info "build_fh_lp! - adding policy constraints (FH)"
     flush(stderr)
     add_policy_constraints!(m, vars, md; mode = :fh)
-    @info "build_fh_lp! - adding cyclic-closure constraints (FH, no-op)"
+    @info "build_fh_lp! - adding cyclic-closure constraints (FH)"
     flush(stderr)
     add_cyclic_closures!(m, vars, md)
     @info "build_fh_lp! - setting objective (with hourly terms)"
@@ -166,8 +166,9 @@ function solve_annual!(md::ModelData, optimizer;
 
     if out_dir !== nothing
         mkpath(out_dir)
-        write_run_summary(rr, joinpath(out_dir, "run_summary.csv"))
-        write_run_statistics(rr, joinpath(out_dir, "run_statistics.csv"))
+        db_path = joinpath(out_dir, IESA_RESULTS_DUCKDB_FILE)
+        _remove_duckdb_database!(db_path)
+        write_run_statistics_parquet(rr, _duckdb_table_uri(db_path, "run_statistics"))
     end
 
     return rr, vars, m
