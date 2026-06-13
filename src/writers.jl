@@ -485,6 +485,7 @@ function write_tech_meta_parquet(vars::AnnualVars, md::ModelData, path::Abstract
     techs = md.sets.technologies
     n = length(techs)
     tech_col      = Vector{String}(undef, n)
+    name_col      = Vector{String}(undef, n)
     sector_col    = Vector{String}(undef, n)
     subsector_col = Vector{String}(undef, n)
     category_col  = Vector{String}(undef, n)
@@ -495,6 +496,7 @@ function write_tech_meta_parquet(vars::AnnualVars, md::ModelData, path::Abstract
     process_col   = Vector{String}(undef, n)
     for (i, t) in pairs(techs)
         tech_col[i] = string(t)
+        name_col[i] = string(get(p.tech_name, t, ""))
         sector_col[i] = string(get(p.tech_sector, t, Symbol("")))
         subsector_col[i] = string(get(p.tech_subsector, t, Symbol("")))
         category_col[i] = string(get(p.tech_category, t, Symbol("")))
@@ -512,6 +514,7 @@ function write_tech_meta_parquet(vars::AnnualVars, md::ModelData, path::Abstract
     end
     df = DataFrames.DataFrame(
         tech         = tech_col,
+        name         = name_col,
         sector       = sector_col,
         subsector    = subsector_col,
         category     = category_col,

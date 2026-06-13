@@ -984,7 +984,7 @@ async function refreshEmissions() {
     // Show the per-tech detail in the optional table so the user can see
     // which technologies sit inside each emission group.
     const detail = (payload.detailRows || []).filter(r => periodVal === "" || String(r.period) === String(periodVal));
-    renderTable("emissionsTable", detail.length ? detail : rows, 1000);
+    renderTable("emissionsTable", detail.length ? detail : rows, 1000, { valueShading: true });
     if (status) status.textContent = `${rows.length} group row(s) \u00b7 ${detail.length} tech row(s) \u00b7 group by ${groupBy}`;
   } catch (e) {
     setEmptyChart("emissionsChart", `Could not load emissions: ${e.message || e}`, "vstack-chart");
@@ -1016,7 +1016,7 @@ function renderSupplyDemand(payload) {
   if (!rows.length) { setEmptyChart("supplyDemandChart", "No supply or demand for this activity.", "vstack-chart"); $("supplyDemandTable").innerHTML=""; return; }
   const { categories, series } = buildVerticalSeriesFromRows(rows, "period", "tech", "value");
   renderVerticalStackedBars("supplyDemandChart", { categories, series, unit:"PJ", showNet:true, categoryLabel: per => `${per}` });
-  renderTable("supplyDemandTable", rows, 250);
+  renderTable("supplyDemandTable", rows, 250, { valueShading: true });
 }
 // Build categories + series for the vertical stacked-bar renderer from a flat
 // list of rows. `categoryKey` typically points at `period`, `seriesKey` at the
@@ -1108,7 +1108,7 @@ function niceTickStep(maxAbs) {
 // then numeric values at the very end.
 const COL_PRIORITY = {
   group: 1, name: 1, attribute: 1, component: 1, output: 1, outputId: 1, scenario: 1,
-  tech: 2, activity: 3,
+  tech: 2, tech_name: 2.5, activity: 3,
   sector: 5, subsector: 6, sector_kev: 7, category: 8, process_type: 9,
   node: 10, mode: 11, constraint: 12,
   termination_status: 13, solver: 14, solverVersion: 14, engine: 14,
@@ -1138,7 +1138,35 @@ function formatCell(col, v) {
   }
   return cell(v);
 }
-function renderTable(id, rows, limit=60) { const c=$(id); if (!c) return; if(!rows.length){ c.innerHTML=""; return; } const cols=reorderColumns(Object.keys(rows[0])); c.innerHTML=`<table><thead><tr>${cols.map(x=>`<th>${escapeHtml(x)}</th>`).join("")}</tr></thead><tbody>${rows.slice(0,limit).map(r=>`<tr>${cols.map(x=>`<td>${escapeHtml(formatCell(x, r[x]))}</td>`).join("")}</tr>`).join("")}</tbody></table>`; }
+function renderTable(id, rows, limit=60, options={}) {
+  const c = $(id); if (!c) return;
+  if (!rows.length) { c.innerHTML = ""; return; }
+  const cols = reorderColumns(Object.keys(rows[0]));
+  // Conditional formatting on the `value` column: positive green, negative
+  // red, alpha scaled by |value| / max(|value|) across the visible rows.
+  const shade = options.valueShading === true;
+  let maxAbs = 0;
+  if (shade) {
+    for (const r of rows.slice(0, limit)) {
+      const v = Number(r.value);
+      if (Number.isFinite(v)) maxAbs = Math.max(maxAbs, Math.abs(v));
+    }
+  }
+  const valueStyle = raw => {
+    if (!shade || maxAbs <= 0) return "";
+    const v = Number(raw);
+    if (!Number.isFinite(v) || v === 0) return "";
+    const a = 0.10 + 0.45 * Math.min(1, Math.abs(v) / maxAbs);
+    const rgb = v > 0 ? "76,175,80" : "229,83,80";
+    return `background-color:rgba(${rgb},${a.toFixed(3)});text-align:right;font-variant-numeric:tabular-nums;`;
+  };
+  c.innerHTML = `<table><thead><tr>${cols.map(x => `<th>${escapeHtml(x)}</th>`).join("")}</tr></thead>` +
+    `<tbody>${rows.slice(0, limit).map(r => `<tr>${cols.map(x => {
+      const style = (shade && x === "value") ? valueStyle(r[x]) : "";
+      const attr = style ? ` style="${style}"` : "";
+      return `<td${attr}>${escapeHtml(formatCell(x, r[x]))}</td>`;
+    }).join("")}</tr>`).join("")}</tbody></table>`;
+}
 function cell(v) { return typeof v === "number" ? fmt(v) : (v ?? ""); }
 function fmt(v) { const n=Number(v); if(!Number.isFinite(n)) return v===undefined||v===null?"":String(v); if(Math.abs(n)>=1000) return n.toLocaleString(undefined,{maximumFractionDigits:0}); if(Math.abs(n)>=1) return n.toLocaleString(undefined,{maximumFractionDigits:2}); return n.toLocaleString(undefined,{maximumFractionDigits:4}); }
 function escapeHtml(v) { return String(v ?? "").replace(/[&<>'"]/g, ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;","\"":"&quot;"}[ch])); }

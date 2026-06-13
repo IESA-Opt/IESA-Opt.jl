@@ -2576,6 +2576,16 @@ function _supply_demand_payload(out_dir::AbstractString, activity::AbstractStrin
     use = _read_result_df(out_dir, "tech_use")
     (isempty(bal) || isempty(use)) && return Dict("rows" => Vector{Dict{String,Any}}(), "supplyTotal" => 0.0, "demandTotal" => 0.0)
 
+    # Human-readable tech names (only present in tech_meta runs since the
+    # `name` column was added). Empty string when not available.
+    meta = _read_result_df(out_dir, "tech_meta")
+    tech_name_by = Dict{String,String}()
+    if !isempty(meta) && "name" in names(meta) && "tech" in names(meta)
+        for r in _df_rows(meta, 5_000)
+            tech_name_by[String(get(r, "tech", ""))] = String(get(r, "name", ""))
+        end
+    end
+
     periods = period === nothing ? sort!(unique(Int.(bal.period))) : [Int(period)]
     rows = Vector{Dict{String,Any}}()
     supply_total = 0.0
@@ -2596,6 +2606,7 @@ function _supply_demand_payload(out_dir::AbstractString, activity::AbstractStrin
         abs(contribution) < 1e-6 && continue
         push!(rows, Dict{String,Any}(
             "tech" => tech,
+            "tech_name" => get(tech_name_by, tech, ""),
             "period" => ps,
             "coef" => coef,
             "use" => u,
@@ -2694,11 +2705,21 @@ function _emissions_payload(out_dir::AbstractString, group_by::AbstractString)
 
     # Detail rows are sorted by period, then group (alphabetical), then by
     # |value| within each group so the dominant techs surface first.
+    tech_name_by = Dict{String,String}()
+    if !isempty(meta) && "name" in names(meta) && "tech" in names(meta)
+        for r in _df_rows(meta, 5_000)
+            tech_name_by[String(get(r, "tech", ""))] = String(get(r, "name", ""))
+        end
+    end
     detail_rows = Vector{Dict{String,Any}}()
     for ((g, tech, activity, ps), v) in tech_totals
         push!(detail_rows, Dict{String,Any}(
-            "group" => g, "tech" => tech, "activity" => activity,
-            "period" => ps, "value" => v,
+            "group" => g,
+            "tech" => tech,
+            "tech_name" => get(tech_name_by, tech, ""),
+            "activity" => activity,
+            "period" => ps,
+            "value" => v,
         ))
     end
     sort!(detail_rows; by = x -> (Int(x["period"]), String(x["group"]), -abs(Float64(x["value"]))))
