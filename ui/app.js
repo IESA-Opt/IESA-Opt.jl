@@ -1,4 +1,4 @@
-const state = { options: null, solvers: [], outputs: [], selectedOutputId: "", comparedOutputIds: [], currentJobId: null, pollTimer: null, resultsLoaded: false, statusTimer: null, statusPollIntervalMs: 1500, lastJobStatus: null, connectionLost: false, connRestoreTimer: null, connRestoreHide: null, latestResults: null, dispatchLegendOff: new Set(), customWorkbookPath: "", lastClickedOutputId: "", dispatchPayload: null, dispatchSelectedNode: "", dispatchSelectedPeriod: 0, dispatchFromHour: 1, dispatchToHour: 8760, dispatchLoading: false };
+const state = { options: null, solvers: [], outputs: [], selectedOutputId: "", comparedOutputIds: [], currentJobId: null, pollTimer: null, resultsLoaded: false, statusTimer: null, statusPollIntervalMs: 1500, lastJobStatus: null, connectionLost: false, connRestoreTimer: null, connRestoreHide: null, latestResults: null, dispatchLegendOff: new Set(), customWorkbookPath: "", lastClickedOutputId: "", dispatchPayload: null, dispatchSelectedNode: "", dispatchSelectedPeriod: 0, dispatchFromHour: 1, dispatchToHour: 8760, dispatchLoading: false, flexPayload: null, flexSelectedTech: "", flexSelectedPeriod: 0, flexFromHour: 1, flexToHour: 168, flexLoading: false };
 const DAYS_PER_YEAR = 365;
 const stages = [["reading","Read"],["preparing","Prepare"],["clustering","Cluster"],["generation","Generate"],["solve","Solve"],["writing","Write"]];
 const stageDescriptions = { idle:"Start a run to see each stage and solver output.", reading:"Julia is opening the workbook and loading the input tables into model data.", preparing:"Sets and derived parameters are being built for the selected solve years.", clustering:"Representative days and time-slice profiles are being prepared, unless full-hourly mode skipped this step.", generation:"JuMP variables, objective terms, and constraints are being generated before the solver starts.", solve:"The optimizer is running. Native solver messages and iteration lines appear in the log below when the solver writes them.", writing:"Solved values are being converted into DuckDB result tables, one output file at a time.", done:"The run finished and result tables are ready in the Results tab.", failed:"The run stopped during the last active stage. The log below contains the error details.", cancelled:"The run was stopped by the user. No results were saved." };
@@ -185,6 +185,11 @@ function bindControls() {
   const dispatchFrom = $("hourlyDispatchFrom"); if (dispatchFrom) dispatchFrom.addEventListener("change", () => { state.dispatchFromHour = clampHour(dispatchFrom.value, 1, state.dispatchToHour); dispatchFrom.value = state.dispatchFromHour; renderHourlyDispatch(state.dispatchPayload); });
   const dispatchTo = $("hourlyDispatchTo"); if (dispatchTo) dispatchTo.addEventListener("change", () => { state.dispatchToHour = clampHour(dispatchTo.value, state.dispatchFromHour, 8760); dispatchTo.value = state.dispatchToHour; renderHourlyDispatch(state.dispatchPayload); });
   const dispatchReset = $("hourlyDispatchReset"); if (dispatchReset) dispatchReset.addEventListener("click", () => { state.dispatchFromHour = 1; state.dispatchToHour = 8760; const f=$("hourlyDispatchFrom"); if (f) f.value = 1; const t=$("hourlyDispatchTo"); if (t) t.value = 8760; renderHourlyDispatch(state.dispatchPayload); });
+  const flexTech = $("flexTech"); if (flexTech) flexTech.addEventListener("change", () => { state.flexSelectedTech = flexTech.value || ""; refreshFlexibility(); });
+  const flexPeriod = $("flexPeriod"); if (flexPeriod) flexPeriod.addEventListener("change", () => { state.flexSelectedPeriod = Number(flexPeriod.value) || 0; refreshFlexibility(); });
+  const flexFrom = $("flexFrom"); if (flexFrom) flexFrom.addEventListener("change", () => { state.flexFromHour = clampHour(flexFrom.value, 1, state.flexToHour); flexFrom.value = state.flexFromHour; renderFlexibility(state.flexPayload); });
+  const flexTo = $("flexTo"); if (flexTo) flexTo.addEventListener("change", () => { state.flexToHour = clampHour(flexTo.value, state.flexFromHour, 8760); flexTo.value = state.flexToHour; renderFlexibility(state.flexPayload); });
+  const flexReset = $("flexReset"); if (flexReset) flexReset.addEventListener("click", () => { state.flexFromHour = 1; state.flexToHour = 168; const f=$("flexFrom"); if (f) f.value = 1; const t=$("flexTo"); if (t) t.value = 168; renderFlexibility(state.flexPayload); });
   const emGroup = $("emissionsGroupBy"); if (emGroup) emGroup.addEventListener("change", refreshEmissions);
   const emPeriod = $("emissionsPeriod"); if (emPeriod) emPeriod.addEventListener("change", refreshEmissions);
   const sdAct = $("supplyDemandActivity"); if (sdAct) sdAct.addEventListener("change", refreshSupplyDemand);
@@ -579,8 +584,10 @@ function renderComparisonProfilePlaceholder() {
   const msg = "Open one output run to inspect dispatch and supply/demand.";
   ["powerCapacityChart","emissionsChart","supplyDemandChart","co2PriceChart"].forEach(id => setEmptyChart(id, msg));
   setEmptyChart("hourlyDispatchChart", msg, "profile-chart");
-  ["powerCapacityTable","emissionsTable","supplyDemandTable","co2PriceTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
+  setEmptyChart("flexChart", msg, "profile-chart");
+  ["powerCapacityTable","emissionsTable","supplyDemandTable","co2PriceTable","flexIndicatorsTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
   const legend = $("hourlyDispatchLegend"); if (legend) legend.textContent="";
+  const flexLegend = $("flexLegend"); if (flexLegend) flexLegend.textContent="";
   const sdStatus = $("supplyDemandStatus"); if (sdStatus) sdStatus.textContent="";
   const emStatus = $("emissionsStatus"); if (emStatus) emStatus.textContent="";
 }
@@ -611,6 +618,17 @@ function renderResults(results) {
   const tInput = $("hourlyDispatchTo"); if (tInput) tInput.value = 8760;
   populateDispatchNodes(dispPayload);
   populateDispatchPeriods(dispPayload);
+  // Same setup for the flexibility panel that hangs below hourly dispatch.
+  const flexPayload = results.flexibility || { techs: [], periods: [], indicators: [], hours: [], reference: [], flex: [], shiftNet: [], price: [], available: false };
+  state.flexPayload = flexPayload;
+  state.flexSelectedTech = String(flexPayload.selectedTech || (flexPayload.techs?.[0]?.tech || ""));
+  state.flexSelectedPeriod = Number(flexPayload.selectedPeriod || (flexPayload.periods?.[flexPayload.periods.length - 1] || 0));
+  state.flexFromHour = 1;
+  state.flexToHour = 168;
+  const flexFromIn = $("flexFrom"); if (flexFromIn) flexFromIn.value = 1;
+  const flexToIn = $("flexTo"); if (flexToIn) flexToIn.value = 168;
+  populateFlexTechs(flexPayload);
+  populateFlexPeriods(flexPayload);
   populatePeriodSelect("emissionsPeriod", results.emissionGroupings?.periods || []);
   populateActivities(results.balanceActivities || { activities: [], periods: [] });
   populatePeriodSelect("supplyDemandPeriod", results.balanceActivities?.periods || []);
@@ -635,6 +653,7 @@ function renderResults(results) {
     () => { renderActivityPrices(results.activityPrices || []); },
     () => { renderPowerCapacities(results.powerCapacities || { rows: [], periods: [] }); },
     () => { renderHourlyDispatch(dispPayload); },
+    () => { renderFlexibility(flexPayload); },
     () => { refreshEmissions(); },
     () => { refreshSupplyDemand(); },
   ];
@@ -694,16 +713,18 @@ function setResultsLoadingState(message="Loading results…") {
   setLoadingChart("co2PriceChart", message);
   setLoadingChart("powerCapacityChart", message);
   setLoadingChart("hourlyDispatchChart", message, "profile-chart");
+  setLoadingChart("flexChart", message, "profile-chart");
   setLoadingChart("emissionsChart", message);
   setLoadingChart("supplyDemandChart", message);
-  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","emissionsTable","supplyDemandTable","activityPricesTable"].forEach(id => setLoadingTable(id));
+  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => setLoadingTable(id));
 }
 function setResultsErrorState(message) {
   const m = message || "Could not load results.";
   $("resultsOutput").textContent = m;
   ["timingChart","systemCostsChart","co2PriceChart","powerCapacityChart","emissionsChart","supplyDemandChart"].forEach(id => setEmptyChart(id, m));
   setEmptyChart("hourlyDispatchChart", m, "profile-chart");
-  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","emissionsTable","supplyDemandTable","activityPricesTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
+  setEmptyChart("flexChart", m, "profile-chart");
+  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
 }
 function first(rows) { return rows && rows.length ? rows[0] : {}; }
 function renderMetrics(results) { const t=first(results.timingSummary), s=first(results.runStatistics), c=first(results.totalCosts); const solver = t.solver ? `${t.solver}${t.solverVersion ? ` (${t.solverVersion})` : ""}` : ""; const items=[["Objective",fmt(c.value||s.objective||t.objective)],["Status",s.termination_status||t.termination_status||""],["Solver",solver],["Total seconds",fmt(t.total_sec||s.total_seconds)],["Solve seconds",fmt(t.solve_sec||s.solve_seconds)],["Rows / columns",`${fmt(t.n_rows||s.n_rows)} / ${fmt(t.n_cols||s.n_cols)}`]]; $("metricGrid").innerHTML=items.map(([k,v])=>`<div class="metric"><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join(""); }
@@ -959,6 +980,143 @@ function renderHourlyDispatch(payload) {
       } catch (_) { /* ignore */ }
     });
     c.__plotlyDispatchBound = true;
+  }
+}
+
+// --- Flexibility (reference vs flex demand) ---------------------------------
+// Mirrors the structure used by the Hourly Dispatch panel: a selector pair
+// (tech + period), a from/to hour window, and a render function that draws
+// reference (dotted grey), flex (solid blue), shiftNet (translucent bars),
+// and electricity price (red, secondary y-axis). The indicator table below
+// the chart aggregates per (tech, period) the same metrics as the
+// flex_report.py compute_indicators function.
+function populateFlexTechs(payload) {
+  const sel = $("flexTech"); if (!sel) return;
+  const techs = payload?.techs || [];
+  sel.innerHTML = techs.length
+    ? techs.map(t => {
+        const id = String(t.tech || "");
+        const nm = String(t.name || "").trim();
+        const label = nm && nm !== id ? `${nm} (${id})` : id;
+        return `<option value="${escapeHtml(id)}">${escapeHtml(label)}</option>`;
+      }).join("")
+    : `<option value="">(no flex tech)</option>`;
+  const want = state.flexSelectedTech || payload?.selectedTech || (techs[0]?.tech || "");
+  if (want && techs.some(t => String(t.tech) === want)) sel.value = want;
+  else if (techs.length) sel.value = String(techs[0].tech);
+  state.flexSelectedTech = sel.value || "";
+}
+function populateFlexPeriods(payload) {
+  const sel = $("flexPeriod"); if (!sel) return;
+  const periods = (payload?.periods || []).map(Number).filter(Number.isFinite);
+  sel.innerHTML = periods.map(p => `<option value="${p}">${p}</option>`).join("");
+  const want = String(state.flexSelectedPeriod || payload?.selectedPeriod || periods[periods.length - 1] || "");
+  if (want && periods.map(String).includes(want)) sel.value = want;
+  else if (periods.length) sel.value = String(periods[periods.length - 1]);
+  state.flexSelectedPeriod = Number(sel.value) || 0;
+}
+async function refreshFlexibility() {
+  if (!state.selectedOutputId || state.flexLoading) return;
+  state.flexLoading = true;
+  setLoadingChart("flexChart", "Loading flexibility profile…", "profile-chart");
+  const legend = $("flexLegend"); if (legend) legend.textContent = "Loading…";
+  try {
+    const body = { outputDir: state.selectedOutputId };
+    if (state.flexSelectedTech) body.tech = state.flexSelectedTech;
+    if (state.flexSelectedPeriod) body.period = state.flexSelectedPeriod;
+    const payload = await fetchJson("/api/outputs/flexibility", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    state.flexPayload = payload;
+    state.flexSelectedTech = payload.selectedTech || state.flexSelectedTech;
+    state.flexSelectedPeriod = payload.selectedPeriod || state.flexSelectedPeriod;
+    populateFlexTechs(payload);
+    populateFlexPeriods(payload);
+    renderFlexibility(payload);
+  } catch (e) {
+    setEmptyChart("flexChart", `Could not load flexibility profile: ${e.message || e}`, "profile-chart");
+    if (legend) legend.textContent = "Error";
+  } finally {
+    state.flexLoading = false;
+  }
+}
+function renderFlexibility(payload) {
+  const c = $("flexChart"); const legend = $("flexLegend"); if (!c) return;
+  const tableEl = $("flexIndicatorsTable");
+  if (!payload || payload.available === false) {
+    plotlyEmpty("flexChart", "No flexibility data available (run produced no shiftable demand, or hourly outputs were disabled).", "profile-chart");
+    if (legend) legend.textContent = "";
+    if (tableEl) tableEl.innerHTML = "";
+    return;
+  }
+  // Always (re)render the indicator table — it does not depend on the
+  // hour-range zoom.
+  if (tableEl) {
+    const inds = payload.indicators || [];
+    if (inds.length) renderTable("flexIndicatorsTable", inds, 500, { valueShading: true });
+    else { tableEl.className = "table-wrap empty-state"; tableEl.textContent = "No flexibility indicators available."; }
+  }
+
+  const hours = payload.hours || [];
+  const ref   = payload.reference || [];
+  const flx   = payload.flex || [];
+  const shift = payload.shiftNet || [];
+  const price = payload.price || [];
+  if (!hours.length) {
+    const techLabel = payload.selectedTech || "selected tech";
+    plotlyEmpty("flexChart", `No flexibility activity for ${techLabel} in period ${payload.selectedPeriod || ""}.`, "profile-chart");
+    if (legend) legend.textContent = "";
+    return;
+  }
+  const hoursLen = hours.length;
+  const maxHour = Math.max.apply(null, hours);
+  const fromHour = clampHour(state.flexFromHour, 1, maxHour);
+  const toHour = clampHour(state.flexToHour, fromHour, maxHour);
+  // Filter by the requested window (data is already sorted by hour).
+  const xs = [], yRef = [], yFlex = [], yShift = [], yPrice = [];
+  for (let i = 0; i < hours.length; i++) {
+    const h = Number(hours[i]);
+    if (h < fromHour || h > toHour) continue;
+    xs.push(h);
+    yRef.push(Number(ref[i] || 0));
+    yFlex.push(Number(flx[i] || 0));
+    yShift.push(Number(shift[i] || 0));
+    yPrice.push(Number(price[i] || 0));
+  }
+  if (!xs.length) {
+    plotlyEmpty("flexChart", "Empty range — adjust From/To hours.", "profile-chart");
+    if (legend) legend.textContent = "";
+    return;
+  }
+  // Match the AIMMS flex_report.py colour palette so the dashboard reads
+  // identically to the historical HTML reports.
+  const traces = [
+    { type:"bar", name:"net shift (flex - ref)", x:xs, y:yShift,
+      marker:{ color: yShift.map(v => v >= 0 ? "rgba(31,119,180,0.45)" : "rgba(214,39,40,0.45)") },
+      hovertemplate:"<b>shift</b><br>Hour %{x}: %{y:.4g}<extra></extra>" },
+    { type:"scatter", mode:"lines", name:"reference", x:xs, y:yRef,
+      line:{ color:"#666", dash:"dot", width:1.5 },
+      hovertemplate:"<b>reference</b><br>Hour %{x}: %{y:.4g}<extra></extra>" },
+    { type:"scatter", mode:"lines", name:"flex profile", x:xs, y:yFlex,
+      line:{ color:"#1f77b4", width:2 },
+      hovertemplate:"<b>flex</b><br>Hour %{x}: %{y:.4g}<extra></extra>" },
+    { type:"scatter", mode:"lines", name:"electricity price", x:xs, y:yPrice,
+      yaxis:"y2", line:{ color:"#d62728", width:1 },
+      hovertemplate:"<b>price</b><br>Hour %{x}: %{y:.4g}<extra></extra>" },
+  ];
+  const layout = plotlyBaseLayout({
+    height: 380,
+    barmode: "relative",
+    xaxis: { title: "Hour of year", gridcolor: "#eef2f5", range: [fromHour, toHour] },
+    yaxis: { title: "Demand (MW)", gridcolor: "#eef2f5", zeroline: true, zerolinecolor: "#0f2436", zerolinewidth: 1 },
+    yaxis2: { title: "Electricity price (EUR/MWh)", overlaying: "y", side: "right", showgrid: false, zeroline: false },
+    hovermode: "x unified",
+    legend: { orientation: "h", x: 0, y: -0.18, font: { size: 11 } },
+    margin: { t: 24, r: 80, b: 80, l: 80 },
+  });
+  plotlyRender("flexChart", traces, layout, "profile-chart plotly-chart");
+  if (legend) {
+    const techLabel = (payload.techs || []).find(t => String(t.tech) === String(payload.selectedTech));
+    const lblName = techLabel && techLabel.name ? `${techLabel.name} (${payload.selectedTech})` : String(payload.selectedTech || "");
+    legend.textContent = `${lblName} \u00b7 period ${payload.selectedPeriod || ""} \u00b7 hours ${fromHour}\u2013${toHour} of ${hoursLen} points`;
   }
 }
 function renderActivityPrices(rows) {

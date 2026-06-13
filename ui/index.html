@@ -139,6 +139,21 @@
             </div>
             <div id="hourlyDispatchChart" class="profile-chart empty-state">No results loaded.</div>
           </section>
+          <section class="panel span-2 single-only">
+            <div class="panel-title"><h2>Flexibility Analysis</h2>
+              <div class="panel-toolbar">
+                <label class="field inline"><span>Technology</span><select id="flexTech"></select></label>
+                <label class="field inline"><span>Year</span><select id="flexPeriod"></select></label>
+                <label class="field inline"><span>From hour</span><input type="number" id="flexFrom" min="1" max="8760" step="1" value="1" /></label>
+                <label class="field inline"><span>To hour</span><input type="number" id="flexTo" min="1" max="8760" step="1" value="168" /></label>
+                <button id="flexReset" type="button" class="secondary-button">Reset zoom</button>
+                <button type="button" class="toggle-table-button secondary-button" data-target="flexIndicatorsTable">Show indicators</button>
+                <span id="flexLegend" class="subtle"></span>
+              </div>
+            </div>
+            <div id="flexChart" class="profile-chart empty-state">No results loaded.</div>
+            <div id="flexIndicatorsTable" class="table-wrap hidden"></div>
+          </section>
           <section class="panel span-2 single-only"><div class="panel-title"><h2>Emissions</h2><div class="panel-toolbar"><label class="field inline"><span>Group by</span><select id="emissionsGroupBy"><option value="activity">Activity</option><option value="sector">Sector</option><option value="subsector">Subsector</option><option value="sector_kev">KEV Sector</option><option value="category">Category</option></select></label><label class="field inline"><span>Period</span><select id="emissionsPeriod"><option value="">All</option></select></label><span id="emissionsStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="emissionsTable">Show table</button></div></div><div id="emissionsChart" class="bar-chart empty-state">No emissions data.</div><div id="emissionsTable" class="table-wrap hidden"></div></section>
           <section class="panel span-2 single-only"><div class="panel-title"><h2>Supply / Demand by Activity</h2><div class="panel-toolbar"><label class="field inline"><span>Activity</span><select id="supplyDemandActivity"></select></label><label class="field inline"><span>Period</span><select id="supplyDemandPeriod"><option value="">All</option></select></label><span id="supplyDemandStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="supplyDemandTable">Show table</button></div></div><div id="supplyDemandChart" class="bar-chart empty-state">Select an activity to view supply and demand.</div><div id="supplyDemandTable" class="table-wrap hidden"></div></section>
         </section>
@@ -206,15 +221,16 @@
         <p>The single-run view shows these panels (each can be expanded to a data table via the <em>Show table</em> button):</p>
         <ul class="about-list">
           <li><strong>System Costs</strong> &mdash; total objective and breakdown by cost component, per period.</li>
-          <li><strong>Solve Time And Solver Stats</strong> &mdash; wall-clock time per pipeline stage plus solver settings used.</li>
+          <li><strong>Solve Time And Solver Stats</strong> &mdash; wall-clock time per pipeline stage plus solver settings used. Segments: <em>Queue</em> (time spent in the run queue), <em>Data read</em>, <em>Prepare</em> (derived parameters), <em>Cluster</em> (representative-day clustering, skipped in full-hourly mode), <em>Optimizer init</em> (license check + JuMP model construction), <em>Generate</em> (variables, constraints, objective), <em>Solve</em> (solver wall-clock), <em>Extract duals</em> (post-solve CO<sub>2</sub> / emission / activity price retrieval), <em>Write</em> (DuckDB output tables).</li>
           <li><strong>CO<sub>2</sub> Price</strong> &mdash; shadow price of the emission cap, per period.</li>
           <li><strong>Activity Prices</strong> &mdash; shadow prices of the energy balance constraints (commodity prices) per region.</li>
           <li><strong>Power System Capacities</strong> &mdash; installed generation, storage, and conversion capacities for the power system, per period.</li>
-          <li><strong>Hourly Dispatch</strong> &mdash; stacked-area dispatch profile over the chosen period and region. Use the period/region/cluster pickers above the chart to change scope; click legend entries to toggle technologies.</li>
+          <li><strong>Hourly Dispatch</strong> &mdash; stacked-area dispatch profile over the chosen period and region. Use the period/region/cluster pickers above the chart to change scope; click legend entries to toggle technologies. Trace labels read <em>Tech name (techID)</em>, taken from the workbook <code>Technologies</code> sheet.</li>
+          <li><strong>Flexibility Analysis</strong> &mdash; for one selected flex technology (storage, EV, demand response, gas buffer, etc.), shows the passive <em>reference</em> demand profile, the actual <em>flex</em> profile, the <em>net shift</em> (flex &minus; reference) as translucent bars, and the hourly electricity shadow price on a secondary axis. Below the chart, <em>Show indicators</em> reveals a per-(tech, period) table with ref/flex volumes, shift UP/DW totals, weighted average prices and the cost savings from arbitrage. Sign convention: positive shift means demand <em>increased</em> versus the reference (charging / load-up); negative means demand <em>decreased</em> (discharging / shedding).</li>
           <li><strong>Emissions</strong> &mdash; emissions per technology and sector, with optional net line.</li>
           <li><strong>Supply / Demand</strong> &mdash; positive flows above zero, negative flows mirrored below, with optional net line.</li>
         </ul>
-        <p>In compare mode the System Costs and Solve Time charts switch to a multi-run stacked view, and the comparison panel shows side-by-side timing and cost-component tables. The single-run-only panels (CO<sub>2</sub> Price, Activity Prices, Power Capacities, Hourly Dispatch, Emissions, Supply/Demand) are hidden because they refer to one run only &mdash; click a single row in the sidebar to bring them back.</p>
+        <p>In compare mode the System Costs and Solve Time charts switch to a multi-run stacked view, and the comparison panel shows side-by-side timing and cost-component tables. The single-run-only panels (CO<sub>2</sub> Price, Activity Prices, Power Capacities, Hourly Dispatch, Flexibility Analysis, Emissions, Supply/Demand) are hidden because they refer to one run only &mdash; click a single row in the sidebar to bring them back.</p>
 
         <h3>About tab</h3>
         <p>This page. Use the links above to reach the source code and the full documentation.</p>

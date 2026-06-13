@@ -112,6 +112,13 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         period_raw = _config_get(body, "period", nothing)
         period = period_raw === nothing ? nothing : (period_raw isa Integer ? Int(period_raw) : (period_raw isa AbstractString && !isempty(period_raw) ? parse(Int, period_raw) : nothing))
         return _json_response(_hourly_dispatch_payload(out_dir; node = node, period = period))
+    elseif method == "POST" && path == "/api/outputs/flexibility"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        tech = String(_config_get(body, "tech", ""))
+        period_raw = _config_get(body, "period", nothing)
+        period = period_raw === nothing ? nothing : (period_raw isa Integer ? Int(period_raw) : (period_raw isa AbstractString && !isempty(period_raw) ? parse(Int, period_raw) : nothing))
+        return _json_response(_flexibility_payload(out_dir; tech = tech, period = period))
     elseif method == "POST" && path == "/api/outputs/compare"
         body = _json_body(req)
         return _json_response(_compare_output_runs(_as_string_vector(_config_get(body, "outputDirs", String[]))))
@@ -2119,6 +2126,7 @@ function _read_ui_results(out_dir::AbstractString)
         "nodes" => nodes_list,
         "powerCapacities" => _power_capacities(out_dir),
         "hourlyDispatch" => _hourly_dispatch_payload(out_dir),
+        "flexibility" => _flexibility_payload(out_dir),
         "hourlyProfiles" => _hourly_profile_preview(out_dir),
         "balanceActivities" => _balance_activity_options(out_dir),
         "emissionGroupings" => _emission_grouping_options(out_dir),
@@ -2553,6 +2561,160 @@ function _hourly_dispatch_payload(out_dir::AbstractString; node::AbstractString 
         "series" => series_out,
         "rows" => Vector{Dict{String,Any}}(),  # legacy field; series is the new API
         "mode" => String(mode),
+    )
+end
+
+# ----------------------------------------------------------------------------
+# Flexibility (reference vs flex demand profile, per flex tech)
+# ----------------------------------------------------------------------------
+# Reads the AIMMS-compatible `flexibility_profile_price_h` parquet/table
+# produced by `write_flexibility_profile_parquet`.  Returns the union of:
+#   - tech selector list (with human names from tech_meta, ranked by
+#     |shiftNet_h| so the most "active" flex tech is preselected)
+#   - period selector list
+#   - per-hour series (reference / flex / shiftNet / price) for the
+#     requested (tech, period) — or the auto-selected default
+#   - per-tech/period indicator rows (n_hours, ref/flex volume, shift UP/DW,
+#     cost savings, average prices weighted by activity)
+function _flexibility_payload(out_dir::AbstractString; tech::AbstractString = "", period::Union{Nothing,Integer} = nothing)
+    df = _read_result_df(out_dir, "flexibility_profile_price_h")
+    empty_payload = Dict(
+        "techs"          => Vector{Dict{String,Any}}(),
+        "periods"        => Int[],
+        "selectedTech"   => "",
+        "selectedPeriod" => 0,
+        "hours"          => Int[],
+        "reference"      => Float64[],
+        "flex"           => Float64[],
+        "shiftNet"       => Float64[],
+        "price"          => Float64[],
+        "indicators"     => Vector{Dict{String,Any}}(),
+        "available"      => false,
+    )
+    isempty(df) && return empty_payload
+    needed = ["hour", "technology", "period", "referenceProfile_h", "shiftNet_h", "flexProfile_h", "electricityPrice_h"]
+    all(c in names(df) for c in needed) || return empty_payload
+
+    # Look up human-readable tech names for the selector.
+    meta = _read_result_df(out_dir, "tech_meta")
+    name_by_tech = Dict{String,String}()
+    if !isempty(meta) && "tech" in names(meta) && "name" in names(meta)
+        for r in _df_rows(meta, 5_000)
+            name_by_tech[String(get(r, "tech", ""))] = String(get(r, "name", ""))
+        end
+    end
+
+    # Aggregate per (tech, period) — used both for the selector ranking and
+    # for the indicator table (mirrors compute_indicators in flex_report.py).
+    indicators = Vector{Dict{String,Any}}()
+    tech_shift = Dict{String,Float64}()
+    periods_seen = Set{Int}()
+    techs_seen = Set{String}()
+    by_pair = Dict{Tuple{String,Int},Tuple{Int,Float64,Float64,Float64,Float64,Float64,Float64,Float64,Float64,Float64,Float64}}()
+    # tuple = (n, ref_sum, flex_sum, shift_pos, shift_neg, shift_abs,
+    #          w_ref_price_num, w_ref_w, w_flex_price_num, w_flex_w, cost_ref - cost_flex)
+    for r in _df_rows(df, 2_000_000)
+        t = String(get(r, "technology", ""))
+        ps = Int(get(r, "period", 0))
+        push!(techs_seen, t)
+        push!(periods_seen, ps)
+        ref = Float64(get(r, "referenceProfile_h", 0.0))
+        flx = Float64(get(r, "flexProfile_h", 0.0))
+        sh  = Float64(get(r, "shiftNet_h", 0.0))
+        pr  = Float64(get(r, "electricityPrice_h", 0.0))
+        prev = get(by_pair, (t, ps), (0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
+        n          = prev[1] + 1
+        ref_sum    = prev[2] + ref
+        flex_sum   = prev[3] + flx
+        shift_pos  = prev[4] + max(0.0, sh)
+        shift_neg  = prev[5] + min(0.0, sh)
+        shift_abs  = prev[6] + abs(sh)
+        wrp        = prev[7] + pr * abs(ref)
+        wrw        = prev[8] + abs(ref)
+        wfp        = prev[9] + pr * abs(flx)
+        wfw        = prev[10] + abs(flx)
+        savings    = prev[11] + pr * (ref - flx)   # cost_ref - cost_flex
+        by_pair[(t, ps)] = (n, ref_sum, flex_sum, shift_pos, shift_neg, shift_abs,
+                            wrp, wrw, wfp, wfw, savings)
+        tech_shift[t] = get(tech_shift, t, 0.0) + abs(sh)
+    end
+
+    for ((t, ps), v) in by_pair
+        n = v[1]
+        ref_sum, flex_sum, shift_pos, shift_neg, shift_abs = v[2], v[3], v[4], v[5], v[6]
+        wrp, wrw, wfp, wfw, savings = v[7], v[8], v[9], v[10], v[11]
+        ref_price  = wrw > 1e-12 ? wrp / wrw : 0.0
+        flex_price = wfw > 1e-12 ? wfp / wfw : 0.0
+        push!(indicators, Dict{String,Any}(
+            "tech"                   => t,
+            "tech_name"              => get(name_by_tech, t, ""),
+            "period"                 => ps,
+            "n_hours"                => n,
+            "ref_volume"             => ref_sum,
+            "flex_volume"            => flex_sum,
+            "shift_UP"               => shift_pos,
+            "shift_DW"               => -shift_neg,
+            "shift_abs"              => shift_abs,
+            "ref_avg_price"          => ref_price,
+            "flex_avg_price"         => flex_price,
+            "cost_savings"           => savings,
+        ))
+    end
+    sort!(indicators; by = x -> (-Float64(get(x, "shift_abs", 0.0)), String(get(x, "tech", ""))))
+
+    periods_avail = sort!(collect(periods_seen))
+    # Tech selector ordered by total |shiftNet|, descending.
+    techs_sorted = sort!(collect(techs_seen); by = t -> -get(tech_shift, t, 0.0))
+    tech_list = Vector{Dict{String,Any}}()
+    for t in techs_sorted
+        push!(tech_list, Dict{String,Any}(
+            "tech"  => t,
+            "name"  => get(name_by_tech, t, ""),
+            "shift_abs" => get(tech_shift, t, 0.0),
+        ))
+    end
+
+    sel_tech = String(tech)
+    if isempty(sel_tech) || !(sel_tech in techs_sorted)
+        sel_tech = isempty(techs_sorted) ? "" : techs_sorted[1]
+    end
+    sel_period = period === nothing ? (isempty(periods_avail) ? 0 : periods_avail[end]) : Int(period)
+    sel_period in periods_avail || (sel_period = isempty(periods_avail) ? 0 : periods_avail[end])
+
+    # Filter rows for the requested (tech, period) and emit aligned series.
+    hours_out = Int[]
+    ref_out   = Float64[]
+    flex_out  = Float64[]
+    shift_out = Float64[]
+    price_out = Float64[]
+    if !isempty(sel_tech) && sel_period > 0
+        mask = (String.(df.technology) .== sel_tech) .& (Int.(df.period) .== sel_period)
+        sub = df[mask, :]
+        if !isempty(sub)
+            # Sort by hour to make the line chart monotonic.
+            ord = sortperm(Int.(sub.hour))
+            for i in ord
+                push!(hours_out, Int(sub.hour[i]))
+                push!(ref_out,   Float64(sub.referenceProfile_h[i]))
+                push!(flex_out,  Float64(sub.flexProfile_h[i]))
+                push!(shift_out, Float64(sub.shiftNet_h[i]))
+                push!(price_out, Float64(sub.electricityPrice_h[i]))
+            end
+        end
+    end
+
+    return Dict(
+        "techs"          => tech_list,
+        "periods"        => periods_avail,
+        "selectedTech"   => sel_tech,
+        "selectedPeriod" => sel_period,
+        "hours"          => hours_out,
+        "reference"      => ref_out,
+        "flex"           => flex_out,
+        "shiftNet"       => shift_out,
+        "price"          => price_out,
+        "indicators"     => indicators,
+        "available"      => true,
     )
 end
 
