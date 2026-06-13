@@ -171,7 +171,7 @@
           <li><strong>Time slicing</strong> &mdash; when on, the model runs on representative days; when off, it runs on full chronological hours.</li>
           <li><strong>Representative days</strong> &mdash; number of typical days the clustering algorithm produces (only relevant with time slicing on).</li>
           <li><strong>Time slices</strong> &mdash; total operating time slices used by the model, derived from representative days &times; hours per day.</li>
-          <li><strong>Hours in a day</strong> &mdash; temporal resolution within a representative day (1, 2, 3, 4, 6, 8, 12, 24 hours per slice).</li>
+          <li><strong>Hours in a day</strong> &mdash; number of intra-day time slices in a representative day. The 24 hours of the day are aggregated into this many sequential clusters, so chronology within the day is preserved (24 = full hourly resolution, 12 = pairs of consecutive hours, 8 = triplets, 6 = four-hour slices, 4 = six-hour slices, 3 = eight-hour slices, 2 = twelve-hour slices, 1 = single daily slice).</li>
           <li><strong>Clustering approach</strong> &mdash; algorithm used to pick representative days (e.g. <em>k-means</em>, <em>hierarchical</em>).</li>
           <li><strong>Extreme days</strong> &mdash; how many extreme days (peak demand, low VRES) are forced into the representative-day set on top of the regular clusters.</li>
           <li><strong>Hourly reports</strong> &mdash; if checked, hourly profiles are written to the output database (larger files, richer plots).</li>
