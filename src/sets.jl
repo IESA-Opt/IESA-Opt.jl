@@ -1,7 +1,8 @@
 # =============================================================================
 # sets.jl — Derived set computation
 #
-# Ported from `Backup/IESA-J/src/sets.jl::derive_sets!` with adaptations:
+# Ported from the legacy IESA-Opt Julia prototype's `src/sets.jl::derive_sets!`
+# with adaptations:
 #   - Operates on a `ModelData` wrapper (md.sets / md.params) instead of (s, p)
 #   - All keys are Symbol instead of String
 #   - String-valued IESA-Opt 1.0 enum literals are compared via Symbol comparison

@@ -1,13 +1,13 @@
 using Documenter
-using IESA_J
+using IESAOpt
 
-DocMeta.setdocmeta!(IESA_J, :DocTestSetup, :(using IESA_J); recursive = true)
+DocMeta.setdocmeta!(IESAOpt, :DocTestSetup, :(using IESAOpt); recursive = true)
 
 build_dir = get(ENV, "DOCUMENTER_BUILD_DIR", "build")
 clean_build = lowercase(get(ENV, "DOCUMENTER_CLEAN", "true")) != "false"
 
 makedocs(
-    modules = [IESA_J],
+    modules = [IESAOpt],
     authors = "TNO IESA team",
     sitename = "IESA-Opt.jl",
     build = build_dir,

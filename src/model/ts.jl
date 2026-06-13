@@ -32,27 +32,27 @@ processed by `build_temporal_clusters!`.
 function add_ts_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     @info "  add_ts_constraints! - hourly/daily balance + capacity"
     flush(stderr)
-    if get(ENV, "IESA_J_TS_SKIP_BALANCE_H", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_BALANCE_H", "0") != "1"
         _add_balance_hourly_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED balance hourly (env override)"
     end
-    if get(ENV, "IESA_J_TS_SKIP_BALANCE_D", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_BALANCE_D", "0") != "1"
         _add_balance_daily_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED balance daily (env override)"
     end
-    if get(ENV, "IESA_J_TS_SKIP_CAPACITY_H", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_CAPACITY_H", "0") != "1"
         _add_capacity_hourly_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED capacity hourly (env override)"
     end
-    if get(ENV, "IESA_J_TS_SKIP_RAMPING_H", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_RAMPING_H", "0") != "1"
         _add_ramping_hourly_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED ramping hourly (env override)"
     end
-    if get(ENV, "IESA_J_ENABLE_LINKED_XC", "0") == "1" && get(ENV, "IESA_J_TS_SKIP_LINKED_XC", "0") != "1"
+    if get(ENV, "IESA_OPT_ENABLE_LINKED_XC", "0") == "1" && get(ENV, "IESA_OPT_TS_SKIP_LINKED_XC", "0") != "1"
         _add_linked_hourly_XC_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED linked hourly XC (env override)"
@@ -60,17 +60,17 @@ function add_ts_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
 
     @info "  add_ts_constraints! - storage state + flex bounds"
     flush(stderr)
-    if get(ENV, "IESA_J_TS_SKIP_STORAGE_STATE", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_STORAGE_STATE", "0") != "1"
         _add_storage_state_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED storage state (env override)"
     end
-    if get(ENV, "IESA_J_TS_SKIP_FLEX_BOUNDS", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_FLEX_BOUNDS", "0") != "1"
         _add_flex_bounds_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED flex bounds (env override)"
     end
-    if get(ENV, "IESA_J_TS_SKIP_FLEX_CLOSED", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_FLEX_CLOSED", "0") != "1"
         _add_flex_closed_loop_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED flex closed loop (env override)"
@@ -78,12 +78,12 @@ function add_ts_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
 
     @info "  add_ts_constraints! - reservoir + gas buffer"
     flush(stderr)
-    if get(ENV, "IESA_J_TS_SKIP_RESERVOIR", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_RESERVOIR", "0") != "1"
         _add_reservoir_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED reservoir (env override)"
     end
-    if get(ENV, "IESA_J_TS_SKIP_GASBUFFER", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_GASBUFFER", "0") != "1"
         _add_gasbuffer_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED gas buffer (env override)"
@@ -91,23 +91,23 @@ function add_ts_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
 
     @info "  add_ts_constraints! - shedding + backlog + CHP"
     flush(stderr)
-    if get(ENV, "IESA_J_TS_SKIP_SHEDDING", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_SHEDDING", "0") != "1"
         _add_shedding_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED shedding (env override)"
     end
-    if get(ENV, "IESA_J_TS_SKIP_BACKLOG", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_BACKLOG", "0") != "1"
         _add_backlog_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED backlog (env override)"
     end
-    if get(ENV, "IESA_J_TS_SKIP_CHP", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_CHP", "0") != "1"
         _add_chp_TS!(m, vars, md)
     else
         @info "  add_ts_constraints! - SKIPPED CHP (env override)"
     end
 
-    if get(ENV, "IESA_J_TS_SKIP_ANCHOR", "0") != "1"
+    if get(ENV, "IESA_OPT_TS_SKIP_ANCHOR", "0") != "1"
         @info "  add_ts_constraints! - calendar-day storage anchor (Phase 4/5)"
         flush(stderr)
         _add_anchor_constraints_TS!(m, vars, md)
@@ -706,15 +706,15 @@ function _add_flex_bounds_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     ev_v2g = p.ev_v2g_power_fraction_default
 
     # Fine-grained env toggles for diagnostics
-    skip_up_BE = get(ENV, "IESA_J_TS_SKIP_FLEXBND_UP_BE", "0") == "1"
-    skip_up_DR = get(ENV, "IESA_J_TS_SKIP_FLEXBND_UP_DR", "0") == "1"
-    skip_up_ST = get(ENV, "IESA_J_TS_SKIP_FLEXBND_UP_ST", "0") == "1"
-    skip_up_EV = get(ENV, "IESA_J_TS_SKIP_FLEXBND_UP_EV", "0") == "1"
-    skip_dw_BE = get(ENV, "IESA_J_TS_SKIP_FLEXBND_DW_BE", "0") == "1"
-    skip_dw_DR = get(ENV, "IESA_J_TS_SKIP_FLEXBND_DW_DR", "0") == "1"
-    skip_dw_ST = get(ENV, "IESA_J_TS_SKIP_FLEXBND_DW_ST", "0") == "1"
-    skip_dw_EVc = get(ENV, "IESA_J_TS_SKIP_FLEXBND_DW_EVC", "0") == "1"
-    skip_dw_EVg = get(ENV, "IESA_J_TS_SKIP_FLEXBND_DW_EVG", "0") == "1"
+    skip_up_BE = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_UP_BE", "0") == "1"
+    skip_up_DR = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_UP_DR", "0") == "1"
+    skip_up_ST = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_UP_ST", "0") == "1"
+    skip_up_EV = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_UP_EV", "0") == "1"
+    skip_dw_BE = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_DW_BE", "0") == "1"
+    skip_dw_DR = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_DW_DR", "0") == "1"
+    skip_dw_ST = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_DW_ST", "0") == "1"
+    skip_dw_EVc = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_DW_EVC", "0") == "1"
+    skip_dw_EVg = get(ENV, "IESA_OPT_TS_SKIP_FLEXBND_DW_EVG", "0") == "1"
 
     # IESA-Opt 1.0 capacityUP_dQtfe_TS (line 4732) for tech_fBEshifting
     if !skip_up_BE

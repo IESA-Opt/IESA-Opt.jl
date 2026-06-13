@@ -13,7 +13,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
-using IESA_J
+using IESAOpt
 using JuMP
 using XLSX
 
@@ -24,7 +24,7 @@ isfile(DB_PATH) || error("Database not found at $DB_PATH")
 
 @info "run_ts_smoke.jl: reading database from $DB_PATH"
 t0 = time()
-md = IESA_J.read_data_cached(DB_PATH)
+md = IESAOpt.read_data_cached(DB_PATH)
 @info "read_data_cached done" elapsed_s = round(time() - t0, digits = 1)
 
 # Limit to single 2050 period (matches IESA-Opt 1.0 small-run config)
@@ -38,19 +38,19 @@ md.params.hoursPer_day_cluster = 24
 md.params.clustering_approach  = :kmeans_avg
 
 @info "derive_sets! + compute_derived_params!"
-IESA_J.derive_sets!(md)
-IESA_J.compute_derived_params!(md)
+IESAOpt.derive_sets!(md)
+IESAOpt.compute_derived_params!(md)
 
 @info "build_temporal_clusters! (rd=$(md.params.n_repDays))"
 t0 = time()
-IESA_J.build_temporal_clusters!(md)
+IESAOpt.build_temporal_clusters!(md)
 @info "clustering done" elapsed_s = round(time() - t0, digits = 1) n_repDays = md.params.n_repDays n_hours_cluster = length(md.sets.hours_cluster)
 
 @info "build_ts_lp! (no optimizer)"
 m = Model()
-IESA_J.apply_lp_generation_speedups!(m)
+IESAOpt.apply_lp_generation_speedups!(m)
 t0 = time()
-vars = IESA_J.build_ts_lp!(m, md)
+vars = IESAOpt.build_ts_lp!(m, md)
 build_s = round(time() - t0, digits = 1)
 
 n_rows = num_constraints(m; count_variable_in_set_constraints = false)

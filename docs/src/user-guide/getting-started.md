@@ -38,7 +38,7 @@ The default solver presets are defined in `src/solver_settings.jl` and explained
 Check the Gurobi preset from Julia:
 
 ```powershell
-julia --project=. -e "using IESA_J; display(IESA_J.default_gurobi_attributes())"
+julia --project=. -e "using IESAOpt; display(IESAOpt.default_gurobi_attributes())"
 ```
 
 If using Gurobi for production runs, verify that Julia can load Gurobi.jl and that the license is active:

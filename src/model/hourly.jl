@@ -34,7 +34,7 @@ function add_hourly_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     _add_balance_daily!(m, vars, md)
     _add_capacity_hourly!(m, vars, md)
     _add_ramping_hourly!(m, vars, md)
-    if get(ENV, "IESA_J_ENABLE_LINKED_XC", "0") == "1"
+    if get(ENV, "IESA_OPT_ENABLE_LINKED_XC", "0") == "1"
         _add_linked_hourly_XC!(m, vars, md)
     end
 

@@ -17,7 +17,7 @@
 #   julia --project=. scripts/run_fh_smoke.jl
 # =============================================================================
 
-using IESA_J
+using IESAOpt
 using JuMP
 using Logging
 

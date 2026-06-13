@@ -18,7 +18,7 @@ Usage:
 ```julia
 using Gurobi, JuMP
 m = Model(Gurobi.Optimizer)
-for (k, v) in IESA_J.default_gurobi_attributes()
+for (k, v) in IESAOpt.default_gurobi_attributes()
     set_optimizer_attribute(m, k, v)
 end
 ```
@@ -96,8 +96,8 @@ ready to pass into `Model(...)`. Throws an informative error if Gurobi.jl
 is not installed in the active environment.
 
 ```julia
-using JuMP, IESA_J
-m = Model(IESA_J.gurobi_optimizer())
+using JuMP, IESAOpt
+m = Model(IESAOpt.gurobi_optimizer())
 # ... build constraints ...
 optimize!(m)
 ```
@@ -107,9 +107,9 @@ function gurobi_optimizer(; attrs::AbstractDict = default_gurobi_attributes())
         error("""
             Gurobi.jl is not loaded. Either:
               1. Set GUROBI_HOME and run `import Pkg; Pkg.add("Gurobi")`, then
-              2. Restart Julia so `using IESA_J` reloads with Gurobi available.
+              2. Restart Julia so `using IESAOpt` reloads with Gurobi available.
 
-            Without Gurobi, use `Model(IESA_J.highs_optimizer())` for HiGHS.
+            Without Gurobi, use `Model(IESAOpt.highs_optimizer())` for HiGHS.
         """)
     end
     # Convert Dict{String,Any} to flat positional pairs for optimizer_with_attributes

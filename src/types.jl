@@ -1,5 +1,5 @@
 """
-Core types for IESA_J.
+Core types for IESA-Opt.jl.
 
 These mirror the IESA-Opt 1.0 Set / Parameter / Variable / MathematicalProgram
 universe in idiomatic Julia structs.

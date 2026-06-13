@@ -18,13 +18,13 @@ If Julia cannot find Gurobi, set `GUROBI_HOME` according to the Gurobi.jl instal
 
 IESA-Opt.jl exposes two solver preset helpers:
 
-- `IESA_J.default_gurobi_attributes(; threads=0)`: production-oriented Gurobi settings.
-- `IESA_J.default_highs_attributes(; threads=0)`: license-free HiGHS settings for smoke tests and development.
+- `IESAOpt.default_gurobi_attributes(; threads=0)`: production-oriented Gurobi settings.
+- `IESAOpt.default_highs_attributes(; threads=0)`: license-free HiGHS settings for smoke tests and development.
 
 Inspect the Gurobi preset from the repository root:
 
 ```powershell
-julia --project=. -e "using IESA_J; display(IESA_J.default_gurobi_attributes())"
+julia --project=. -e "using IESAOpt; display(IESAOpt.default_gurobi_attributes())"
 ```
 
 The default Gurobi preset uses barrier, skips crossover, lets Gurobi choose presolve and scaling, and applies numerical tolerances suitable for the model's large LPs. Thread count defaults to `0`, meaning Gurobi may use all available cores.
@@ -34,24 +34,24 @@ The default Gurobi preset uses barrier, skips crossover, lets Gurobi choose pres
 For custom scripts, start from the preset and override only the options needed for the study:
 
 ```julia
-using IESA_J
+using IESAOpt
 using JuMP
 
-attrs = IESA_J.default_gurobi_attributes(; threads = 8)
+attrs = IESAOpt.default_gurobi_attributes(; threads = 8)
 attrs["Crossover"] = 0
 attrs["OutputFlag"] = 1
 
-model = Model(IESA_J.gurobi_optimizer(; attrs = attrs))
+model = Model(IESAOpt.gurobi_optimizer(; attrs = attrs))
 ```
 
 For HiGHS:
 
 ```julia
-using IESA_J
+using IESAOpt
 using JuMP
 
-attrs = IESA_J.default_highs_attributes(; threads = 4)
-model = Model(IESA_J.highs_optimizer(; attrs = attrs))
+attrs = IESAOpt.default_highs_attributes(; threads = 4)
+model = Model(IESAOpt.highs_optimizer(; attrs = attrs))
 ```
 
 ## Persistent Run Settings

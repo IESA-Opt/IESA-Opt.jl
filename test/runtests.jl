@@ -1,7 +1,7 @@
 using Test
-using IESA_J
+using IESAOpt
 
-@testset "IESA_J Phase 0 smoke tests" begin
+@testset "IESA-Opt.jl Phase 0 smoke tests" begin
     include("test_smoke.jl")
 end
 

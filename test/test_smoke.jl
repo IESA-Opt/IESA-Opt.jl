@@ -1,24 +1,24 @@
 using Test
-using IESA_J
+using IESAOpt
 
 @testset "Module loads cleanly" begin
-    @test isdefined(IESA_J, :ModelSets)
-    @test isdefined(IESA_J, :ModelParams)
-    @test isdefined(IESA_J, :ModelData)
-    @test isdefined(IESA_J, :RunResult)
+    @test isdefined(IESAOpt, :ModelSets)
+    @test isdefined(IESAOpt, :ModelParams)
+    @test isdefined(IESAOpt, :ModelData)
+    @test isdefined(IESAOpt, :RunResult)
 end
 
 @testset "Empty ModelData constructs" begin
-    md = IESA_J.ModelData()
-    @test isa(md.sets, IESA_J.ModelSets)
-    @test isa(md.params, IESA_J.ModelParams)
+    md = IESAOpt.ModelData()
+    @test isa(md.sets, IESAOpt.ModelSets)
+    @test isa(md.params, IESAOpt.ModelParams)
     @test isempty(md.sets.technologies)
     @test md.params.n_repDays == 15
     @test md.params.base_year == 2022
 end
 
 @testset "Solver attribute presets" begin
-    g = IESA_J.default_gurobi_attributes()
+    g = IESAOpt.default_gurobi_attributes()
     @test g["Method"]         == 2
     @test g["Crossover"]      == 0
     @test g["BarHomogeneous"] == 1
@@ -27,17 +27,17 @@ end
     @test g["FeasibilityTol"] == 1e-7
     @test g["BarConvTol"]     == 1e-7
 
-    h = IESA_J.default_highs_attributes()
+    h = IESAOpt.default_highs_attributes()
     @test h["solver"]              == "ipm"
     @test h["run_crossover"]       == "off"
     @test h["parallel"]            == "on"
 end
 
 @testset "Temporal helpers compute when hours_orig populated" begin
-    md = IESA_J.ModelData()
+    md = IESAOpt.ModelData()
     md.sets.hours_orig = collect(1:8760)
     md.params.hoursPer_day = 24
-    IESA_J.compute_derived_params!(md)
+    IESAOpt.compute_derived_params!(md)
 
     @test md.params.dayPer_hour[1]    == 1
     @test md.params.dayPer_hour[24]   == 1
@@ -57,10 +57,10 @@ end
 end
 
 @testset "derive_sets! populates default temporal sets" begin
-    md = IESA_J.ModelData()
+    md = IESAOpt.ModelData()
     md.params.hoursPer_day = 24
     md.params.hoursPer_day_cluster = 24
-    IESA_J.derive_sets!(md)
+    IESAOpt.derive_sets!(md)
 
     @test md.sets.hours_inDay == collect(1:24)
     @test md.sets.hours_inDay_cluster == collect(1:24)

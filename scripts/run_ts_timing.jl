@@ -3,7 +3,7 @@
 using Pkg
 Pkg.activate(joinpath(@__DIR__, ".."))
 
-using IESA_J
+using IESAOpt
 using JuMP
 using DataFrames
 using Dates
@@ -64,9 +64,9 @@ function main()
 
     md, data_read_s = elapsed() do
         if USE_CACHE
-            IESA_J.read_data_cached(DATA_XLSX; force_refresh = FORCE_REFRESH)
+            IESAOpt.read_data_cached(DATA_XLSX; force_refresh = FORCE_REFRESH)
         else
-            IESA_J.read_data(DATA_XLSX)
+            IESAOpt.read_data(DATA_XLSX)
         end
     end
     @info "data read done" seconds = data_read_s
@@ -89,17 +89,17 @@ function main()
     md.params.external_clusterMap_path = EXTERNAL_CLUSTER_MAP
 
     _, derive_s = elapsed() do
-        IESA_J.derive_sets!(md)
-        IESA_J.compute_derived_params!(md)
+        IESAOpt.derive_sets!(md)
+        IESAOpt.compute_derived_params!(md)
     end
     @info "derived params done" seconds = derive_s
 
     _, cluster_s = elapsed() do
-        IESA_J.build_temporal_clusters!(md)
+        IESAOpt.build_temporal_clusters!(md)
     end
     @info "clustering done" seconds = cluster_s n_repDays = length(md.sets.repDays) hours_cluster = length(md.sets.hours_cluster)
 
-    attrs = IESA_J.default_gurobi_attributes()
+    attrs = IESAOpt.default_gurobi_attributes()
     attrs["Method"] = 2
     attrs["Crossover"] = -1
     delete!(attrs, "BarHomogeneous")
@@ -108,11 +108,11 @@ function main()
     delete!(attrs, "OptimalityTol")
     attrs["Threads"] = THREADS
 
-    optimizer = IESA_J.gurobi_optimizer(; attrs = attrs)
+    optimizer = IESAOpt.gurobi_optimizer(; attrs = attrs)
     model = Model(optimizer)
-    IESA_J.apply_lp_generation_speedups!(model)
+    IESAOpt.apply_lp_generation_speedups!(model)
     vars, generation_s = elapsed() do
-        IESA_J.build_ts_lp!(model, md)
+        IESAOpt.build_ts_lp!(model, md)
     end
     n_rows = num_constraints(model; count_variable_in_set_constraints = false)
     n_cols = num_variables(model)
@@ -130,7 +130,7 @@ function main()
     end
     @info "solve done" seconds = solve_s status = term objective = obj
 
-    rr = IESA_J.RunResult(
+    rr = IESAOpt.RunResult(
         OUT_DIR, now(), :ts,
         term, primal, term,
         obj, solve_s, round(time() - total_start, digits = 3),
@@ -141,14 +141,14 @@ function main()
     )
 
     written = Dict{Symbol,String}()
-    db_path = joinpath(OUT_DIR, IESA_J.IESA_RESULTS_DUCKDB_FILE)
-    IESA_J._remove_duckdb_database!(db_path)
+    db_path = joinpath(OUT_DIR, IESAOpt.IESA_RESULTS_DUCKDB_FILE)
+    IESAOpt._remove_duckdb_database!(db_path)
     write_started = time()
     write_s = 0.0
     total_s = 0.0
 
-    IESA_J._with_duckdb_write_connection(db_path) do
-        merge!(written, IESA_J.write_duckdb_results(rr, vars, md, OUT_DIR; mode = :ts, reset = false))
+    IESAOpt._with_duckdb_write_connection(db_path) do
+        merge!(written, IESAOpt.write_duckdb_results(rr, vars, md, OUT_DIR; mode = :ts, reset = false))
         write_s = round(time() - write_started, digits = 3)
         total_s = round(time() - total_start, digits = 3)
         timing = DataFrame(
@@ -169,14 +169,14 @@ function main()
             objective = [obj],
             termination_status = [term],
         )
-        timing_path = IESA_J._duckdb_table_uri(db_path, "timing_summary")
-        IESA_J._write_table(timing, timing_path)
+        timing_path = IESAOpt._duckdb_table_uri(db_path, "timing_summary")
+        IESAOpt._write_table(timing, timing_path)
 
         solver_settings = DataFrame(
             attribute = string.(sort(collect(keys(attrs)))),
             value = [string(attrs[key]) for key in sort(collect(keys(attrs)))],
         )
-        IESA_J._write_table(solver_settings, IESA_J._duckdb_table_uri(db_path, "solver_settings"))
+        IESAOpt._write_table(solver_settings, IESAOpt._duckdb_table_uri(db_path, "solver_settings"))
     end
     @info "results written" seconds = write_s files = sort(collect(keys(written)))
 

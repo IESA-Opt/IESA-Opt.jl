@@ -1,5 +1,5 @@
 using Test
-using IESA_J
+using IESAOpt
 
 const XLSX_PATH = joinpath(@__DIR__, "..", "data", "default_data.xlsx")
 

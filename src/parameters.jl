@@ -1,8 +1,8 @@
 # =============================================================================
 # parameters.jl — Derived parameter computation
 #
-# Ported from `Backup/IESA-J/src/parameters.jl` derivation helpers and
-# `Backup/IESA-J/src/data_reading.jl::_resolve_activity_names!` /
+# Ported from the legacy IESA-Opt Julia prototype's `src/parameters.jl`
+# derivation helpers and `src/data_reading.jl::_resolve_activity_names!` /
 # `_derive_profile_and_node_maps!`.
 #
 # All routines operate on a `ModelData` (md.sets / md.params). Idempotent:

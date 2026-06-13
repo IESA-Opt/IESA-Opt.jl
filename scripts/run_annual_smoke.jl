@@ -8,7 +8,7 @@
 #   julia --project=. scripts/run_annual_smoke.jl
 # =============================================================================
 
-using IESA_J
+using IESAOpt
 using JuMP
 using HiGHS
 using Logging

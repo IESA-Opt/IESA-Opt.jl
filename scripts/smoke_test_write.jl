@@ -7,7 +7,7 @@ Run from the repository root:
     julia --project=. scripts/smoke_test_write.jl
 """
 
-using IESA_J
+using IESAOpt
 using JuMP
 using CSV
 using DataFrames

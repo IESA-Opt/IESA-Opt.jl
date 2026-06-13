@@ -1,12 +1,13 @@
 """
-    IESA_J
+    IESAOpt
 
-IESA-Opt 2.0 / IESA-Opt.jl, the Julia/JuMP implementation of the IESA-Opt 1.0 formulation.
+IESA-Opt.jl — the Julia/JuMP implementation of the IESA-Opt integrated
+energy-system optimization model.
 
 The package exposes data loading, clustering, JuMP model construction, solver
 configuration, and result-writing helpers for IESA-Opt.jl.
 """
-module IESA_J
+module IESAOpt
 
 using JuMP
 using DataFrames
@@ -21,6 +22,7 @@ using Random
 using Dates
 using Logging
 import MathOptInterface as MOI
+using PrecompileTools
 
 # Solver backends (loaded lazily — Gurobi requires a valid license + GUROBI_HOME)
 using HiGHS
@@ -122,5 +124,65 @@ export add_cyclic_closures!
 export write_parquet_results, write_duckdb_results
 export serve_ui!
 # Phase 7+: export sweep_ts_postfix
+
+# ---------------------------------------------------------------------------
+# PrecompileTools workload
+#
+# Pre-bakes the JIT cost of the heaviest runtime code paths (read_data_cached,
+# derive_sets!, compute_derived_params!, build_temporal_clusters!, and the
+# full TS LP build) into the package precompile cache. Cuts the in-server
+# warmup from ~50 s to ~3 s on every UI launch, at the price of adding
+# ~60-90 s to the one-time `Pkg.precompile` after code edits, Julia
+# upgrades, or dep updates.
+#
+# Skipped automatically when:
+#   - The default workbook is missing (clean checkout, CI without data)
+#   - Env var IESA_OPT_SKIP_PRECOMPILE=1 (developer fast-iteration mode —
+#     pair with IESA_OPT_SKIP_WARMUP=1 to also skip the in-server warmup)
+#
+# Failures inside the workload are warned but never abort the package build.
+# ---------------------------------------------------------------------------
+@setup_workload begin
+    _precompile_workbook = normpath(joinpath(@__DIR__, "..", "data", "default_data.xlsx"))
+    _precompile_skip = get(ENV, "IESA_OPT_SKIP_PRECOMPILE", "0") == "1"
+    @compile_workload begin
+        if !_precompile_skip && isfile(_precompile_workbook)
+            try
+                _md = read_data_cached(_precompile_workbook)
+                if _md !== nothing
+                    _md_copy = deepcopy(_md)
+                    _periods = collect(_md_copy.sets.periods)
+                    if !isempty(_periods)
+                        _target = 2050 in _periods ? 2050 : last(_periods)
+                        _md_copy.sets.periods_solve = [_target]
+                        _md_copy.params.hoursPer_day = 24
+                        _md_copy.params.n_repDays = 1
+                        _md_copy.params.hoursPer_day_cluster = 24
+                        _md_copy.params.clustering_approach = :kmeans_avg
+                        _md_copy.params.ts_extremePeriods = false
+                        _md_copy.params.ts_extremeDays_count = 0
+                        _md_copy.params.ts_boundaryRamping = true
+                        _md_copy.params.ts_capacityProfile_autoMode = true
+                        _md_copy.params.ts_capacityProfile_autoFloor = 0.23
+                        _md_copy.params.ts_capacityProfile_autoCap = 1.00
+                        _md_copy.params.ts_capacityProfile_autoFloor_effective = 0.23
+                        _md_copy.params.ts_capacityProfile_envelopeMode = 0
+                        _md_copy.params.dayMix_softness = 0.0
+                        _md_copy.params.dayMix_weightType = :auto
+                        derive_sets!(_md_copy)
+                        compute_derived_params!(_md_copy)
+                        build_temporal_clusters!(_md_copy)
+                        _model = JuMP.Model()
+                        apply_lp_generation_speedups!(_model)
+                        build_ts_lp!(_model, _md_copy)
+                        _model = nothing
+                    end
+                end
+            catch err
+                @warn "IESA-Opt.jl precompile workload failed (package still loaded successfully)" err
+            end
+        end
+    end
+end
 
 end # module

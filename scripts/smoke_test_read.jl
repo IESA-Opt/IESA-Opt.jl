@@ -6,7 +6,7 @@ Run from the repository root:
     julia --project=. scripts/smoke_test_read.jl
 """
 
-using IESA_J
+using IESAOpt
 
 const XLSX_PATH = joinpath(@__DIR__, "..", "data", "default_data.xlsx")
 

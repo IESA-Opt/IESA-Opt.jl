@@ -12,23 +12,23 @@
 #
 # Right now it prints the Phase-0-only summary (empty sets, helper indices).
 
-using IESA_J
+using IESAOpt
 
 function main()
     xlsx_path = isempty(ARGS) ? "" : ARGS[1]
 
     md = if !isempty(xlsx_path) && isfile(xlsx_path)
-        IESA_J.read_data(xlsx_path)
+        IESAOpt.read_data(xlsx_path)
     else
         println("No XLSX argument or file not found; using empty ModelData skeleton.")
-        IESA_J.ModelData()
+        IESAOpt.ModelData()
     end
 
     # Compute the helpers that do work in Phase 0 (temporal indices)
     md.sets.hours_orig = collect(1:8760)
     md.params.hoursPer_day = 24
-    IESA_J.derive_sets!(md)
-    IESA_J.compute_derived_params!(md)
+    IESAOpt.derive_sets!(md)
+    IESAOpt.compute_derived_params!(md)
 
     println("\n========== IESA-Opt.jl ModelData summary ==========")
     println("Sets:")
