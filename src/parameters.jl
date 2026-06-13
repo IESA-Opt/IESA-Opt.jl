@@ -35,6 +35,7 @@ function compute_derived_params!(md::ModelData)
     _resolve_activity_names!(md)
     _derive_profile_and_node_maps!(md)
     compute_activity_balances!(md)
+    _resolve_hourly_profiles_fh!(md)
     compute_chp_eps!(md)
     compute_activity_indicators!(md)
     compute_decom_planned_sel!(md)
@@ -45,6 +46,119 @@ function compute_derived_params!(md::ModelData)
     compute_emission_target_aggregates!(md)
     compute_tech_activity!(md)
     init_policy_targets!(md)
+    return md
+end
+
+# -----------------------------------------------------------------------------
+# Full-hourly profile resolver (IESA-Opt 1.0 PrecomputeGenerationHelpers, L9094)
+# + hourly_profiles Definition (L3045)
+# -----------------------------------------------------------------------------
+"""
+    _resolve_hourly_profiles_fh!(md)
+
+Populate `hourly_profilesRead` and `hourly_profiles` from `hourly_profilesReadOrig`
+(and `interconnectedHourly_prices` from `interconnectedHourly_pricesOrig`) so the
+FH model code has profiles to read.
+
+The TS clustering pipeline writes its own `hourly_profiles_cluster` dict and the
+TS model never reads `hourly_profiles`, so doing this here is FH-only in effect
+but safe to run unconditionally.
+
+AIMMS reference (IESA-Opt.ams):
+- L9094 `PrecomputeGenerationHelpers`:
+    for (ho, yp) do
+        hourly_profilesRead(hoursPer_hourOrig(ho), yp) += hourly_profilesReadOrig(ho, yp)
+    endfor
+    for (ho, ain, p) do
+        interconnectedHourly_prices(hoursPer_hourOrig(ho), ain, p) += interconnectedHourly_pricesOrig(ho, ain, p)
+    endfor
+    interconnectedHourly_prices(h, ain, p) := round(... / max(1, 24/hoursPer_day), 2)
+- L3045 `hourly_profiles` Definition:
+    if (yp in activities_indirect) then
+        Σ_{itb | ab(itb,yp,by)<0} hourly_profilesRead(h, profileType_techRead(itb)) * ab(itb,yp,by)
+        / Σ_{itb | ab(itb,yp,by)<0} ab(itb,yp,by)
+    else
+        hourly_profilesRead(h, yp)
+    endif
+"""
+function _resolve_hourly_profiles_fh!(md::ModelData)
+    s, p = md.sets, md.params
+    isempty(p.hourly_profilesReadOrig) && return md
+    hpd = max(1, p.hoursPer_day)
+    agg_factor = max(1, div(24, hpd))
+
+    # 1. hourly_profilesRead: sum over original hours mapping to the same FH hour.
+    empty!(p.hourly_profilesRead)
+    for ((ho, yp), v) in p.hourly_profilesReadOrig
+        h_fh = div(ho - 1, agg_factor) + 1
+        key = (h_fh, yp)
+        p.hourly_profilesRead[key] = get(p.hourly_profilesRead, key, 0.0) + v
+    end
+
+    # 2. interconnectedHourly_prices: sum, divide by agg_factor for hour-average price,
+    # then round to 2 decimals as AIMMS does in PrecomputeGenerationHelpers.
+    empty!(p.interconnectedHourly_prices)
+    for ((ho, ain, pp), v) in p.interconnectedHourly_pricesOrig
+        h_fh = div(ho - 1, agg_factor) + 1
+        key = (h_fh, ain, pp)
+        p.interconnectedHourly_prices[key] = get(p.interconnectedHourly_prices, key, 0.0) + v
+    end
+    inv_af = 1.0 / agg_factor
+    for k in collect(keys(p.interconnectedHourly_prices))
+        p.interconnectedHourly_prices[k] = round(p.interconnectedHourly_prices[k] * inv_af; digits = 2)
+    end
+
+    # 3. hourly_profiles per AIMMS L3045: indirect blend + pass-through.
+    empty!(p.hourly_profiles)
+    ind_set = isempty(s.activities_indirect) ? Set{Symbol}() : Set(s.activities_indirect)
+    by = p.base_year
+
+    # Pre-group consumers per indirect activity.
+    consumers_of = Dict{Symbol, Vector{Tuple{Symbol,Float64}}}()  # iap → [(profileType_techRead, ab)]
+    denom_of     = Dict{Symbol, Float64}()                         # iap → Σ ab (negative)
+    for iap in ind_set
+        consumers_of[iap] = Tuple{Symbol,Float64}[]
+        denom_of[iap]     = 0.0
+    end
+    for ((tb, a, ps), coef) in p.activity_balances
+        ps == by || continue
+        coef >= 0 && continue
+        haskey(consumers_of, a) || continue
+        ptr = get(p.profileType_techRead, tb, Symbol(""))
+        ptr == Symbol("") && continue
+        push!(consumers_of[a], (ptr, coef))
+        denom_of[a] += coef
+    end
+
+    # Collect all FH hours present in hourly_profilesRead so we cover every key the model looks up.
+    hours_in_read = Set{Int}()
+    for ((h, _), _) in p.hourly_profilesRead
+        push!(hours_in_read, h)
+    end
+
+    # Indirect-activity blend.
+    for iap in ind_set
+        cons  = consumers_of[iap]
+        denom = denom_of[iap]
+        (isempty(cons) || denom == 0.0) && continue
+        for h in hours_in_read
+            num = 0.0
+            for (ptr, ab) in cons
+                num += ab * get(p.hourly_profilesRead, (h, ptr), 0.0)
+            end
+            v = num / denom
+            v == 0.0 && continue
+            p.hourly_profiles[(h, iap)] = v
+        end
+    end
+
+    # Pass-through for all non-indirect profile types.
+    for ((h, yp), v) in p.hourly_profilesRead
+        yp in ind_set && continue
+        v == 0.0 && continue
+        p.hourly_profiles[(h, yp)] = v
+    end
+
     return md
 end
 
@@ -625,10 +739,9 @@ function compute_flex_loss_split!(md::ModelData)
         # Already populated by an upstream source: don't overwrite
         haskey(p.flex_loss_charge, t)         || (p.flex_loss_charge[t]         = total_loss)
         haskey(p.flex_loss_discharge_eff, t)  || (p.flex_loss_discharge_eff[t]  = min(total_loss, 0.99))
-        if haskey(p.flex_standing_loss, t) && !haskey(p.flex_standing_loss_effective, t)
-            p.flex_standing_loss_effective[t] = min(p.flex_standing_loss[t], 1.85522e-5)
-        end
     end
+
+    empty!(p.flex_standing_loss_effective)
     return md
 end
 

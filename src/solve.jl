@@ -64,7 +64,7 @@ function build_fh_lp!(m::JuMP.Model, md::ModelData)
     @info "build_fh_lp! - adding policy constraints (FH)"
     flush(stderr)
     add_policy_constraints!(m, vars, md; mode = :fh)
-    @info "build_fh_lp! - adding cyclic-closure constraints (FH, no-op)"
+    @info "build_fh_lp! - adding cyclic-closure constraints (FH)"
     flush(stderr)
     add_cyclic_closures!(m, vars, md)
     @info "build_fh_lp! - setting objective (with hourly terms)"
