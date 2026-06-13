@@ -4,11 +4,14 @@ const stages = [["reading","Read"],["preparing","Prepare"],["clustering","Cluste
 const stageDescriptions = { idle:"Start a run to see each stage and solver output.", reading:"Julia is opening the workbook and loading the input tables into model data.", preparing:"Sets and derived parameters are being built for the selected solve years.", clustering:"Representative days and time-slice profiles are being prepared, unless full-hourly mode skipped this step.", generation:"JuMP variables, objective terms, and constraints are being generated before the solver starts.", solve:"The optimizer is running. Native solver messages and iteration lines appear in the log below when the solver writes them.", writing:"Solved values are being converted into DuckDB result tables, one output file at a time.", done:"The run finished and result tables are ready in the Results tab.", failed:"The run stopped during the last active stage. The log below contains the error details.", cancelled:"The run was stopped by the user. No results were saved." };
 const chartColors = ["#1d5f8f", "#5a9f3f", "#00a3c7", "#b77800", "#8c5a9f", "#ba3a2f"];
 const timingPhases = [
+  { label:"Queue", keys:["queue_sec"], color:"#9aa6ad" },
   { label:"Data read", keys:["dataRead_sec", "data_read_sec", "read_sec"], color:"#1d5f8f" },
   { label:"Prepare", keys:["derive_sec", "prepare_sec"], color:"#00a3c7" },
   { label:"Cluster", keys:["cluster_sec", "clustering_sec"], color:"#5a9f3f" },
+  { label:"Optimizer init", keys:["optimizerInit_sec", "optimizer_init_sec"], color:"#7a6a8f" },
   { label:"Generate", keys:["generation_sec", "generate_sec"], color:"#b77800" },
   { label:"Solve", keys:["solve_sec", "solveSeconds"], color:"#ba3a2f" },
+  { label:"Extract duals", keys:["dualExtract_sec", "dual_extract_sec"], color:"#ad7fb3" },
   { label:"Write", keys:["resultsWrite_sec", "results_write_sec", "write_sec", "writing_sec"], color:"#4a7c7a" },
 ];
 const $ = id => document.getElementById(id);
@@ -861,6 +864,16 @@ function renderHourlyDispatch(payload) {
     if (legend) legend.textContent="";
     return;
   }
+  // Map techID -> "human name (techID)" using techMeta so the legend and
+  // hover read like the AIMMS reports rather than dumping raw symbols.
+  const techMeta = Array.isArray(payload.techMeta) ? payload.techMeta : [];
+  const labelByTech = new Map();
+  techMeta.forEach(m => {
+    const id = String(m.tech || "");
+    const nm = String(m.name || "").trim();
+    labelByTech.set(id, nm && nm !== id ? `${nm} (${id})` : id);
+  });
+  const labelFor = t => labelByTech.get(String(t)) || String(t);
   const hoursLen = hours.length;
   const fromHour = clampHour(state.dispatchFromHour, 1, hoursLen);
   const toHour = clampHour(state.dispatchToHour, fromHour, hoursLen);
@@ -884,6 +897,7 @@ function renderHourlyDispatch(payload) {
   const traces = [];
   series.forEach((s, idx) => {
     const tech = String(s.tech);
+    const lbl  = labelFor(tech);
     const color = chartColors[idx % chartColors.length];
     const slice = (s.values || []).slice(sliceStart, sliceEnd);
     const yPos = xs.map(h => Math.max(0, Number(slice[h - fromHour] || 0)));
@@ -893,23 +907,23 @@ function renderHourlyDispatch(payload) {
     const visible = state.dispatchLegendOff.has(tech) ? "legendonly" : true;
     if (hasPos) {
       traces.push({
-        type: "scatter", mode: "lines", name: tech, legendgroup: tech, showlegend: true,
+        type: "scatter", mode: "lines", name: lbl, legendgroup: tech, showlegend: true,
         x: xs, y: yPos,
         stackgroup: "pos",
         fillcolor: color,
         line: { color: color, width: 0.6 },
-        hovertemplate: `<b>${tech}</b><br>Hour %{x}: %{y:.4g}<extra></extra>`,
+        hovertemplate: `<b>${lbl}</b><br>Hour %{x}: %{y:.4g}<extra></extra>`,
         visible,
       });
     }
     if (hasNeg) {
       traces.push({
-        type: "scatter", mode: "lines", name: tech, legendgroup: tech, showlegend: !hasPos,
+        type: "scatter", mode: "lines", name: lbl, legendgroup: tech, showlegend: !hasPos,
         x: xs, y: yNeg,
         stackgroup: "neg",
         fillcolor: color,
         line: { color: color, width: 0.6 },
-        hovertemplate: `<b>${tech}</b><br>Hour %{x}: %{y:.4g}<extra></extra>`,
+        hovertemplate: `<b>${lbl}</b><br>Hour %{x}: %{y:.4g}<extra></extra>`,
         visible,
       });
     }
@@ -928,17 +942,19 @@ function renderHourlyDispatch(payload) {
 
   // Persist the user's legend-toggle choices into state.dispatchLegendOff so
   // re-renders triggered by From/To changes keep the same series hidden.
+  // We key on legendgroup (= raw techID) rather than name (now a human label).
   if (!c.__plotlyDispatchBound) {
     c.on("plotly_restyle", () => {
       try {
         const off = new Set();
         const seen = new Map();
         (c.data || []).forEach(t => {
+          const key = String(t.legendgroup || t.name || "");
           const isLegendOnly = t.visible === "legendonly";
-          if (!seen.has(t.name)) seen.set(t.name, isLegendOnly);
-          else if (!isLegendOnly) seen.set(t.name, false);
+          if (!seen.has(key)) seen.set(key, isLegendOnly);
+          else if (!isLegendOnly) seen.set(key, false);
         });
-        seen.forEach((isOff, name) => { if (isOff) off.add(name); });
+        seen.forEach((isOff, key) => { if (isOff) off.add(key); });
         state.dispatchLegendOff = off;
       } catch (_) { /* ignore */ }
     });

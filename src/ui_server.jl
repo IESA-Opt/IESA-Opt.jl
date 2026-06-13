@@ -1186,11 +1186,18 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         _check_cancel(job_id) && throw(UICancelled("Run was stopped before model generation."))
         solver_log_path = joinpath(tempdir(), "iesa_opt_$(job_id)_solver.log")
         rm(solver_log_path; force = true)
-        optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path)
-        model_label = mode == :ts ? "time-slice" : "full-hourly"
-        _job_update!(job_id; stage = "generation", message = "Generating $(model_label) model with $(effective_solver)", extra = Dict("effectiveSolver" => effective_solver))
-        model = Model(optimizer)
-        _set_job_model!(job_id, model)
+        # Optimizer/JuMP wiring time (license check + attribute apply + Model
+        # construction). Surfaced as its own bar in the timing chart so the
+        # residual "Other" segment shrinks.
+        local optimizer, attrs, effective_solver, model
+        _, optimizer_init_seconds = _elapsed() do
+            optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path)
+            model_label = mode == :ts ? "time-slice" : "full-hourly"
+            _job_update!(job_id; stage = "generation", message = "Generating $(model_label) model with $(effective_solver)", extra = Dict("effectiveSolver" => effective_solver))
+            model = Model(optimizer)
+            _set_job_model!(job_id, model)
+        end
+        stage_times["optimizer_init_sec"] = optimizer_init_seconds
         vars, generation_seconds = _elapsed() do
             mode == :ts ? build_ts_lp!(model, md) : build_fh_lp!(model, md)
         end
@@ -1266,11 +1273,19 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         writer_progress = _job_writer_progress(job_id)
         db_path = joinpath(out_dir, IESA_RESULTS_DUCKDB_FILE)
         _remove_duckdb_database!(db_path)
-        co2_prices = _extract_co2_prices(model, md)
-        emission_prices = _extract_emission_prices(model, md)
-        activity_prices = _extract_activity_prices(model, md)
-        activity_prices_hourly = _extract_activity_prices_hourly(model, md, mode)
-        activity_prices_daily  = _extract_activity_prices_daily(model, md, mode)
+        # Pulling JuMP duals back out of the solved model is pure Julia work
+        # that runs after the solve.  On full-hourly runs with many balance
+        # constraints this is the biggest residual segment, so we time it
+        # explicitly and surface it in the timing chart.
+        local co2_prices, emission_prices, activity_prices, activity_prices_hourly, activity_prices_daily
+        _, dual_extract_seconds = _elapsed() do
+            co2_prices = _extract_co2_prices(model, md)
+            emission_prices = _extract_emission_prices(model, md)
+            activity_prices = _extract_activity_prices(model, md)
+            activity_prices_hourly = _extract_activity_prices_hourly(model, md, mode)
+            activity_prices_daily  = _extract_activity_prices_daily(model, md, mode)
+        end
+        stage_times["dual_extract_sec"] = dual_extract_seconds
         _with_duckdb_write_connection(db_path; persist = true) do
             _, write_seconds = _elapsed() do
                 merge!(written, write_duckdb_results(rr, vars, md, out_dir; mode = mode, reset = false,
@@ -1714,8 +1729,10 @@ function _write_ui_run_metadata(out_dir::AbstractString, config::Dict{String,Any
         dataRead_sec = [get(stage_times, "data_read_sec", 0.0)],
         derive_sec = [get(stage_times, "derive_sec", 0.0)],
         cluster_sec = [get(stage_times, "cluster_sec", 0.0)],
+        optimizerInit_sec = [get(stage_times, "optimizer_init_sec", 0.0)],
         generation_sec = [get(stage_times, "generation_sec", 0.0)],
         solve_sec = [get(stage_times, "solve_sec", 0.0)],
+        dualExtract_sec = [get(stage_times, "dual_extract_sec", 0.0)],
         resultsWrite_sec = [get(stage_times, "results_write_sec", 0.0)],
         total_sec = [get(stage_times, "total_sec", rr.total_seconds)],
         n_rows = [rr.n_rows],
@@ -1752,14 +1769,16 @@ function _write_ui_run_metadata(out_dir::AbstractString, config::Dict{String,Any
         push!(settings, ("termination_status", string(rr.termination_status)))
         # Stage timings (seconds). Same numbers shown in the stacked bar.
         for (label, key) in [
-                ("queue_sec",        "queue_sec"),
-                ("dataRead_sec",     "data_read_sec"),
-                ("derive_sec",       "derive_sec"),
-                ("cluster_sec",      "cluster_sec"),
-                ("generation_sec",   "generation_sec"),
-                ("solve_sec",        "solve_sec"),
-                ("resultsWrite_sec", "results_write_sec"),
-                ("total_sec",        "total_sec"),
+                ("queue_sec",         "queue_sec"),
+                ("dataRead_sec",      "data_read_sec"),
+                ("derive_sec",        "derive_sec"),
+                ("cluster_sec",       "cluster_sec"),
+                ("optimizerInit_sec", "optimizer_init_sec"),
+                ("generation_sec",    "generation_sec"),
+                ("solve_sec",         "solve_sec"),
+                ("dualExtract_sec",   "dual_extract_sec"),
+                ("resultsWrite_sec",  "results_write_sec"),
+                ("total_sec",         "total_sec"),
             ]
             v = get(stage_times, key, key == "total_sec" ? rr.total_seconds : 0.0)
             push!(settings, (label, string(round(Float64(v); digits = 3))))
@@ -2503,6 +2522,7 @@ function _hourly_dispatch_payload(out_dir::AbstractString; node::AbstractString 
         m = get(meta_by_tech, t, nothing)
         push!(tech_meta_out, Dict{String,Any}(
             "tech" => t,
+            "name" => m === nothing ? "" : string(get(m, "name", "")),
             "sector" => m === nothing ? "" : string(get(m, "sector", "")),
             "subsector" => m === nothing ? "" : string(get(m, "subsector", "")),
             "category" => m === nothing ? "" : string(get(m, "category", "")),
