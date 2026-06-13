@@ -13,6 +13,45 @@ const timingPhases = [
 ];
 const $ = id => document.getElementById(id);
 
+// Plotly defaults shared by every chart in the dashboard. We strip the
+// modebar buttons we don't use and force PNG export to 2x scale so saved
+// images are crisp on hi-DPI displays.
+const PLOTLY_CONFIG = {
+  responsive: true,
+  displaylogo: false,
+  modeBarButtonsToRemove: ["lasso2d", "select2d"],
+  toImageButtonOptions: { format: "png", scale: 2, filename: "iesa-opt-chart" },
+};
+function plotlyBaseLayout(extras = {}) {
+  return Object.assign({
+    margin: { t: 24, r: 20, b: 64, l: 80 },
+    paper_bgcolor: "#fff",
+    plot_bgcolor: "#fff",
+    font: { family: "system-ui,Segoe UI,Roboto,sans-serif", size: 12, color: "#0f2436" },
+    legend: { orientation: "h", x: 0, y: -0.2, yanchor: "top", xanchor: "left", font: { size: 11 } },
+    hovermode: "closest",
+    xaxis: { gridcolor: "#eef2f5", zerolinecolor: "#0f2436", tickfont: { size: 11 } },
+    yaxis: { gridcolor: "#eef2f5", zerolinecolor: "#0f2436", tickfont: { size: 11 } },
+  }, extras);
+}
+function plotlyRender(id, traces, layout, baseClass = "bar-chart plotly-chart", config = {}) {
+  const c = $(id); if (!c) return;
+  if (!traces || !traces.length) { plotlyEmpty(id, "No data available.", baseClass); return; }
+  c.className = baseClass;
+  c.classList.remove("empty-state");
+  c.textContent = "";
+  // Plotly.react reuses the chart instance for cheaper re-renders on filter
+  // changes (legend toggles, From/To hour adjustments) but degrades to
+  // newPlot when the container has not yet been initialised.
+  Plotly.react(c, traces, layout || plotlyBaseLayout(), Object.assign({}, PLOTLY_CONFIG, config));
+}
+function plotlyEmpty(id, message, className = "bar-chart") {
+  const c = $(id); if (!c) return;
+  if (window.Plotly && c._fullLayout) Plotly.purge(c);
+  c.className = `${className} empty-state`;
+  c.textContent = message;
+}
+
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);
 else init();
 
@@ -295,7 +334,7 @@ function resetRunButton() {
   setRunButtonMode("run");
   $("stopRunButtonProgress").classList.add("hidden");
 }
-function collectRunConfig() { return { inputWorkbook: currentWorkbook(), periods:[...document.querySelectorAll("#periods input:checked")].map(i=>Number(i.value)), mode:$("timeSlicingToggle").checked ? "timeslice" : "full_hourly", hoursPerDay:currentHoursPerDay(), representativeDays:Number($("representativeDays").value), solver:$("solver").value, solveMethod:document.querySelector("input[name='solveMethod']:checked").value, threads:Number($("threads").value), clusteringApproach:$("clusteringApproach").value, extremePeriods:$("extremePeriods").checked, extremeDays:Number($("extremeDays").value), boundaryRamping:$("boundaryRamping").checked, hourlyReports:$("hourlyReports").checked, saveCase:$("saveCase").checked, showViolations:$("showViolations").checked, outputMode:$("outputMode").value, outputName:$("outputName").value, constraintGroup:$("constraintGroup").value }; }
+function collectRunConfig() { return { inputWorkbook: currentWorkbook(), periods:[...document.querySelectorAll("#periods input:checked")].map(i=>Number(i.value)), mode:$("timeSlicingToggle").checked ? "timeslice" : "full_hourly", hoursPerDay:currentHoursPerDay(), representativeDays:Number($("representativeDays").value), solver:$("solver").value, solveMethod:document.querySelector("input[name='solveMethod']:checked").value, threads:Number($("threads").value), clusteringApproach:$("clusteringApproach").value, extremePeriods:$("extremePeriods").checked, extremeDays:Number($("extremeDays").value), boundaryRamping:$("boundaryRamping").checked, hourlyReports:$("hourlyReports").checked, showViolations:$("showViolations").checked, outputMode:$("outputMode").value, outputName:$("outputName").value, constraintGroup:$("constraintGroup").value }; }
 function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer=setInterval(pollJob,800); pollJob(); }
 async function pollJob() {
   if(!state.currentJobId) return;
@@ -428,6 +467,7 @@ function handleOutputRowClick(e, id) {
       state.comparedOutputIds = ids.filter(x => set.has(x));
       renderOutputList();
       setOutputStatus(`${state.comparedOutputIds.length} output(s) selected for compare.`);
+      autoCompareOrView();
       return;
     }
   }
@@ -438,12 +478,29 @@ function handleOutputRowClick(e, id) {
     state.lastClickedOutputId = id;
     renderOutputList();
     setOutputStatus(`${state.comparedOutputIds.length} output(s) selected for compare.`);
+    autoCompareOrView();
     return;
   }
   // Plain click — view this run AND make it the sole compare anchor.
   state.lastClickedOutputId = id;
   state.comparedOutputIds = [id];
   viewOutput(id);
+}
+// Decide what to render based on the current selection set: 0 selected does
+// nothing (sidebar already up to date), 1 falls back to the single-run
+// view, 2+ kicks off the comparison API request and hides the single-only
+// panels. This is wired into Ctrl-click and Shift-click handlers so the
+// user does not have to click the explicit "Compare selected" button.
+function autoCompareOrView() {
+  const ids = state.comparedOutputIds;
+  if (ids.length >= 2) {
+    compareSelectedOutputs();
+    return;
+  }
+  if (ids.length === 1) {
+    if (state.selectedOutputId !== ids[0]) viewOutput(ids[0]);
+    else setComparisonMode(false);
+  }
 }
 
 function selectedOutputIds() { return [...state.comparedOutputIds]; }
@@ -487,8 +544,8 @@ async function compareSelectedOutputs() {
   setComparisonMode(true);
   $("compareStatus").textContent = `Loading ${ids.length} outputs…`;
   setResultsLoadingState(`Loading ${ids.length} outputs for comparison…`);
-  setLoadingChart("compareChart", "Loading comparison…", "bar-chart compact-chart");
-  setLoadingChart("compareTimeChart", "Loading timing…", "bar-chart compact-chart");
+  setLoadingChart("systemCostsChart", "Loading comparison…");
+  setLoadingChart("timingChart", "Loading timing…");
   setLoadingTable("compareTable");
   setLoadingTable("compareCostTable");
   setOutputStatus(`Loading ${ids.length} outputs…`);
@@ -503,12 +560,10 @@ function renderComparison(comparison) {
   $("resultsOutput").textContent = `Comparing ${runs.length} outputs`;
   renderComparisonMetrics(comparison, totals);
   const costStacks = buildCostStacks(costs, runs, totals), timingStacks = buildTimingStacks(timing);
-  renderStackedBars("compareChart", costStacks, "MEUR", "bar-chart stacked-chart compact-chart");
-  renderStackedBars("compareTimeChart", timingStacks, "sec", "bar-chart stacked-chart compact-chart");
-  renderTable("compareTable", timing, 50);
-  renderTable("compareCostTable", costs, 160);
   renderStackedBars("systemCostsChart", costStacks, "MEUR");
   renderTable("systemCostsTable", totals, 80);
+  renderTable("compareTable", timing, 50);
+  renderTable("compareCostTable", costs, 160);
   renderComparisonProfilePlaceholder();
   renderStackedBars("timingChart", timingStacks, "sec");
   renderTable("solverSettingsTable", runs, 80);
@@ -558,8 +613,9 @@ function renderResults(results) {
   populatePeriodSelect("supplyDemandPeriod", results.balanceActivities?.periods || []);
 
   // Each stage renders one panel and yields a frame so the browser can
-  // paint and remain responsive. Top-of-page panels render first so the
-  // user sees results filling in as they scroll downward.
+  // paint and remain responsive. Top-of-page panels render first, with a
+  // visible pause before each subsequent panel so the cascade reads as
+  // top-to-bottom even when individual renders are fast.
   const stages = [
     () => {
       const costStacks = buildCostStacks(results.costByComponent || [], [], results.totalCosts || []);
@@ -579,23 +635,47 @@ function renderResults(results) {
     () => { refreshEmissions(); },
     () => { refreshSupplyDemand(); },
   ];
+
   // Bump the render token so any stages still queued from a previous
   // selection short-circuit and never overwrite the current spinners.
   state.renderToken = (state.renderToken || 0) + 1;
   const myToken = state.renderToken;
+  // Disconnect any IntersectionObserver from a previous render so it
+  // cannot fire mid-cascade and force a panel to render out of order.
+  if (state.lazyResultsObserver) { state.lazyResultsObserver.disconnect(); state.lazyResultsObserver = null; }
+
+  // Strictly sequential cascade: render stage i, paint a frame, wait
+  // cascadeMs, then move to stage i+1. Two animation frames between the
+  // call and the timer guarantee Plotly has finished its layout pass
+  // before the next stage starts working.
+  const cascadeMs = 250;
   const runStage = (i) => {
     if (myToken !== state.renderToken) return;
     if (i >= stages.length) return;
     try { stages[i](); } catch (err) { console.error(`Render stage ${i} failed`, err); }
-    requestAnimationFrame(() => runStage(i + 1));
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (myToken !== state.renderToken) return;
+      setTimeout(() => runStage(i + 1), cascadeMs);
+    }));
   };
+  // Render the first stage on the next animation frame so the
+  // metric-grid + sidebar paint we already issued can hit the screen
+  // before Plotly starts reflowing the layout.
   requestAnimationFrame(() => runStage(0));
 }
-function setComparisonMode(active) { $("comparisonPanel").classList.toggle("hidden", !active); }
-function clearComparisonPanels() { setComparisonMode(false); $("compareStatus").textContent="Select outputs in the sidebar."; setEmptyChart("compareChart", "Select outputs to compare.", "bar-chart compact-chart"); setEmptyChart("compareTimeChart", "Select outputs to compare.", "bar-chart compact-chart"); $("compareTable").innerHTML=""; $("compareCostTable").innerHTML=""; }
-function setEmptyChart(id, message, className="bar-chart") { const c=$(id); if (!c) return; c.className=`${className} empty-state`; c.textContent=message; }
+function setComparisonMode(active) {
+  $("comparisonPanel").classList.toggle("hidden", !active);
+  // In compare mode the single-run panels (Hourly Dispatch, Emissions,
+  // Supply/Demand, CO2 Price, Activity Prices, Power Capacities) are
+  // meaningless because their data refers to one run; hide them so the
+  // page only shows comparison content.
+  document.querySelectorAll(".results-main .single-only").forEach(el => el.classList.toggle("hidden", active));
+}
+function clearComparisonPanels() { setComparisonMode(false); $("compareStatus").textContent="Select outputs in the sidebar."; $("compareTable").innerHTML=""; $("compareCostTable").innerHTML=""; }
+function setEmptyChart(id, message, className="bar-chart") { const c=$(id); if (!c) return; if (window.Plotly && c._fullLayout) Plotly.purge(c); c.className=`${className} empty-state`; c.textContent=message; }
 function setLoadingChart(id, message="Loading…", className="bar-chart") {
   const c = $(id); if (!c) return;
+  if (window.Plotly && c._fullLayout) Plotly.purge(c);
   c.className = className;
   c.innerHTML = `<div class="chart-loading"><div class="spinner" aria-hidden="true"></div><span>${escapeHtml(message)}</span></div>`;
 }
@@ -628,8 +708,66 @@ function valueFor(row, keys) { for (const key of keys) { const value = Number(ro
 function timingTotal(row) { const known = timingPhases.reduce((sum, phase) => sum + Math.max(0, valueFor(row, phase.keys)), 0), total = valueFor(row, ["total_sec", "totalSeconds", "total_seconds"]); return Math.max(total, known); }
 function buildTimingStacks(rows) { return (rows || []).map(row => { const segments = timingPhases.map(phase => ({ label:phase.label, value:Math.max(0, valueFor(row, phase.keys)), color:phase.color })).filter(segment => segment.value > 0.001); const known = segments.reduce((sum, segment) => sum + segment.value, 0), total = valueFor(row, ["total_sec", "totalSeconds", "total_seconds"]); if (total > known + 0.01) segments.push({ label:"Other / setup", value:total - known, color:"#607080" }); return { label:String(row.output || row.scenario || row.outputId || "Run"), total:Math.max(total, known), segments }; }).filter(row => row.segments.length); }
 function buildCostStacks(rows, runs, totals=[]) { const source = (rows || []).filter(row => Number.isFinite(Number(row.cost_MEUR))); if (!source.length) return (totals || []).map(row => { const value = Number(row.value || row.objective || 0); return { label:String(row.output || (row.period === undefined ? "Total cost" : `Period ${row.period}`)), total:value, segments:[{ label:"Total", value, color:chartColors[0] }] }; }).filter(row => Number.isFinite(row.total)); const runNames = (runs || []).map(run => run.name).filter(Boolean); const outputs = runNames.length ? runNames : [...new Set(source.map(row => String(row.output || "Total cost")))]; const values = new Map(), componentTotals = new Map(), outputTotals = new Map(); source.forEach(row => { const output = String(row.output || outputs[0] || "Total cost"), component = String(row.component || "component"), value = Number(row.cost_MEUR || 0), key = `${output}\u0000${component}`; values.set(key, (values.get(key) || 0) + value); componentTotals.set(component, (componentTotals.get(component) || 0) + Math.abs(value)); outputTotals.set(output, (outputTotals.get(output) || 0) + value); }); const components = [...componentTotals.entries()].sort((a,b) => b[1] - a[1]).map(([component]) => component), shown = components.slice(0, 10), other = components.slice(10); return outputs.map(output => { const segments = shown.map((component, i) => ({ label:component, value:values.get(`${output}\u0000${component}`) || 0, color:chartColors[i % chartColors.length] })).filter(segment => Math.abs(segment.value) > 0.001); const otherValue = other.reduce((sum, component) => sum + (values.get(`${output}\u0000${component}`) || 0), 0); if (Math.abs(otherValue) > 0.001) segments.push({ label:"Other", value:otherValue, color:"#607080" }); return { label:output, total:outputTotals.get(output) || segments.reduce((sum, segment) => sum + segment.value, 0), segments }; }).filter(row => row.segments.length); }
-function renderStackedBars(id, rows, unit, className="bar-chart stacked-chart") { const c=$(id); if (!c) return; if(!rows.length){ c.className=`${className} empty-state`; c.textContent="No data available."; return; } c.className=className; const labels=[...new Map(rows.flatMap(row=>row.segments.map(segment=>[segment.label,segment.color]))).entries()], max=Math.max(1,...rows.map(row=>Math.max(Math.abs(row.total || 0), row.segments.reduce((sum, segment)=>sum+Math.abs(segment.value),0)))); c.innerHTML=`<div class="stacked-legend">${labels.map(([label,color])=>`<span class="legend-item"><span class="legend-swatch" style="background:${color}"></span>${escapeHtml(label)}</span>`).join("")}</div>` + rows.slice(0,12).map(row=>{ const rowAbs=row.segments.reduce((sum, segment)=>sum+Math.abs(segment.value),0), width=Math.max(2, Math.max(rowAbs, Math.abs(row.total || 0)) / max * 100); return `<div class="stacked-row"><div class="bar-label" title="${escapeHtml(row.label)}">${escapeHtml(row.label)}</div><div class="stacked-track"><div class="stacked-bar" style="width:${width}%">${row.segments.map(segment=>`<div class="stacked-segment" title="${escapeHtml(segment.label)}: ${escapeHtml(fmt(segment.value))} ${unit}" style="flex:${Math.max(Math.abs(segment.value), 0.001)} 1 0;background:${segment.color}"></div>`).join("")}</div></div><div class="bar-value">${escapeHtml(fmt(row.total))} ${unit}</div></div>`; }).join(""); }
-function renderBars(id, rows, labelFn, valueFn, unit) { const c=$(id); if (!c) return; if(!rows.length){ c.className="bar-chart empty-state"; c.textContent="No data available."; return; } c.className="bar-chart"; const max=Math.max(...rows.map(r=>Math.abs(valueFn(r))),1); c.innerHTML=rows.slice(0,12).map(r=>{ const v=valueFn(r), w=Math.max(2,Math.abs(v)/max*100); return `<div class="bar-row"><div class="bar-label" title="${escapeHtml(labelFn(r))}">${escapeHtml(labelFn(r))}</div><div class="bar-track"><div class="bar-fill ${v<0?"negative":""}" style="width:${w}%"></div></div><div class="bar-value">${escapeHtml(fmt(v))} ${unit}</div></div>`; }).join(""); }
+// Horizontal stacked bar chart. Each input row becomes a y-axis tick, with
+// segment labels stacked across the x-axis. Plotly's barmode:'relative' is
+// what makes negative segments fall left of zero rather than colliding with
+// positives, which we rely on for cost stacks where some components (e.g.
+// salvage) come back negative.
+function renderStackedBars(id, rows, unit, className = "bar-chart plotly-chart compact-chart") {
+  if (!rows || !rows.length) { plotlyEmpty(id, "No data available.", className.replace("plotly-chart", "").trim() || "bar-chart"); return; }
+  const shown = rows.slice(0, 12);
+  const rowLabels = shown.map(r => String(r.label || ""));
+  // Preserve first-seen segment order so colors stay stable across renders.
+  const segOrder = [];
+  const segColor = new Map();
+  shown.forEach(r => (r.segments || []).forEach(s => {
+    if (!segColor.has(s.label)) { segOrder.push(s.label); segColor.set(s.label, s.color); }
+  }));
+  const traces = segOrder.map(label => {
+    const x = shown.map(r => {
+      const seg = (r.segments || []).find(s => s.label === label);
+      return seg ? Number(seg.value || 0) : 0;
+    });
+    return {
+      type: "bar", orientation: "h", name: label,
+      x, y: rowLabels,
+      marker: { color: segColor.get(label), line: { color: "#fff", width: 0.5 } },
+      hovertemplate: `<b>%{fullData.name}</b><br>%{y}: %{x:.4g} ${unit}<extra></extra>`,
+    };
+  });
+  const layout = plotlyBaseLayout({
+    barmode: "relative",
+    height: Math.max(220, 36 * rowLabels.length + 110),
+    xaxis: { title: unit ? unit : "", gridcolor: "#eef2f5", zeroline: true, zerolinecolor: "#0f2436" },
+    yaxis: { autorange: "reversed", automargin: true, gridcolor: "transparent" },
+    legend: { orientation: "h", x: 0, y: -0.18, yanchor: "top", xanchor: "left", font: { size: 11 } },
+  });
+  plotlyRender(id, traces, layout, className);
+}
+// Single-series horizontal bar chart, used for the CO2 price chart and as
+// a fallback for system costs when no component breakdown is available.
+function renderBars(id, rows, labelFn, valueFn, unit) {
+  if (!rows || !rows.length) { plotlyEmpty(id, "No data available.", "bar-chart"); return; }
+  const shown = rows.slice(0, 12);
+  const labels = shown.map(labelFn);
+  const values = shown.map(valueFn);
+  const colors = values.map(v => v < 0 ? "#ba3a2f" : "#1d5f8f");
+  const trace = {
+    type: "bar", orientation: "h",
+    x: values, y: labels,
+    marker: { color: colors },
+    text: values.map(v => `${fmt(v)}${unit ? " " + unit : ""}`),
+    textposition: "auto",
+    hovertemplate: `%{y}<br><b>%{x:.4g}</b>${unit ? " " + unit : ""}<extra></extra>`,
+  };
+  const layout = plotlyBaseLayout({
+    height: Math.max(180, 32 * labels.length + 90),
+    xaxis: { title: unit || "", gridcolor: "#eef2f5", zeroline: true, zerolinecolor: "#0f2436" },
+    yaxis: { autorange: "reversed", automargin: true, gridcolor: "transparent" },
+    showlegend: false,
+  });
+  plotlyRender(id, [trace], layout, "bar-chart plotly-chart");
+}
 function renderCO2Price(rows) {
   const c = $("co2PriceChart"); if (!c) return;
   const data = (rows || []).filter(r => Number.isFinite(Number(r.value)));
@@ -702,15 +840,15 @@ async function refreshHourlyDispatch() {
 }
 function renderHourlyDispatch(payload) {
   const c = $("hourlyDispatchChart"); const legend = $("hourlyDispatchLegend"); if (!c) return;
-  if (!payload) { c.className="profile-chart empty-state"; c.textContent="No dispatch data available."; if (legend) legend.textContent=""; return; }
+  if (!payload) { plotlyEmpty("hourlyDispatchChart", "No dispatch data available.", "profile-chart"); if (legend) legend.textContent=""; return; }
   const techs = payload.techs || [];
   const series = payload.series || [];
   const hours = payload.hours || [];
   if (!techs.length || !series.length || !hours.length) {
-    c.className="profile-chart empty-state";
-    c.textContent = payload.selectedNode
+    const msg = payload.selectedNode
       ? `No dispatch data for node ${payload.selectedNode} in period ${payload.selectedPeriod || ""}.`
       : "No dispatch data available.";
+    plotlyEmpty("hourlyDispatchChart", msg, "profile-chart");
     if (legend) legend.textContent="";
     return;
   }
@@ -720,177 +858,83 @@ function renderHourlyDispatch(payload) {
   const sliceStart = fromHour - 1;
   const sliceEnd = toHour;
   const totalPoints = sliceEnd - sliceStart;
-  if (totalPoints <= 0) { c.className="profile-chart empty-state"; c.textContent="Empty range — adjust From/To hours."; if (legend) legend.textContent=""; return; }
-  c.className = "profile-chart dispatch-chart";
+  if (totalPoints <= 0) { plotlyEmpty("hourlyDispatchChart", "Empty range \u2014 adjust From/To hours.", "profile-chart"); if (legend) legend.textContent=""; return; }
 
-  // Build sliced positive/negative stacks (biggest segment goes on the BOTTOM
-  // of the positive stack and on the TOP of the negative stack — the backend
-  // already ordered techs by descending |total|).
-  const techData = series.map((s, idx) => ({
-    tech: String(s.tech),
-    values: (s.values || []).slice(sliceStart, sliceEnd),
-    color: chartColors[idx % chartColors.length],
-    hidden: state.dispatchLegendOff.has(String(s.tech)),
-  })).filter(s => s.values.length === totalPoints);
-  if (!techData.length) { c.className="profile-chart empty-state"; c.textContent="No samples in range."; if (legend) legend.textContent=""; return; }
-
-  // Downsample for screen: keep at most ~960 segments so the SVG stays light.
-  const maxSamples = 960;
+  // Downsample so the trace count stays light when zoomed out across 8760 h.
+  // Plotly handles ~50k points easily but each tech becomes two traces (one
+  // for the positive stack, one for the negative stack), so even ~22 techs
+  // means ~44 traces \u00d7 8760 points = lots of layout work.
+  const maxSamples = 2400;
   const step = Math.max(1, Math.floor(totalPoints / maxSamples));
-  const sampledIdx = [];
-  for (let i = 0; i < totalPoints; i += step) sampledIdx.push(i);
-  if (sampledIdx[sampledIdx.length - 1] !== totalPoints - 1) sampledIdx.push(totalPoints - 1);
-  const sampledCount = sampledIdx.length;
+  const xs = [];
+  for (let i = 0; i < totalPoints; i += step) xs.push(fromHour + i);
+  if (xs[xs.length - 1] !== fromHour + totalPoints - 1) xs.push(fromHour + totalPoints - 1);
 
-  const W = 1100, H = 360, p = { l: 70, r: 24, t: 18, b: 36 };
-  const sx = i => p.l + i / Math.max(1, sampledCount - 1) * (W - p.l - p.r);
-
-  // Per-sample stacked positive and negative cumulative arrays.
-  const visibleTechs = techData.filter(t => !t.hidden);
-  const posCum = new Array(sampledCount).fill(0);
-  const negCum = new Array(sampledCount).fill(0);
-  // For each tech, store its [y0, y1] band per sample as cumulative.
-  const techBands = visibleTechs.map(t => {
-    const lower = new Array(sampledCount);
-    const upper = new Array(sampledCount);
-    for (let k = 0; k < sampledCount; k++) {
-      const v = Number(t.values[sampledIdx[k]] || 0);
-      if (v >= 0) { lower[k] = posCum[k]; posCum[k] += v; upper[k] = posCum[k]; }
-      else        { upper[k] = negCum[k]; negCum[k] += v; lower[k] = negCum[k]; }
+  // Build per-tech traces split into positive and negative stack groups so
+  // values stack symmetrically above and below zero.
+  const traces = [];
+  series.forEach((s, idx) => {
+    const tech = String(s.tech);
+    const color = chartColors[idx % chartColors.length];
+    const slice = (s.values || []).slice(sliceStart, sliceEnd);
+    const yPos = xs.map(h => Math.max(0, Number(slice[h - fromHour] || 0)));
+    const yNeg = xs.map(h => Math.min(0, Number(slice[h - fromHour] || 0)));
+    const hasPos = yPos.some(v => v > 0);
+    const hasNeg = yNeg.some(v => v < 0);
+    const visible = state.dispatchLegendOff.has(tech) ? "legendonly" : true;
+    if (hasPos) {
+      traces.push({
+        type: "scatter", mode: "lines", name: tech, legendgroup: tech, showlegend: true,
+        x: xs, y: yPos,
+        stackgroup: "pos",
+        fillcolor: color,
+        line: { color: color, width: 0.6 },
+        hovertemplate: `<b>${tech}</b><br>Hour %{x}: %{y:.4g}<extra></extra>`,
+        visible,
+      });
     }
-    return { tech: t.tech, color: t.color, lower, upper };
-  });
-  const yMax = Math.max(1e-9, ...posCum);
-  const yMin = Math.min(0,    ...negCum);
-  const sy = y => H - p.b - (y - yMin) / Math.max(1e-9, (yMax - yMin)) * (H - p.t - p.b);
-
-  // Build a polygon path for each tech band.
-  const pathFor = band => {
-    let d = "";
-    for (let k = 0; k < sampledCount; k++) {
-      const x = sx(k).toFixed(1);
-      const y = sy(band.upper[k]).toFixed(1);
-      d += (k === 0 ? "M" : "L") + x + "," + y + " ";
-    }
-    for (let k = sampledCount - 1; k >= 0; k--) {
-      const x = sx(k).toFixed(1);
-      const y = sy(band.lower[k]).toFixed(1);
-      d += "L" + x + "," + y + " ";
-    }
-    d += "Z";
-    return d;
-  };
-  const areaEls = techBands.map(band => `<path class="dispatch-area" data-tech="${escapeHtml(band.tech)}" d="${pathFor(band)}" fill="${band.color}" fill-opacity="0.85" stroke="${band.color}" stroke-width="0.4"></path>`).join("");
-
-  // Gridlines (x = hour, y = value)
-  const xTicks = 12, yTicks = 5;
-  const xGrid = Array.from({length: xTicks + 1}, (_, i) => {
-    const sampleIdx = Math.round(i * (sampledCount - 1) / xTicks);
-    const hour = fromHour + sampledIdx * step;
-    const x = sx(sampleIdx);
-    return `<line x1="${x.toFixed(1)}" y1="${p.t}" x2="${x.toFixed(1)}" y2="${H - p.b}" stroke="#eef2f5" stroke-width="1"></line>`
-      + `<text x="${x.toFixed(1)}" y="${H - p.b + 16}" font-size="11" fill="#647280" text-anchor="middle">${hour}</text>`;
-  }).join("");
-  const yGrid = Array.from({length: yTicks + 1}, (_, i) => {
-    const y = yMin + i * (yMax - yMin) / yTicks;
-    return `<line x1="${p.l}" y1="${sy(y).toFixed(1)}" x2="${W - p.r}" y2="${sy(y).toFixed(1)}" stroke="#eef2f5" stroke-width="1"></line>`
-      + `<text x="${p.l - 8}" y="${(sy(y) + 4).toFixed(1)}" font-size="11" fill="#647280" text-anchor="end">${fmt(y)}</text>`;
-  }).join("");
-
-  c.innerHTML = `<svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Hourly dispatch stacked area">${xGrid}${yGrid}${areaEls}`
-    + `<line x1="${p.l}" y1="${H - p.b}" x2="${W - p.r}" y2="${H - p.b}" stroke="#d8e1e8"></line>`
-    + `<line x1="${p.l}" y1="${p.t}" x2="${p.l}" y2="${H - p.b}" stroke="#d8e1e8"></line>`
-    + `<rect class="dispatch-brush" x="0" y="0" width="0" height="0" fill="#1d5f8f" fill-opacity="0.15" stroke="#1d5f8f" stroke-width="1" stroke-dasharray="4 2" pointer-events="none"></rect>`
-    + `<rect class="dispatch-hit" x="${p.l}" y="${p.t}" width="${W - p.l - p.r}" height="${H - p.t - p.b}" fill="transparent" cursor="crosshair"></rect>`
-    + `<line class="dispatch-cursor" x1="0" y1="${p.t}" x2="0" y2="${H - p.b}" stroke="#0f2436" stroke-width="0.8" stroke-dasharray="2 2" opacity="0" pointer-events="none"></line>`
-    + `</svg>`
-    + `<div class="dispatch-tooltip" role="tooltip" aria-hidden="true"></div>`
-    + `<div class="dispatch-legend">${techData.map(t => `<span class="legend-item${t.hidden?" disabled":""}" data-tech="${escapeHtml(t.tech)}"><span class="legend-swatch" style="background:${t.color}"></span>${escapeHtml(t.tech)}</span>`).join("")}</div>`;
-  if (legend) legend.textContent = `${visibleTechs.length}/${techData.length} tech(s) shown · hours ${fromHour}–${toHour} of ${hoursLen} · node ${payload.selectedNode || "(all)"} · period ${payload.selectedPeriod || ""}`;
-  bindDispatchInteraction(c, techBands, sampledIdx, sampledCount, fromHour, step, sx, sy, W, H, p);
-}
-function bindDispatchInteraction(container, techBands, sampledIdx, sampledCount, fromHour, step, sx, sy, W, H, p) {
-  const svg = container.querySelector("svg");
-  const tooltip = container.querySelector(".dispatch-tooltip");
-  const cursor = container.querySelector(".dispatch-cursor");
-  const brush = container.querySelector(".dispatch-brush");
-  function svgPt(clientX) {
-    const rect = svg.getBoundingClientRect();
-    return (clientX - rect.left) / rect.width * W;
-  }
-  function nearestSample(svgX) {
-    if (sampledCount <= 1) return 0;
-    const ratio = (svgX - p.l) / Math.max(1, W - p.l - p.r);
-    const idx = Math.round(ratio * (sampledCount - 1));
-    return Math.max(0, Math.min(sampledCount - 1, idx));
-  }
-  function showTooltip(k, clientX) {
-    if (k == null || !techBands.length) { tooltip.classList.remove("show"); cursor.setAttribute("opacity","0"); return; }
-    const x = sx(k);
-    cursor.setAttribute("x1", x.toFixed(1));
-    cursor.setAttribute("x2", x.toFixed(1));
-    cursor.setAttribute("opacity","1");
-    const hour = fromHour + sampledIdx[k] * step;
-    const lines = techBands.map(b => {
-      const v = b.upper[k] - b.lower[k];
-      if (Math.abs(v) < 1e-6) return "";
-      return `<div><span class="legend-swatch" style="background:${b.color}"></span> <strong>${escapeHtml(b.tech)}</strong>: ${escapeHtml(fmt(v))}</div>`;
-    }).filter(Boolean).join("");
-    const total = techBands.reduce((s, b) => s + (b.upper[k] - b.lower[k]), 0);
-    tooltip.innerHTML = `<div><strong>Hour ${hour}</strong> (day ${Math.ceil(hour/24)}, h-of-day ${((hour-1)%24)+1})</div>${lines}<div style="margin-top:4px"><strong>Total:</strong> ${escapeHtml(fmt(total))}</div>`;
-    const cRect = container.getBoundingClientRect();
-    const svgRect = svg.getBoundingClientRect();
-    const px = svgRect.left + x / W * svgRect.width - cRect.left;
-    tooltip.style.left = `${px}px`;
-    tooltip.style.top = `${svgRect.top - cRect.top + 8}px`;
-    tooltip.classList.add("show");
-  }
-  let dragStart = null;
-  svg.addEventListener("mousemove", e => {
-    const x = svgPt(e.clientX);
-    const k = nearestSample(x);
-    showTooltip(k, e.clientX);
-    if (dragStart != null) {
-      const lo = Math.min(dragStart, x), hi = Math.max(dragStart, x);
-      brush.setAttribute("x", lo.toFixed(1));
-      brush.setAttribute("y", String(p.t));
-      brush.setAttribute("width", (hi - lo).toFixed(1));
-      brush.setAttribute("height", String(H - p.t - p.b));
+    if (hasNeg) {
+      traces.push({
+        type: "scatter", mode: "lines", name: tech, legendgroup: tech, showlegend: !hasPos,
+        x: xs, y: yNeg,
+        stackgroup: "neg",
+        fillcolor: color,
+        line: { color: color, width: 0.6 },
+        hovertemplate: `<b>${tech}</b><br>Hour %{x}: %{y:.4g}<extra></extra>`,
+        visible,
+      });
     }
   });
-  svg.addEventListener("mouseleave", () => { showTooltip(null); dragStart = null; brush.setAttribute("width","0"); });
-  svg.addEventListener("mousedown", e => {
-    if (e.button !== 0) return;
-    dragStart = svgPt(e.clientX);
-    brush.setAttribute("x", String(dragStart));
-    brush.setAttribute("y", String(p.t));
-    brush.setAttribute("width","0");
-    brush.setAttribute("height", String(H - p.t - p.b));
+
+  const layout = plotlyBaseLayout({
+    height: 420,
+    xaxis: { title: "Hour of year", gridcolor: "#eef2f5", range: [fromHour, toHour] },
+    yaxis: { title: "Dispatch", gridcolor: "#eef2f5", zeroline: true, zerolinecolor: "#0f2436", zerolinewidth: 1 },
+    hovermode: "x unified",
+    legend: { orientation: "v", x: 1.02, y: 1, xanchor: "left", yanchor: "top", font: { size: 11 } },
+    margin: { t: 24, r: 200, b: 56, l: 80 },
   });
-  svg.addEventListener("mouseup", e => {
-    if (dragStart == null) return;
-    const x = svgPt(e.clientX);
-    const lo = Math.min(dragStart, x), hi = Math.max(dragStart, x);
-    dragStart = null;
-    brush.setAttribute("width","0");
-    if (hi - lo < 6) return;  // ignore click-like drags
-    const k0 = nearestSample(lo), k1 = nearestSample(hi);
-    const newFrom = fromHour + sampledIdx[k0] * step;
-    const newTo   = fromHour + sampledIdx[k1] * step;
-    state.dispatchFromHour = Math.max(1, Math.min(newFrom, newTo));
-    state.dispatchToHour   = Math.min(8760, Math.max(newFrom, newTo));
-    const f = $("hourlyDispatchFrom"); if (f) f.value = state.dispatchFromHour;
-    const t = $("hourlyDispatchTo"); if (t) t.value = state.dispatchToHour;
-    renderHourlyDispatch(state.dispatchPayload);
-  });
-  // Legend toggle (hide/show a tech)
-  container.querySelectorAll(".dispatch-legend .legend-item").forEach(el => {
-    el.addEventListener("click", () => {
-      const t = el.dataset.tech;
-      if (state.dispatchLegendOff.has(t)) state.dispatchLegendOff.delete(t); else state.dispatchLegendOff.add(t);
-      renderHourlyDispatch(state.dispatchPayload);
+  plotlyRender("hourlyDispatchChart", traces, layout, "profile-chart plotly-chart");
+  if (legend) legend.textContent = `${series.length} tech(s) \u00b7 hours ${fromHour}\u2013${toHour} of ${hoursLen} \u00b7 node ${payload.selectedNode || "(all)"} \u00b7 period ${payload.selectedPeriod || ""}`;
+
+  // Persist the user's legend-toggle choices into state.dispatchLegendOff so
+  // re-renders triggered by From/To changes keep the same series hidden.
+  if (!c.__plotlyDispatchBound) {
+    c.on("plotly_restyle", () => {
+      try {
+        const off = new Set();
+        const seen = new Map();
+        (c.data || []).forEach(t => {
+          const isLegendOnly = t.visible === "legendonly";
+          if (!seen.has(t.name)) seen.set(t.name, isLegendOnly);
+          else if (!isLegendOnly) seen.set(t.name, false);
+        });
+        seen.forEach((isOff, name) => { if (isOff) off.add(name); });
+        state.dispatchLegendOff = off;
+      } catch (_) { /* ignore */ }
     });
-  });
+    c.__plotlyDispatchBound = true;
+  }
 }
 function renderActivityPrices(rows) {
   const c = $("activityPricesTable"); if (!c) return;
@@ -997,124 +1041,43 @@ function buildVerticalSeriesFromRows(rows, categoryKey, seriesKey, valueKey) {
   return { categories, series };
 }
 // Vertical stacked bar chart with native support for negative values and a
-// black diamond marker for the per-category net total. Uses raw SVG so the
-// chart can be embedded without any external dependency. Hover interactions
-// dim non-hovered segments and surface a tooltip with the segment label and
-// value. Clicking a legend entry toggles the series visibility.
+// black diamond marker for the per-category net total. Plotly's
+// barmode:'relative' stacks negatives below zero and positives above so the
+// chart axis stays anchored at zero. The Net marker is drawn as a separate
+// scatter trace so it always overlays the stack.
 function renderVerticalStackedBars(id, options) {
   const c = $(id); if (!c) return;
   const categories = options.categories || [];
-  const allSeries = (options.series || []).map(s => ({ ...s }));
-  if (!categories.length || !allSeries.length) { setEmptyChart(id, "No data available.", "vstack-chart"); return; }
-  c.className = "vstack-chart";
-  const stateKey = `__vstackHidden_${id}`;
-  if (!Array.isArray(c[stateKey])) c[stateKey] = [];
-  const hiddenSet = new Set(c[stateKey]);
-  const series = allSeries.map(s => ({ ...s, hidden: hiddenSet.has(s.label) }));
-  const W = Math.max(420, c.clientWidth || 720);
-  const H = 360;
-  const padL = 64, padR = 18, padT = 18, padB = 44;
-  const innerW = W - padL - padR, innerH = H - padT - padB;
-  const showNet = !!options.showNet;
+  const allSeries = options.series || [];
+  if (!categories.length || !allSeries.length) { plotlyEmpty(id, "No data available.", "vstack-chart"); return; }
+  const xLabels = categories.map(cat => options.categoryLabel ? options.categoryLabel(cat) : String(cat));
   const unit = options.unit || "";
-  const fmtVal = options.formatValue || (v => fmt(v));
-  // Compute the worst-case +/- envelope per category, taking only currently
-  // visible series into account. The y-scale spans both sides symmetrically
-  // around 0 so the zero line sits at a stable position across periods.
-  let maxPos = 0, maxNeg = 0;
-  const nets = categories.map((cat, i) => {
-    let pos = 0, neg = 0;
-    series.forEach(s => {
-      if (s.hidden) return;
-      const v = Number(s.values[i] || 0);
-      if (v >= 0) pos += v; else neg += v;
+  const traces = allSeries.map(s => ({
+    type: "bar",
+    name: s.label,
+    x: xLabels,
+    y: (s.values || []).slice(),
+    marker: { color: s.color, line: { color: "#fff", width: 0.6 } },
+    hovertemplate: `<b>${escapeHtml(s.label)}</b><br>%{x}: %{y:.4g} ${unit}<extra></extra>`,
+  }));
+  if (options.showNet) {
+    const nets = categories.map((_, i) => allSeries.reduce((sum, s) => sum + Number((s.values || [])[i] || 0), 0));
+    traces.push({
+      type: "scatter", mode: "markers",
+      name: "Net",
+      x: xLabels, y: nets,
+      marker: { color: "#000", size: 11, symbol: "diamond", line: { color: "#fff", width: 1.2 } },
+      hovertemplate: `<b>Net</b><br>%{x}: %{y:.4g} ${unit}<extra></extra>`,
     });
-    if (pos > maxPos) maxPos = pos;
-    if (neg < maxNeg) maxNeg = neg;
-    return pos + neg;
+  }
+  const layout = plotlyBaseLayout({
+    barmode: "relative",
+    height: 380,
+    xaxis: { type: "category", gridcolor: "transparent", tickangle: 0 },
+    yaxis: { title: unit, gridcolor: "#eef2f5", zeroline: true, zerolinecolor: "#0f2436", zerolinewidth: 1.2 },
+    legend: { orientation: "h", x: 0, y: -0.15, yanchor: "top", xanchor: "left", font: { size: 11 } },
   });
-  const yMaxRaw = Math.max(maxPos, Math.abs(maxNeg), 1e-6);
-  const niceStep = niceTickStep(yMaxRaw);
-  const yMax = Math.ceil(maxPos / niceStep) * niceStep || niceStep;
-  const yMin = Math.floor(maxNeg / niceStep) * niceStep;
-  const span = (yMax - yMin) || 1;
-  const yScale = v => padT + innerH * (1 - (v - yMin) / span);
-  const barWidth = Math.max(20, Math.min(72, innerW / categories.length * 0.55));
-  const xCenter = i => padL + innerW * ((i + 0.5) / categories.length);
-  const ticks = [];
-  for (let v = yMin; v <= yMax + 1e-9; v += niceStep) ticks.push(Number(v.toFixed(6)));
-  const grid = ticks.map(t => `<line class="vstack-grid" x1="${padL}" y1="${yScale(t).toFixed(2)}" x2="${padL+innerW}" y2="${yScale(t).toFixed(2)}"></line>`).join("");
-  const tickLabels = ticks.map(t => `<text class="vstack-tick" x="${padL-8}" y="${(yScale(t)+3).toFixed(2)}" text-anchor="end">${escapeHtml(fmtVal(t))}</text>`).join("");
-  const zeroLine = `<line class="vstack-zero" x1="${padL}" y1="${yScale(0).toFixed(2)}" x2="${padL+innerW}" y2="${yScale(0).toFixed(2)}"></line>`;
-  const catLabels = categories.map((cat, i) => `<text class="vstack-cat" x="${xCenter(i).toFixed(2)}" y="${(padT+innerH+22).toFixed(2)}" text-anchor="middle">${escapeHtml(options.categoryLabel ? options.categoryLabel(cat) : String(cat))}</text>`).join("");
-  // Stack the segments around 0 — positives accumulate upward, negatives
-  // downward. Hidden series simply skip their slot.
-  const segs = [];
-  categories.forEach((cat, i) => {
-    let posAcc = 0, negAcc = 0;
-    series.forEach(s => {
-      if (s.hidden) return;
-      const v = Number(s.values[i] || 0);
-      if (Math.abs(v) < 1e-9) return;
-      const x = xCenter(i) - barWidth / 2;
-      let y0, y1;
-      if (v >= 0) { y0 = posAcc; y1 = posAcc + v; posAcc = y1; }
-      else        { y0 = negAcc; y1 = negAcc + v; negAcc = y1; }
-      const yTop = Math.min(yScale(y0), yScale(y1));
-      const yBot = Math.max(yScale(y0), yScale(y1));
-      const h = Math.max(0.6, yBot - yTop);
-      segs.push({ cat, label:s.label, value:v, color:s.color, x, y:yTop, w:barWidth, h });
-    });
-  });
-  const segsSvg = segs.map((s, idx) => `<rect class="vstack-segment" data-idx="${idx}" x="${s.x.toFixed(2)}" y="${s.y.toFixed(2)}" width="${s.w.toFixed(2)}" height="${s.h.toFixed(2)}" fill="${s.color}" stroke="#fff" stroke-width="0.6"></rect>`).join("");
-  // Black diamond marker on each bar at the visible-series net total. Drawn
-  // last so the stroke sits above the segments.
-  const netSvg = !showNet ? "" : categories.map((cat, i) => {
-    const cx = xCenter(i), cy = yScale(nets[i]);
-    const sz = 7;
-    return `<polygon class="vstack-net" points="${cx},${cy-sz} ${cx+sz},${cy} ${cx},${cy+sz} ${cx-sz},${cy}" data-net="1" data-cat-idx="${i}"></polygon>`;
-  }).join("");
-  const svg = `<svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">${grid}${zeroLine}${segsSvg}${netSvg}<line class="vstack-axis" x1="${padL}" y1="${padT}" x2="${padL}" y2="${padT+innerH}"></line><line class="vstack-axis" x1="${padL}" y1="${padT+innerH}" x2="${padL+innerW}" y2="${padT+innerH}"></line>${tickLabels}${catLabels}</svg>`;
-  const legendItems = allSeries.map(s => {
-    const dis = hiddenSet.has(s.label) ? " disabled" : "";
-    return `<span class="legend-item${dis}" data-label="${escapeHtml(s.label)}"><span class="legend-swatch" style="background:${s.color}"></span>${escapeHtml(s.label)}</span>`;
-  }).join("");
-  const netLegend = showNet ? `<span class="legend-item net-marker" title="Net (sum of visible series)"><span class="legend-swatch"></span>Net</span>` : "";
-  const legend = `<div class="vstack-legend">${netLegend}${legendItems}</div>`;
-  c.innerHTML = `${svg}<div class="vstack-tooltip" id="${id}_tip"></div>${legend}`;
-  const tip = $(`${id}_tip`);
-  c.querySelectorAll(".legend-item[data-label]").forEach(el => {
-    el.addEventListener("click", () => {
-      const label = el.dataset.label;
-      const cur = new Set(c[stateKey] || []);
-      if (cur.has(label)) cur.delete(label); else cur.add(label);
-      c[stateKey] = [...cur];
-      renderVerticalStackedBars(id, options);
-    });
-  });
-  c.querySelectorAll(".vstack-segment").forEach(rect => {
-    rect.addEventListener("mousemove", evt => {
-      const idx = Number(rect.dataset.idx);
-      const s = segs[idx]; if (!s) return;
-      const r = c.getBoundingClientRect();
-      tip.style.left = `${evt.clientX - r.left}px`;
-      tip.style.top  = `${evt.clientY - r.top - 32}px`;
-      tip.innerHTML = `<strong>${escapeHtml(s.label)}</strong><br>${escapeHtml(options.categoryLabel ? options.categoryLabel(s.cat) : String(s.cat))}: ${escapeHtml(fmtVal(s.value))} ${escapeHtml(unit)}`;
-      tip.classList.add("show");
-    });
-    rect.addEventListener("mouseleave", () => { tip.classList.remove("show"); });
-  });
-  c.querySelectorAll(".vstack-net").forEach(poly => {
-    poly.addEventListener("mousemove", evt => {
-      const i = Number(poly.dataset.catIdx);
-      const r = c.getBoundingClientRect();
-      tip.style.left = `${evt.clientX - r.left}px`;
-      tip.style.top  = `${evt.clientY - r.top - 32}px`;
-      tip.innerHTML = `<strong>Net</strong><br>${escapeHtml(options.categoryLabel ? options.categoryLabel(categories[i]) : String(categories[i]))}: ${escapeHtml(fmtVal(nets[i]))} ${escapeHtml(unit)}`;
-      tip.classList.add("show");
-    });
-    poly.addEventListener("mouseleave", () => { tip.classList.remove("show"); });
-  });
+  plotlyRender(id, traces, layout, "vstack-chart plotly-chart");
 }
 // Pick a "nice" tick step that yields ~5-7 gridlines for the given absolute
 // y-extent. Returns one of 1, 2, 2.5 or 5 times a power of ten.

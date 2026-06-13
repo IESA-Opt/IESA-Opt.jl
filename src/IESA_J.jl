@@ -81,6 +81,8 @@ include("clustering.jl")
 # ---------------------------------------------------------------------------
 # Orchestration (Phase 2+)
 include("solve.jl")
+# Diagnostics for infeasible / near-infeasible runs (Show violations + IIS)
+include("violations.jl")
 # include("postprocess.jl")
 include("writers.jl")
 include("ui_server.jl")

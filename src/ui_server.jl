@@ -227,7 +227,6 @@ function _ui_options()
             "extremeDays" => 5,
             "boundaryRamping" => true,
             "hourlyReports" => true,
-            "saveCase" => false,
             "showViolations" => false,
             "outputMode" => "automatic",
             "constraintGroup" => "Base + Bunkers + Scope3"
@@ -258,8 +257,58 @@ end
 # supported. Windows-only for now (PowerShell + System.Windows.Forms). The dialog
 # is launched in a single-threaded apartment (-STA) because OpenFileDialog
 # requires it.
+
+# Native Win32 file picker via comdlg32.GetOpenFileNameW. ~50 ms instead of
+# ~1 s for a cold PowerShell + WinForms subprocess. The dialog adopts the
+# foreground window as its owner so it appears in front of the browser.
+# Returns a path string, "" for cancel, or `nothing` if the native picker is
+# unavailable (caller falls back to PowerShell). Layout below is x64; on
+# anything else we bail out.
+const _COMDLG_OFN_SIZE  = 152  # x64 OPENFILENAMEW size in bytes
+# OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR
+const _COMDLG_OFN_FLAGS = UInt32(0x00001000 | 0x00000800 | 0x00080000 | 0x00000008)
+function _browse_for_input_file_native()
+    (Sys.iswindows() && Sys.WORD_SIZE == 64) || return nothing
+    initial_dir = joinpath(_repo_root(), "data")
+    isdir(initial_dir) || (initial_dir = _repo_root())
+    # OPENFILENAMEW filter format: "<label>\0<patterns>\0…\0\0"
+    filter_w  = transcode(UInt16,
+        "Excel files (*.xlsx;*.xlsm;*.xls)\0*.xlsx;*.xlsm;*.xls\0" *
+        "All files (*.*)\0*.*\0\0")
+    title_w   = transcode(UInt16, "Select IESA-Opt input workbook\0")
+    initdir_w = transcode(UInt16, initial_dir * "\0")
+    nMaxFile  = UInt32(2048)
+    file_buf  = zeros(UInt16, nMaxFile)
+    ofn       = zeros(UInt8, _COMDLG_OFN_SIZE)
+    ok = try
+        hwnd_fg = ccall((:GetForegroundWindow, "user32"), Ptr{Cvoid}, ())
+        GC.@preserve ofn filter_w title_w initdir_w file_buf begin
+            p = pointer(ofn)
+            unsafe_store!(Ptr{UInt32}(p + 0),       UInt32(_COMDLG_OFN_SIZE))   # lStructSize
+            unsafe_store!(Ptr{Ptr{Cvoid}}(p + 8),   hwnd_fg)                    # hwndOwner
+            unsafe_store!(Ptr{Ptr{UInt16}}(p + 24), pointer(filter_w))          # lpstrFilter
+            unsafe_store!(Ptr{Ptr{UInt16}}(p + 48), pointer(file_buf))          # lpstrFile
+            unsafe_store!(Ptr{UInt32}(p + 56),      nMaxFile)                   # nMaxFile
+            unsafe_store!(Ptr{Ptr{UInt16}}(p + 80), pointer(initdir_w))         # lpstrInitialDir
+            unsafe_store!(Ptr{Ptr{UInt16}}(p + 88), pointer(title_w))           # lpstrTitle
+            unsafe_store!(Ptr{UInt32}(p + 96),      _COMDLG_OFN_FLAGS)          # Flags
+            ccall((:GetOpenFileNameW, "comdlg32"), Cint, (Ptr{Cvoid},), p)
+        end
+    catch err
+        @warn "Native file picker unavailable; falling back to PowerShell" error = sprint(showerror, err)
+        return nothing
+    end
+    ok == 0 && return ""  # user cancelled
+    n = findfirst(==(UInt16(0)), file_buf)
+    n = n === nothing ? length(file_buf) : n - 1
+    n == 0 && return ""
+    return transcode(String, file_buf[1:n])
+end
+
 function _browse_for_input_file()
     Sys.iswindows() || return ""
+    native = _browse_for_input_file_native()
+    native === nothing || return native
     initial_dir = joinpath(_repo_root(), "data")
     if !isdir(initial_dir)
         initial_dir = _repo_root()
@@ -800,6 +849,81 @@ end
 
 _short_error(err) = first(split(sprint(showerror, err), '\n'))
 
+# Report constraints whose elastic slack is non-zero after a "Show
+# violations" run.  Emits a single multi-line job log message so users
+# can see the worst offenders in the Progress tab.
+function _report_elastic_slacks!(job_id::AbstractString, penalty_map; max_show::Int = 25)
+    rows = try
+        report_nonzero_slacks(penalty_map)
+    catch err
+        _job_update!(job_id; stage = "solve",
+                     message = "Could not extract slack values: $(_short_error(err))")
+        return
+    end
+    if isempty(rows)
+        _job_update!(job_id; stage = "solve",
+                     message = "Show violations: model is naturally feasible — no constraint needed slack.")
+        return
+    end
+    top = rows[1:min(max_show, length(rows))]
+    fams = unique([r.family for r in rows])
+    lines = String[]
+    push!(lines, "Show violations: $(length(rows)) constraints needed slack to make the model feasible.")
+    push!(lines, "Families involved: $(join(fams, ", "))")
+    push!(lines, "Top $(length(top)) by slack magnitude:")
+    for r in top
+        push!(lines, "  • $(r.name)  slack = $(round(r.slack; sigdigits = 4))")
+    end
+    _job_update!(job_id; stage = "solve", message = join(lines, "\n"),
+                 extra = Dict("violations" => Dict(
+                    "count" => length(rows),
+                    "families" => fams,
+                    "top" => [Dict("name" => r.name, "slack" => r.slack, "family" => r.family) for r in top])))
+end
+
+# IIS analysis when an unrelaxed model returns INFEASIBLE.  Commercial
+# solvers only (Gurobi / CPLEX / Xpress); for others, emit a hint.
+function _report_iis!(job_id::AbstractString, model::JuMP.Model, solver_label::AbstractString)
+    _job_update!(job_id; stage = "solve",
+                 message = "Model is infeasible — running IIS analysis with $(solver_label)…")
+    rep = try
+        compute_iis_report(model)
+    catch err
+        _job_update!(job_id; stage = "solve",
+                     message = "IIS analysis failed: $(_short_error(err)). Enable Show violations for an elastic re-solve that works on every solver.")
+        return
+    end
+    if !rep.supported
+        msg = "$(solver_label) does not implement IIS / conflict refinement"
+        isempty(rep.error) || (msg *= " ($(rep.error))")
+        msg *= ". Switch to Gurobi / CPLEX / Xpress, or enable Show violations to find the offending constraints with an elastic re-solve."
+        _job_update!(job_id; stage = "solve", message = msg)
+        return
+    end
+    if isempty(rep.names)
+        msg = "IIS analysis ran but the solver reported no conflict."
+        isempty(rep.error) || (msg *= " $(rep.error)")
+        _job_update!(job_id; stage = "solve", message = msg)
+        return
+    end
+    top = rep.names[1:min(25, length(rep.names))]
+    lines = String[]
+    push!(lines, "Irreducible infeasible subsystem: $(length(rep.names)) constraints.")
+    push!(lines, "Families involved: $(join(rep.families, ", "))")
+    push!(lines, "First $(length(top)):")
+    for n in top
+        push!(lines, "  • $(n)")
+    end
+    hint = iis_suggestion(rep.families)
+    isempty(hint) || push!(lines, "Suggestion: $(hint)")
+    _job_update!(job_id; stage = "solve", message = join(lines, "\n"),
+                 extra = Dict("iis" => Dict(
+                    "count" => length(rep.names),
+                    "families" => rep.families,
+                    "names" => top,
+                    "suggestion" => hint)))
+end
+
 function _start_ui_job!(raw_config)
     config = _normalize_run_config(raw_config)
     job_id = Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
@@ -876,7 +1000,6 @@ function _normalize_run_config(raw_config)
         "extremeDays" => _as_int(_config_get(raw_config, "extremeDays", 5), 5),
         "boundaryRamping" => _as_bool(_config_get(raw_config, "boundaryRamping", true), true),
         "hourlyReports" => _as_bool(_config_get(raw_config, "hourlyReports", true), true),
-        "saveCase" => _as_bool(_config_get(raw_config, "saveCase", false), false),
         "showViolations" => _as_bool(_config_get(raw_config, "showViolations", false), false),
         "constraintGroup" => String(_config_get(raw_config, "constraintGroup", "Base + Bunkers + Scope3")),
         "outputMode" => output_mode,
@@ -1072,6 +1195,23 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
             mode == :ts ? build_ts_lp!(model, md) : build_fh_lp!(model, md)
         end
         stage_times["generation_sec"] = generation_seconds
+        # Optional elastic relaxation (Show violations checkbox).  Wraps every
+        # non-bound constraint with slack + penalty so the model is always
+        # feasible; we report the constraints with non-zero slack after solve.
+        elastic_penalties = nothing
+        if config["showViolations"] === true
+            _job_update!(job_id; stage = "generation",
+                         message = "Adding elastic slack variables (Show violations enabled)…")
+            try
+                elastic_penalties = apply_elastic_relaxation!(model)
+                _job_update!(job_id; stage = "generation",
+                             message = "Elastic slacks added on $(length(elastic_penalties)) constraints (penalty = $(_ELASTIC_DEFAULT_PENALTY) per unit). Objective will be inflated by the cost of any slack used.")
+            catch err
+                elastic_penalties = nothing
+                _job_update!(job_id; stage = "generation",
+                             message = "Failed to add elastic slacks: $(_short_error(err)). Continuing without violation diagnostics.")
+            end
+        end
         n_rows = try
             num_constraints(model; count_variable_in_set_constraints = false)
         catch
@@ -1100,6 +1240,14 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
             NaN
         end
         _job_update!(job_id; stage = "solve", message = "Solve complete in $(solve_seconds) seconds, status=$(term), objective=$(round(obj, digits = 4))")
+
+        # Diagnostics: report constraints with nonzero slack (elastic mode)
+        # or run an IIS analysis when the model came back infeasible.
+        if elastic_penalties !== nothing
+            _report_elastic_slacks!(job_id, elastic_penalties)
+        elseif term == "INFEASIBLE"
+            _report_iis!(job_id, model, effective_solver)
+        end
 
         out_dir = config["outputDir"]
         mkpath(out_dir)

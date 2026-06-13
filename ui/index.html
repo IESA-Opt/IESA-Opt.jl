@@ -4,6 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>IESA-Opt Runner</title>
+  <link rel="icon" type="image/png" href="/assets/iesa-opt-logo.png">
+  <link rel="apple-touch-icon" href="/assets/iesa-opt-logo.png">
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
@@ -84,7 +86,6 @@
               <summary>Reporting and advanced settings</summary>
               <div class="form-grid three advanced-grid">
                 <label class="field checkbox"><input id="hourlyReports" type="checkbox" checked><span>Hourly reports</span></label>
-                <label class="field checkbox"><input id="saveCase" type="checkbox"><span>Save case</span></label>
                 <label class="field checkbox"><input id="showViolations" type="checkbox"><span>Show violations</span></label>
                 <label class="field checkbox"><input id="extremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
                 <label class="field checkbox"><input id="boundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
@@ -117,16 +118,15 @@
         <section class="results-main">
           <section id="comparisonPanel" class="panel span-2 comparison-panel hidden">
             <div class="panel-title"><h2>Comparison</h2><span id="compareStatus" class="subtle">Select outputs in the sidebar.</span></div>
-            <div class="comparison-charts"><div id="compareChart" class="bar-chart empty-state compact-chart">Select outputs to compare.</div><div id="compareTimeChart" class="bar-chart empty-state compact-chart">Select outputs to compare.</div></div>
             <div class="split-tables"><div id="compareTable" class="table-wrap"></div><div id="compareCostTable" class="table-wrap"></div></div>
           </section>
           <div id="metricGrid" class="metric-grid span-2"></div>
           <section class="panel"><div class="panel-title"><h2>System Costs</h2><div class="panel-toolbar"><span id="resultsOutput" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="systemCostsTable">Show table</button></div></div><div id="systemCostsChart" class="bar-chart empty-state">No results loaded.</div><div id="systemCostsTable" class="table-wrap hidden"></div></section>
           <section class="panel"><div class="panel-title"><h2>Solve Time And Solver Stats</h2><div class="panel-toolbar"><button type="button" class="toggle-table-button secondary-button" data-target="solverSettingsTable">Show table</button></div></div><div id="timingChart" class="bar-chart empty-state">No results loaded.</div><div id="solverSettingsTable" class="table-wrap hidden"></div></section>
-          <section class="panel"><div class="panel-title"><h2>CO<sub>2</sub> Price</h2><div class="panel-toolbar"><span class="subtle">Shadow price of the emission cap (EUR / tCO<sub>2</sub>eq)</span><button type="button" class="toggle-table-button secondary-button" data-target="co2PriceTable">Show table</button></div></div><div id="co2PriceChart" class="bar-chart empty-state">No CO<sub>2</sub> price available.</div><div id="co2PriceTable" class="table-wrap hidden"></div></section>
-          <section class="panel"><div class="panel-title"><h2>Activity Prices</h2><div class="panel-toolbar"><span class="subtle">Shadow prices of balance constraints (EUR / unit)</span><button type="button" class="toggle-table-button secondary-button" data-target="activityPricesTable">Show table</button></div></div><div id="activityPricesTable" class="table-wrap hidden empty-state">No activity prices available.</div></section>
-          <section class="panel span-2"><div class="panel-title"><h2>Power System Capacities</h2><div class="panel-toolbar"><span class="subtle">techStock filtered to power-system technologies</span><button type="button" class="toggle-table-button secondary-button" data-target="powerCapacityTable">Show table</button></div></div><div id="powerCapacityChart" class="bar-chart empty-state">No results loaded.</div><div id="powerCapacityTable" class="table-wrap hidden"></div></section>
-          <section class="panel span-2">
+          <section class="panel single-only"><div class="panel-title"><h2>CO<sub>2</sub> Price</h2><div class="panel-toolbar"><span class="subtle">Shadow price of the emission cap (EUR / tCO<sub>2</sub>eq)</span><button type="button" class="toggle-table-button secondary-button" data-target="co2PriceTable">Show table</button></div></div><div id="co2PriceChart" class="bar-chart empty-state">No CO<sub>2</sub> price available.</div><div id="co2PriceTable" class="table-wrap hidden"></div></section>
+          <section class="panel single-only"><div class="panel-title"><h2>Activity Prices</h2><div class="panel-toolbar"><span class="subtle">Shadow prices of balance constraints (EUR / unit)</span><button type="button" class="toggle-table-button secondary-button" data-target="activityPricesTable">Show table</button></div></div><div id="activityPricesTable" class="table-wrap hidden empty-state">No activity prices available.</div></section>
+          <section class="panel span-2 single-only"><div class="panel-title"><h2>Power System Capacities</h2><div class="panel-toolbar"><span class="subtle">techStock filtered to power-system technologies</span><button type="button" class="toggle-table-button secondary-button" data-target="powerCapacityTable">Show table</button></div></div><div id="powerCapacityChart" class="bar-chart empty-state">No results loaded.</div><div id="powerCapacityTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only">
             <div class="panel-title"><h2>Hourly Dispatch</h2>
               <div class="panel-toolbar">
                 <label class="field inline"><span>Node</span><select id="hourlyDispatchNode"></select></label>
@@ -139,8 +139,8 @@
             </div>
             <div id="hourlyDispatchChart" class="profile-chart empty-state">No results loaded.</div>
           </section>
-          <section class="panel span-2"><div class="panel-title"><h2>Emissions</h2><div class="panel-toolbar"><label class="field inline"><span>Group by</span><select id="emissionsGroupBy"><option value="activity">Activity</option><option value="sector">Sector</option><option value="subsector">Subsector</option><option value="sector_kev">KEV Sector</option><option value="category">Category</option></select></label><label class="field inline"><span>Period</span><select id="emissionsPeriod"><option value="">All</option></select></label><span id="emissionsStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="emissionsTable">Show table</button></div></div><div id="emissionsChart" class="bar-chart empty-state">No emissions data.</div><div id="emissionsTable" class="table-wrap hidden"></div></section>
-          <section class="panel span-2"><div class="panel-title"><h2>Supply / Demand by Activity</h2><div class="panel-toolbar"><label class="field inline"><span>Activity</span><select id="supplyDemandActivity"></select></label><label class="field inline"><span>Period</span><select id="supplyDemandPeriod"><option value="">All</option></select></label><span id="supplyDemandStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="supplyDemandTable">Show table</button></div></div><div id="supplyDemandChart" class="bar-chart empty-state">Select an activity to view supply and demand.</div><div id="supplyDemandTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only"><div class="panel-title"><h2>Emissions</h2><div class="panel-toolbar"><label class="field inline"><span>Group by</span><select id="emissionsGroupBy"><option value="activity">Activity</option><option value="sector">Sector</option><option value="subsector">Subsector</option><option value="sector_kev">KEV Sector</option><option value="category">Category</option></select></label><label class="field inline"><span>Period</span><select id="emissionsPeriod"><option value="">All</option></select></label><span id="emissionsStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="emissionsTable">Show table</button></div></div><div id="emissionsChart" class="bar-chart empty-state">No emissions data.</div><div id="emissionsTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only"><div class="panel-title"><h2>Supply / Demand by Activity</h2><div class="panel-toolbar"><label class="field inline"><span>Activity</span><select id="supplyDemandActivity"></select></label><label class="field inline"><span>Period</span><select id="supplyDemandPeriod"><option value="">All</option></select></label><span id="supplyDemandStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="supplyDemandTable">Show table</button></div></div><div id="supplyDemandChart" class="bar-chart empty-state">Select an activity to view supply and demand.</div><div id="supplyDemandTable" class="table-wrap hidden"></div></section>
         </section>
       </section>
     </section>
@@ -155,9 +155,73 @@
           <a href="https://iesa-opt.github.io/IESA-Opt.jl/v0.1/" target="_blank" rel="noreferrer">Documentation</a>
           <a href="https://iesa-opt.github.io/IESA-Opt.jl/v0.1/user-guide/outputs/" target="_blank" rel="noreferrer">Outputs guide</a>
         </div>
+
+        <h3>Using the dashboard</h3>
+        <p>The dashboard has four tabs along the top: <strong>Run</strong>, <strong>Progress</strong>, <strong>Results</strong>, and <strong>About</strong>. Each tab is described below together with every option it exposes.</p>
+
+        <h3>Run tab</h3>
+        <p>This is the launchpad for a new optimisation. The left side fixes the solver; the right side fixes the scenario, temporal resolution, and reporting flags. Press <strong>Run model</strong> to start; the page will switch to <strong>Progress</strong> automatically.</p>
+        <ul class="about-list">
+          <li><strong>Solver</strong> &mdash; chooses the optimisation backend (HiGHS, Gurobi, etc.). The detail line shows the solver version detected on the system.</li>
+          <li><strong>Solve method</strong> &mdash; algorithm hint passed to the solver (for example <em>simplex</em>, <em>barrier</em>, <em>auto</em>). Available options depend on the selected solver.</li>
+          <li><strong>CPU cores</strong> &mdash; threads given to the solver; <em>0</em> lets the solver pick.</li>
+          <li><strong>Scenario database</strong> &mdash; picks one of the input workbooks bundled in the <code>data/</code> folder.</li>
+          <li><strong>Browse&hellip;</strong> &mdash; selects an Excel/Parquet file from anywhere on disk; <strong>Clear</strong> reverts to the dropdown selection.</li>
+          <li><strong>Years selection</strong> &mdash; chooses which model years (periods) to solve. Multiple years may be selected to run a transition path.</li>
+          <li><strong>Time slicing</strong> &mdash; when on, the model runs on representative days; when off, it runs on full chronological hours.</li>
+          <li><strong>Representative days</strong> &mdash; number of typical days the clustering algorithm produces (only relevant with time slicing on).</li>
+          <li><strong>Time slices</strong> &mdash; total operating time slices used by the model, derived from representative days &times; hours per day.</li>
+          <li><strong>Hours in a day</strong> &mdash; temporal resolution within a representative day (1, 2, 3, 4, 6, 8, 12, 24 hours per slice).</li>
+          <li><strong>Clustering approach</strong> &mdash; algorithm used to pick representative days (e.g. <em>k-means</em>, <em>hierarchical</em>).</li>
+          <li><strong>Extreme days</strong> &mdash; how many extreme days (peak demand, low VRES) are forced into the representative-day set on top of the regular clusters.</li>
+          <li><strong>Hourly reports</strong> &mdash; if checked, hourly profiles are written to the output database (larger files, richer plots).</li>
+          <li><strong>Show violations</strong> &mdash; relaxes every constraint with an elastic slack at penalty <code>1e7</code> per unit (<code>JuMP.relax_with_penalty!</code>) so the solve always returns a feasible point. After the solve the run log lists the constraints whose slack is non&#8209;zero, ranked by magnitude. When this option is <em>off</em> and the model comes back <code>INFEASIBLE</code>, an IIS / conflict analysis is run automatically and the offending constraint names plus a heuristic suggestion are written to the log (works on Gurobi/CPLEX/Xpress; HiGHS support depends on its conflict refinement build).</li>
+          <li><strong>Force extreme periods</strong> &mdash; ensures the extreme days selected above are guaranteed to appear in the solved problem.</li>
+          <li><strong>Boundary ramping</strong> &mdash; enforces ramping limits across the boundary between adjacent representative days.</li>
+          <li><strong>Constraint group</strong> &mdash; chooses a preset of policy constraints to activate (carbon caps, RES targets, etc.).</li>
+          <li><strong>Output name</strong> &mdash; <em>Automatic</em> derives a folder name from the timestamp and configuration; <em>Custom</em> lets you type one.</li>
+        </ul>
+
+        <h3>Progress tab</h3>
+        <p>Live status for the run that is currently solving (or the last one started).</p>
+        <ul class="about-list">
+          <li><strong>Status pill</strong> &mdash; <em>Idle</em>, <em>Running</em>, <em>Solving</em>, <em>Completed</em>, or <em>Failed</em>.</li>
+          <li><strong>Activity lights</strong> &mdash; pulse while data reading, model build, and solve stages are active.</li>
+          <li><strong>Stage steps</strong> &mdash; checklist of pipeline stages with elapsed time per stage.</li>
+          <li><strong>Run log</strong> &mdash; streamed stdout/stderr from Julia and the solver.</li>
+          <li><strong>Stop run</strong> &mdash; cancels an in-flight solve.</li>
+          <li><strong>Open results</strong> &mdash; appears once a run finishes and jumps to its output in the Results tab.</li>
+        </ul>
+
+        <h3>Results tab</h3>
+        <p>Reads finished output folders and renders charts and tables. The sidebar lists every output found under <code>Output/</code> and <code>Output_Batch/</code>.</p>
+        <ul class="about-list">
+          <li><strong>Refresh</strong> &mdash; rescans the output folders.</li>
+          <li><strong>Compare selected</strong> &mdash; opens the comparison view for the runs currently ticked in the sidebar (also triggered automatically when two or more runs are selected).</li>
+          <li><strong>Delete selected</strong> &mdash; permanently removes the selected output folders from disk after a confirmation prompt.</li>
+          <li><strong>Click a run</strong> &mdash; loads the single-run view (cost, timing, prices, capacities, dispatch, emissions, supply/demand).</li>
+          <li><strong>Ctrl/&#8984;-click</strong> &mdash; toggles a run in the compare set.</li>
+          <li><strong>Shift-click</strong> &mdash; range-selects from the last clicked run.</li>
+        </ul>
+        <p>The single-run view shows these panels (each can be expanded to a data table via the <em>Show table</em> button):</p>
+        <ul class="about-list">
+          <li><strong>System Costs</strong> &mdash; total objective and breakdown by cost component, per period.</li>
+          <li><strong>Solve Time And Solver Stats</strong> &mdash; wall-clock time per pipeline stage plus solver settings used.</li>
+          <li><strong>CO<sub>2</sub> Price</strong> &mdash; shadow price of the emission cap, per period.</li>
+          <li><strong>Activity Prices</strong> &mdash; shadow prices of the energy balance constraints (commodity prices) per region.</li>
+          <li><strong>Power System Capacities</strong> &mdash; installed generation, storage, and conversion capacities for the power system, per period.</li>
+          <li><strong>Hourly Dispatch</strong> &mdash; stacked-area dispatch profile over the chosen period and region. Use the period/region/cluster pickers above the chart to change scope; click legend entries to toggle technologies.</li>
+          <li><strong>Emissions</strong> &mdash; emissions per technology and sector, with optional net line.</li>
+          <li><strong>Supply / Demand</strong> &mdash; positive flows above zero, negative flows mirrored below, with optional net line.</li>
+        </ul>
+        <p>In compare mode the System Costs and Solve Time charts switch to a multi-run stacked view, and the comparison panel shows side-by-side timing and cost-component tables. The single-run-only panels (CO<sub>2</sub> Price, Activity Prices, Power Capacities, Hourly Dispatch, Emissions, Supply/Demand) are hidden because they refer to one run only &mdash; click a single row in the sidebar to bring them back.</p>
+
+        <h3>About tab</h3>
+        <p>This page. Use the links above to reach the source code and the full documentation.</p>
       </section>
     </section>
   </main>
+  <script src="/vendor/plotly.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
