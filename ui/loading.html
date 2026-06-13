@@ -1,0 +1,256 @@
+<!doctype html>
+<!--
+  IESA-Opt.jl local UI — bootstrap / loading page.
+
+  scripts/launcher/start-ui.bat / start-ui.ps1 open this page from disk
+  (file://) the moment the launcher starts, so the user sees a friendly
+  screen within a fraction of a second instead of waiting ~10 s for Julia
+  to bind port 8123. The page polls http://127.0.0.1:8123/api/status and
+  redirects to the real UI as soon as the server is reachable.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Starting IESA-Opt.jl…</title>
+  <link rel="icon" type="image/x-icon" href="assets/iesa-opt-ui.ico">
+  <style>
+    :root {
+      --bg: #f7f9fb;
+      --surface: #fff;
+      --soft: #eef6f6;
+      --text: #18242f;
+      --muted: #607080;
+      --line: #d8e1e8;
+      --blue: #1d5f8f;
+      --green: #5a9f3f;
+      --amber: #b77800;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font: 14px/1.5 "Segoe UI", Roboto, Arial, sans-serif;
+    }
+    body {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+    .card {
+      width: 100%;
+      max-width: 520px;
+      background: var(--surface);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: 0 12px 32px rgba(24, 36, 47, .08);
+      padding: 32px 40px 30px;
+      text-align: center;
+    }
+    .logo {
+      display: block;
+      width: auto;
+      max-width: 280px;
+      height: auto;
+      margin: 0 auto 18px;
+      /* docs/src/assets/iesa-opt-logo.png has aspect ratio ~1461:530 (wide). */
+      aspect-ratio: 1461 / 530;
+      object-fit: contain;
+    }
+    h1 {
+      margin: 0 0 4px;
+      font-size: 20px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+    .subtitle {
+      color: var(--muted);
+      margin: 0 0 26px;
+      font-size: 13.5px;
+    }
+    .progress {
+      position: relative;
+      width: 100%;
+      height: 6px;
+      background: #e6edf2;
+      border-radius: 3px;
+      overflow: hidden;
+      margin: 0 0 22px;
+    }
+    .progress::after {
+      content: "";
+      position: absolute;
+      top: 0;
+      left: -40%;
+      width: 40%;
+      height: 100%;
+      background: linear-gradient(90deg, transparent, var(--blue), transparent);
+      animation: slide 1.6s linear infinite;
+    }
+    .progress.done::after { animation: none; left: 0; width: 100%; background: var(--green); }
+    @keyframes slide {
+      from { left: -40%; }
+      to   { left: 100%; }
+    }
+    .stage {
+      color: var(--blue);
+      font-weight: 650;
+      margin: 0 0 4px;
+      min-height: 21px;
+    }
+    .stage.ready { color: var(--green); }
+    .stage.warn  { color: var(--amber); }
+    .elapsed {
+      color: var(--muted);
+      font-size: 13px;
+      font-variant-numeric: tabular-nums;
+      margin: 0 0 28px;
+    }
+    .hint {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.55;
+      margin: 0;
+      padding-top: 18px;
+      border-top: 1px solid var(--line);
+      text-align: left;
+    }
+    .hint code {
+      font-family: ui-monospace, Consolas, monospace;
+      background: var(--soft);
+      padding: 1px 6px;
+      border-radius: 4px;
+      font-size: 12.5px;
+    }
+    .manual-link {
+      display: inline-block;
+      margin-top: 12px;
+      color: var(--blue);
+      text-decoration: none;
+      font-weight: 650;
+    }
+    .manual-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <main class="card" role="status" aria-live="polite">
+    <img class="logo" src="assets/iesa-opt-logo.png" alt="IESA-Opt.jl">
+    <h1>Starting your local UI</h1>
+    <p class="subtitle">Setting up Julia, JuMP, and the solver bindings.</p>
+
+    <div id="progress" class="progress" aria-hidden="true"></div>
+
+    <p id="stage" class="stage">Waiting for Julia server…</p>
+    <p id="elapsed" class="elapsed">0.0 s elapsed</p>
+
+    <p class="hint">
+      Startup typically takes about <strong>20 seconds</strong>; after a
+      Julia upgrade or package change it can take 60–90 s while packages
+      precompile. Keep the launcher window open while the UI is running.
+      If nothing happens, you can open the UI manually:
+      <br>
+      <a id="manualLink" class="manual-link" href="http://127.0.0.1:8123/">http://127.0.0.1:8123/</a>
+    </p>
+  </main>
+
+  <script>
+    (function () {
+      "use strict";
+
+      var TARGET    = "http://127.0.0.1:8123/";
+      var POLL_URL  = "http://127.0.0.1:8123/api/status";
+      var POLL_MS   = 500;     // how often to ping the server
+      var TICK_MS   = 100;     // how often to refresh the elapsed counter
+      var startMs   = Date.now();
+      var attempts  = 0;
+      var stageEl   = document.getElementById("stage");
+      var elapsedEl = document.getElementById("elapsed");
+      var progress  = document.getElementById("progress");
+      var done      = false;
+
+      function elapsedSec() { return (Date.now() - startMs) / 1000; }
+
+      function tick() {
+        if (done) return;
+        elapsedEl.textContent = elapsedSec().toFixed(1) + " s elapsed";
+      }
+      setInterval(tick, TICK_MS);
+
+      function setStage(text, cls) {
+        stageEl.textContent = text;
+        stageEl.className = "stage" + (cls ? " " + cls : "");
+      }
+
+      function redirect() {
+        // Use replace() so Back button doesn't return to the loading page.
+        try { window.location.replace(TARGET); }
+        catch (_) { window.location.href = TARGET; }
+      }
+
+      function poll() {
+        if (done) return;
+        attempts++;
+
+        // The server sets `Access-Control-Allow-Origin: *` on /api/* so this
+        // CORS GET from a file:// origin can read the JSON body. We wait for
+        // `state === "ready"` before redirecting, so the user only sees ONE
+        // loading screen (this page) instead of being bounced into the main
+        // UI while it is still showing its own "Starting Julia…" pill.
+        fetch(POLL_URL, { mode: "cors", cache: "no-store" })
+          .then(function (r) { return r.ok ? r.json() : null; })
+          .then(function (j) {
+            if (done) return;
+            var state = j && j.state;
+            if (state === "ready") {
+              done = true;
+              progress.classList.add("done");
+              setStage("Server ready, opening UI…", "ready");
+              // Brief pause so the user sees the green confirmation.
+              setTimeout(redirect, 350);
+              return;
+            }
+            // Server is up but still warming. Show the live message from
+            // the server if we have one — it changes from
+            // "Loading default_data.xlsx into memory…" to
+            // "Workbook loaded. Compiling run paths for fast first run…"
+            // — and fall back to the elapsed-based stage text otherwise.
+            if (j && j.message) {
+              var cls = state === "failed" ? "warn" : "";
+              setStage(j.message, cls);
+            } else {
+              updateStageByElapsed();
+            }
+            setTimeout(poll, POLL_MS);
+          })
+          .catch(function () {
+            if (done) return;
+            // Network error = server not yet bound. Keep showing the
+            // elapsed-time based stage hint.
+            updateStageByElapsed();
+            setTimeout(poll, POLL_MS);
+          });
+      }
+
+      function updateStageByElapsed() {
+        var t = elapsedSec();
+        if (t < 5)        setStage("Waiting for Julia server…");
+        else if (t < 12)  setStage("Loading Julia packages…");
+        else if (t < 25)  setStage("Compiling solver bindings…");
+        else if (t < 45)  setStage("Almost there — building the model cache…");
+        else if (t < 120) setStage("This is taking longer than usual…", "warn");
+        else              setStage("Still waiting — check the launcher window for errors.", "warn");
+      }
+
+      // Kick off the first poll as soon as the page is interactive.
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", poll);
+      } else {
+        poll();
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -70,12 +70,21 @@ IESA-Opt.jl ships with a local browser-based UI for configuring runs, monitoring
 
 Make sure dependencies are installed once (`julia --project=. -e "using Pkg; Pkg.instantiate()"`), then start the UI with one of the following options:
 
-- **Windows (one-click):** double-click [start-ui.bat](start-ui.bat) in the repository root. A PowerShell window opens, starts the server, and your default browser is launched at `http://127.0.0.1:8123`. Keep the window open while using the UI; closing it stops the server.
-- **PowerShell:** right-click [start-ui.ps1](start-ui.ps1) and choose *Run with PowerShell*, or from a PowerShell prompt in the repository root run `./start-ui.ps1`.
+- **Windows (one-click):** double-click `IESA-Opt UI.lnk` in the repository root (the shortcut is created automatically on first launch -- if it isn't there yet, double-click [scripts/launcher/start-ui.bat](scripts/launcher/start-ui.bat) once and the shortcut will appear next to it). A PowerShell window opens, starts Julia, and your default browser immediately opens a small loading page that automatically reloads into the UI as soon as the server is ready (typically around 20 s on a warm install, longer on the very first run). Keep the launcher window open while using the UI; closing it stops the server.
+- **PowerShell:** right-click [scripts/launcher/start-ui.ps1](scripts/launcher/start-ui.ps1) and choose *Run with PowerShell*, or from a PowerShell prompt run `./scripts/launcher/start-ui.ps1`.
 - **Cross-platform terminal:** from the repository root run `julia --threads=auto --project=. scripts/serve_ui.jl`. The same script works on Windows, macOS, and Linux.
-- **From inside Julia:** `using IESA_J; serve_ui!()` (defaults: `host="127.0.0.1"`, `port=8123`, `open_browser=true`). To run headless (no auto-open), use `serve_ui!(open_browser=false)`.
+- **From inside Julia:** `using IESAOpt; serve_ui!()` (defaults: `host="127.0.0.1"`, `port=8123`, `open_browser=true`). To run headless (no auto-open), use `serve_ui!(open_browser=false)`.
 
 The first launch precompiles the package and warms an input cache for `data/default_data.xlsx`; subsequent launches start in a few seconds.
+
+#### Developer fast-start
+
+Active development triggers a Julia re-precompile every time you save a source file. The default precompile workload runs the full TS LP build path to bake JIT'd code into the cache, which adds ~60–90 s to each `Pkg.precompile`. If you are iterating quickly on the source and don't want that delay, set:
+
+- `IESA_OPT_SKIP_PRECOMPILE=1` — skip the `@compile_workload` block during `Pkg.precompile` (rebuilds the package in seconds rather than minutes).
+- `IESA_OPT_SKIP_WARMUP=1` — skip the in-server warmup at `serve_ui!()` startup. The first `Run` click then JIT-compiles on demand instead.
+
+Pair both for the fastest development loop. Unset them (or set to `0`) to get the production behavior back: precompile bakes the run path, warmup loads the workbook into memory, and the first `Run` click is essentially instant.
 
 ### Using the UI
 
@@ -101,8 +110,8 @@ Close the launcher window, or press **Ctrl+C** in the terminal where Julia is ru
 
 ### Troubleshooting
 
-- *Browser does not open automatically.* Open `http://127.0.0.1:8123` manually.
-- *Port 8123 already in use.* Stop the other process, or start the UI on a different port from Julia: `using IESA_J; serve_ui!(port=8800)`.
+- *Browser does not open automatically.* Open `http://127.0.0.1:8123` manually. If the loading page opens but never redirects, your browser may be blocking the cross-origin probe from `file://`; open `http://127.0.0.1:8123/` manually in the same browser.
+- *Port 8123 already in use.* Stop the other process, or start the UI on a different port from Julia: `using IESAOpt; serve_ui!(port=8800)`.
 - *"Julia was not found on PATH."* Install Julia 1.10 or newer from [julialang.org](https://julialang.org/), reopen the terminal, and run the launcher again.
 - *Solver missing.* The Run page only offers solvers that resolve at startup (HiGHS is bundled; Gurobi requires a valid license and `Gurobi.jl` available in the project).
 
@@ -118,8 +127,7 @@ data_Batch/       Local batch input workbooks and scenario variants
 Output/           Generated single-run outputs, ignored by Git
 Output_Batch/     Generated batch outputs, ignored by Git
 ui/               Local UI dashboard assets (HTML, JS, CSS, vendored Plotly)
-start-ui.bat      Windows double-click launcher for the local UI
-start-ui.ps1      PowerShell launcher for the local UI
+scripts/launcher/ Windows .bat / PowerShell .ps1 launchers for the local UI
 docs/             User-facing documentation
 ```
 

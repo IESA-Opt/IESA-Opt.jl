@@ -153,7 +153,7 @@ function renderJuliaStatus(status) {
   el.classList.remove("warming", "ready", "failed", "muted");
   let label = "Julia: idle";
   if (!status || !status.state || status.state === "idle") { el.classList.add("muted"); label = "Julia: idle"; }
-  else if (status.state === "warming") { el.classList.add("warming"); label = "Julia warming up\u2026"; }
+  else if (status.state === "warming") { el.classList.add("warming"); label = status.elapsedSec ? `Julia warming up (${fmt(status.elapsedSec)} s)\u2026` : "Julia warming up\u2026"; }
   else if (status.state === "ready") { el.classList.add("ready"); label = status.elapsedSec ? `Julia ready (warm-up ${fmt(status.elapsedSec)} s)` : "Julia ready"; }
   else if (status.state === "failed") { el.classList.add("failed"); label = "Julia warm-up failed"; }
   else if (status.state === "missing") { el.classList.add("failed"); label = "Workbook not found"; }

@@ -50,3 +50,7 @@ validate_out.txt
 .idea/
 .DS_Store
 Thumbs.db
+
+# Auto-generated launcher shortcut (start-ui.ps1 (re)writes it on every
+# launch with absolute paths, so it must not be committed).
+IESA-Opt UI.lnk

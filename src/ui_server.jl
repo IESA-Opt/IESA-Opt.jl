@@ -32,6 +32,27 @@ const UI_WARMUP_STATUS = Dict{String,Any}(
     "error" => "",
 )
 const UI_WARMUP_STATUS_LOCK = ReentrantLock()
+# Wall-clock anchor (epoch seconds) for the warm-up timer. Set once when
+# `serve_ui!()` is entered (which is moments before `HTTP.serve` binds the
+# port and the browser becomes reachable). The "Julia ready in N s"
+# number reported to the browser is `time() - UI_SERVE_START_T0[]`, so it
+# matches what the user counts from the moment the page loads — instead of
+# only timing the spawned warm-up task, which started a moment earlier and
+# does NOT include the HTTP / JSON / first-request JIT that the user is
+# also waiting on. 0.0 means `serve_ui!()` has not been entered yet.
+const UI_SERVE_START_T0 = Ref{Float64}(0.0)
+
+"""
+    _ui_elapsed_since_serve_start() -> Float64
+
+Seconds elapsed since `serve_ui!()` was entered, or `0.0` if the server is
+not running yet (e.g. during tests). Always non-negative.
+"""
+function _ui_elapsed_since_serve_start()
+    t0 = UI_SERVE_START_T0[]
+    t0 == 0.0 && return 0.0
+    return max(0.0, time() - t0)
+end
 
 """
     serve_ui!(; host="127.0.0.1", port=8123, open_browser=true)
@@ -44,8 +65,24 @@ function serve_ui!(; host::AbstractString = "127.0.0.1",
                    port::Integer = 8123,
                    open_browser::Bool = true)
     url = "http://$(host):$(port)"
+    # Anchor the warm-up timer BEFORE anything else: this is the moment the
+    # HTTP server is about to bind the port and the browser becomes
+    # reachable, so it is the closest proxy we have on the Julia side to
+    # "when the user starts watching". The warm-up task and the cache-hit
+    # shortcut both report `time() - UI_SERVE_START_T0[]`, which makes the
+    # displayed "Julia ready in N s" match the user's mental stopwatch.
+    UI_SERVE_START_T0[] = time()
     if Base.Threads.nthreads() == 1
         @warn "Start Julia with --threads=auto to keep progress polling responsive during long solves"
+    end
+    # The launcher script (scripts/launcher/start-ui.ps1) sets
+    # IESA_OPT_OPEN_BROWSER=0 because it polls the port itself and opens
+    # the browser once it is actually listening — that is more reliable
+    # than the @async sleep(1.0) below and avoids spawning two browser
+    # tabs when both fire at the same time.
+    env_open = get(ENV, "IESA_OPT_OPEN_BROWSER", "")
+    if env_open == "0" || lowercase(env_open) in ("false", "no", "off")
+        open_browser = false
     end
     if open_browser
         @async begin
@@ -150,14 +187,30 @@ end
 function _json_response(payload; status::Integer = 200)
     HTTP.Response(status,
         ["Content-Type" => "application/json; charset=utf-8",
-         "Cache-Control" => "no-store"],
+         "Cache-Control" => "no-store",
+         # Allow the bootstrap loading page (loaded via file://) to read the
+         # JSON body cross-origin so it can poll /api/status and only redirect
+         # once warm-up is actually complete. The UI server only listens on
+         # 127.0.0.1, so opening the API to "*" does not expand the attack
+         # surface beyond what file:// already grants.
+         "Access-Control-Allow-Origin" => "*"],
         JSON3.write(payload))
 end
 
 function _static_response(path::String)
     static_path = path == "/" ? "/index.html" : path
-    if static_path == "/assets/iesa-opt-logo.png"
-        return _file_response(joinpath(_repo_root(), "docs", "src", "assets", "iesa-opt-logo.png"), "image/png")
+    # The brand logos live under docs/src/assets/ so the Documenter site and
+    # the UI share a single source of truth. We accept any iesa-opt-logo*.png
+    # name (e.g. iesa-opt-logo.png, iesa-opt-logo-rect.png) and resolve it
+    # against that folder before falling through to the regular ui/ static
+    # tree. Anything else under /assets/ that does not match the allow-list
+    # falls through and is served (or 404'd) from ui/ as usual.
+    if startswith(static_path, "/assets/")
+        asset_name = lowercase(last(_url_parts(static_path)))
+        if startswith(asset_name, "iesa-opt-logo") && endswith(asset_name, ".png")
+            docs_path = joinpath(_repo_root(), "docs", "src", "assets", asset_name)
+            isfile(docs_path) && return _file_response(docs_path, "image/png")
+        end
     end
 
     parts = _url_parts(static_path)
@@ -380,6 +433,19 @@ try {
 end
 
 function _warm_default_workbook_cache!(input_workbook::AbstractString)
+    # Developer fast-iteration mode: set IESA_OPT_SKIP_WARMUP=1 to bypass the
+    # in-server warmup entirely (no DuckDB read, no run-path JIT). The cost
+    # is paid lazily on the first Run click instead. Pair with
+    # IESA_OPT_SKIP_PRECOMPILE=1 to also skip the @compile_workload at
+    # package precompile time, which makes `Pkg.precompile` after source
+    # edits ~60-90 s faster.
+    if get(ENV, "IESA_OPT_SKIP_WARMUP", "0") == "1"
+        _ui_warmup_status_update!(state = "ready", workbook = input_workbook,
+                                  message = "Warm-up skipped (IESA_OPT_SKIP_WARMUP=1). First run will JIT on demand.",
+                                  readyAt = string(Dates.now()), elapsedSec = 0.0, error = "")
+        @info "IESA-Opt.jl UI warm-up skipped" reason = "IESA_OPT_SKIP_WARMUP=1"
+        return nothing
+    end
     input_path = isabspath(input_workbook) ? normpath(input_workbook) : normpath(joinpath(_repo_root(), input_workbook))
     if !isfile(input_path)
         _ui_warmup_status_update!(state = "missing", workbook = input_workbook,
@@ -388,9 +454,14 @@ function _warm_default_workbook_cache!(input_workbook::AbstractString)
         return nothing
     end
     if _ui_model_data_cache_hit(input_path)
+        # Cache hit usually only happens on a second `serve_ui!()` in the same
+        # Julia session (rare in production). Report wall-clock since server
+        # start so the number still reflects what the user actually waited
+        # (HTTP / first-request JIT) instead of misleadingly saying 0.0.
+        elapsed = round(_ui_elapsed_since_serve_start(), digits = 2)
         _ui_warmup_status_update!(state = "ready", workbook = input_workbook,
                                   message = "Workbook already loaded in memory. Ready to run.",
-                                  readyAt = string(Dates.now()), elapsedSec = 0.0, error = "")
+                                  readyAt = string(Dates.now()), elapsedSec = elapsed, error = "")
         return nothing
     end
     key = _canonical_path(input_path)
@@ -403,21 +474,25 @@ function _warm_default_workbook_cache!(input_workbook::AbstractString)
                                   startedAt = string(Dates.now()), readyAt = "",
                                   elapsedSec = 0.0, error = "")
         UI_CACHE_WARM_TASKS[key] = Base.Threads.@spawn begin
-            t0 = time()
             try
                 @info "IESA-Opt UI warming workbook cache" workbook = input_workbook
                 md = _read_ui_data_cached(input_path)
                 md === nothing && return nothing
                 _ui_warmup_status_update!(message = "Workbook loaded. Compiling run paths for fast first run…")
                 _warm_compile_run_paths!(md)
-                elapsed = round(time() - t0, digits = 2)
+                # Measure from `serve_ui!()` entry, not from the moment this
+                # spawned task started running — see comment on
+                # UI_SERVE_START_T0. That way the displayed "ready in N s"
+                # also accounts for the HTTP/JSON/first-request JIT that
+                # competes with this task for CPU while the user is waiting.
+                elapsed = round(_ui_elapsed_since_serve_start(), digits = 2)
                 _ui_warmup_status_update!(state = "ready",
                                           message = "Workbook loaded and run paths compiled in $(elapsed) seconds. Ready to run.",
                                           readyAt = string(Dates.now()), elapsedSec = elapsed,
                                           error = "")
                 @info "IESA-Opt UI workbook cache ready" workbook = input_workbook elapsed_s = elapsed
             catch err
-                elapsed = round(time() - t0, digits = 2)
+                elapsed = round(_ui_elapsed_since_serve_start(), digits = 2)
                 _ui_warmup_status_update!(state = "failed",
                                           message = "Warm-up failed after $(elapsed) seconds.",
                                           elapsedSec = elapsed, error = sprint(showerror, err))
@@ -432,11 +507,21 @@ end
 
 function _ui_warmup_status_snapshot()
     lock(UI_WARMUP_STATUS_LOCK)
-    try
-        return Dict{String,Any}(UI_WARMUP_STATUS)
+    snapshot = try
+        Dict{String,Any}(UI_WARMUP_STATUS)
     finally
         unlock(UI_WARMUP_STATUS_LOCK)
     end
+    # While the warm-up is still in flight, overlay a live wall-clock counter
+    # (seconds since `serve_ui!()` entry) so the browser status pill visibly
+    # ticks up rather than sitting at 0 for the whole wait. The terminal
+    # state (`ready` / `failed`) already has a frozen elapsedSec from the
+    # worker task; do not overwrite it here.
+    if get(snapshot, "state", "") in ("warming", "idle")
+        elapsed = round(_ui_elapsed_since_serve_start(), digits = 2)
+        snapshot["elapsedSec"] = elapsed
+    end
+    return snapshot
 end
 
 function _ui_warmup_status_update!(; state = nothing, message = nothing, workbook = nothing,
