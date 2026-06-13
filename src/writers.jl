@@ -106,10 +106,28 @@ function write_parquet_results(rr::RunResult, vars::AnnualVars, md::ModelData,
         _write_result_with_progress!(written, :tech_use_h, path, progress) do
             write_tech_useHourly_parquet(vars, md, path; mode = :fh)
         end
+        path = joinpath(out_dir, "flexibility_profile_price_h.parquet")
+        try
+            _write_result_with_progress!(written, :flexibility_profile_price_h, path, progress) do
+                write_flexibility_profile_parquet(vars, md, path; mode = :fh,
+                    activity_prices_hourly = activity_prices_hourly)
+            end
+        catch err
+            @warn "Writer flexibility_profile_price_h failed" err = err
+        end
     elseif mode == :ts && vars.tech_useHourly_TS !== nothing
         path = joinpath(out_dir, "tech_use_TS.parquet")
         _write_result_with_progress!(written, :tech_use_TS, path, progress) do
             write_tech_useHourly_parquet(vars, md, path; mode = :ts)
+        end
+        path = joinpath(out_dir, "flexibility_profile_price_h.parquet")
+        try
+            _write_result_with_progress!(written, :flexibility_profile_price_h, path, progress) do
+                write_flexibility_profile_parquet(vars, md, path; mode = :ts,
+                    activity_prices_hourly = activity_prices_hourly)
+            end
+        catch err
+            @warn "Writer flexibility_profile_price_h failed" err = err
         end
     end
 
@@ -190,10 +208,28 @@ function write_duckdb_results(rr::RunResult, vars::AnnualVars, md::ModelData,
             _write_result_with_progress!(written, :tech_use_h, path, progress) do
                 write_tech_useHourly_parquet(vars, md, path; mode = :fh)
             end
+            path = _duckdb_table_uri(db_path, "flexibility_profile_price_h")
+            try
+                _write_result_with_progress!(written, :flexibility_profile_price_h, path, progress) do
+                    write_flexibility_profile_parquet(vars, md, path; mode = :fh,
+                        activity_prices_hourly = activity_prices_hourly)
+                end
+            catch err
+                @warn "Writer flexibility_profile_price_h failed" err = err
+            end
         elseif mode == :ts && vars.tech_useHourly_TS !== nothing
             path = _duckdb_table_uri(db_path, "tech_use_TS")
             _write_result_with_progress!(written, :tech_use_TS, path, progress) do
                 write_tech_useHourly_parquet(vars, md, path; mode = :ts)
+            end
+            path = _duckdb_table_uri(db_path, "flexibility_profile_price_h")
+            try
+                _write_result_with_progress!(written, :flexibility_profile_price_h, path, progress) do
+                    write_flexibility_profile_parquet(vars, md, path; mode = :ts,
+                        activity_prices_hourly = activity_prices_hourly)
+                end
+            catch err
+                @warn "Writer flexibility_profile_price_h failed" err = err
             end
         end
 
@@ -954,6 +990,135 @@ function write_run_statistics_parquet(rr::RunResult, path::AbstractString)
         n_repDays          = [rr.n_repDays],
         hoursPer_day       = [rr.hoursPer_day],
         clustering         = [string(rr.clustering_approach)],
+    )
+    return _write_table(df, path)
+end
+
+# ============================================================================
+# Flexibility profile (reference vs flex demand per tech)
+# ============================================================================
+# Reproduces the AIMMS `flexibility_profile_price_h` parquet so the same
+# downstream flex-report visualisations work on IESA-Opt.jl outputs.
+#
+# For every tech in `tech_flexible`, the model splits its electricity demand
+# into a passive reference profile (tech_use × hourly profile × balance to
+# the electricity activity) and a shift `(deltaQ_UP + deltaQ_DW) × balance`
+# from the flex variables.  Following the AIMMS sign convention, the column
+# semantics are:
+#   - referenceProfile_h  : passive demand if no flex shifting (positive ⇒ load)
+#   - shiftNet_h          : flex - reference  (positive ⇒ demand INCREASED)
+#   - flexProfile_h       : actual demand with flex shifting
+#   - electricityPrice_h  : shadow price of the electricity balance constraint
+function _empty_flex_profile_df()
+    return DataFrames.DataFrame(
+        hour               = Int[],
+        technology         = String[],
+        period             = Int[],
+        referenceProfile_h = Float64[],
+        shiftNet_h         = Float64[],
+        flexProfile_h      = Float64[],
+        electricityPrice_h = Float64[],
+    )
+end
+
+function write_flexibility_profile_parquet(vars::AnnualVars, md::ModelData,
+                                            path::AbstractString;
+                                            mode::Symbol = :fh,
+                                            activity_prices_hourly::Union{Nothing,AbstractVector} = nothing)
+    s = md.sets
+    p = md.parameters
+
+    flex_techs = s.tech_flexible
+    isempty(flex_techs) && return _write_table(_empty_flex_profile_df(), path)
+
+    is_ts = mode === :ts
+    dqUP  = is_ts ? vars.deltaQ_UP_TS : vars.deltaQ_UP
+    dqDW  = is_ts ? vars.deltaQ_DW_TS : vars.deltaQ_DW
+    (dqUP === nothing || dqDW === nothing) && return _write_table(_empty_flex_profile_df(), path)
+
+    hours_axis = is_ts ? s.hours_cluster : s.hours
+    profiles   = is_ts ? p.hourly_profiles_cluster : p.hourly_profiles
+    isempty(hours_axis) && return _write_table(_empty_flex_profile_df(), path)
+
+    # Map each flex tech to its electricity activity via dQ_hourly indicator.
+    # If multiple activities match, prefer the one with the largest |coef|.
+    elec_activity = Dict{Symbol,Symbol}()
+    elec_coef     = Dict{Symbol,Float64}()
+    flex_set = Set(flex_techs)
+    for ((tb, ah), v) in p.dQ_hourly
+        abs(v) < 1e-9 && continue
+        tb in flex_set || continue
+        if abs(v) > abs(get(elec_coef, tb, 0.0))
+            elec_activity[tb] = ah
+            elec_coef[tb]     = v
+        end
+    end
+    isempty(elec_activity) && return _write_table(_empty_flex_profile_df(), path)
+
+    # Lookup table for the dual on balH[ah, h, ps] (or balH_TS[ah, hc, ps]).
+    price_lookup = Dict{Tuple{Symbol,Int,Int},Float64}()
+    if activity_prices_hourly !== nothing
+        for r in activity_prices_hourly
+            a  = Symbol(get(r, "activity", ""))
+            ps = Int(get(r, "period", 0))
+            h  = Int(get(r, "time_index", 0))
+            price_lookup[(a, ps, h)] = Float64(get(r, "price", 0.0))
+        end
+    end
+
+    periods = s.periods_solve
+    eps = 1e-9
+    n_max = length(flex_techs) * length(periods) * length(hours_axis)
+    hour_col  = Vector{Int}();     sizehint!(hour_col, n_max)
+    tech_col  = Vector{String}();  sizehint!(tech_col, n_max)
+    per_col   = Vector{Int}();     sizehint!(per_col,  n_max)
+    ref_col   = Vector{Float64}(); sizehint!(ref_col,  n_max)
+    shift_col = Vector{Float64}(); sizehint!(shift_col,n_max)
+    flex_col  = Vector{Float64}(); sizehint!(flex_col, n_max)
+    price_col = Vector{Float64}(); sizehint!(price_col,n_max)
+
+    for tf in flex_techs
+        ah_e = get(elec_activity, tf, Symbol(""))
+        ah_e === Symbol("") && continue
+        pt    = get(p.profileType_tech, tf, :Flat)
+        tname = String(tf)
+        for ps in periods
+            bal = get(p.activity_balances, (tf, ah_e, ps), 0.0)
+            abs(bal) < eps && continue
+            tu_val = Float64(value(vars.tech_use[tf, ps]))
+            for h in hours_axis
+                prof = get(profiles, (h, pt), 0.0)
+                # AIMMS sign convention: -tu × prof × bal so load reads
+                # positive when bal<0 (input/consumption activities).
+                ref = -tu_val * prof * bal
+                d_up = Float64(value(dqUP[h, tf, ps]))
+                d_dw = Float64(value(dqDW[h, tf, ps]))
+                shift = -(d_up + d_dw) * bal
+                flex_v = ref + shift
+                if abs(ref) < eps && abs(shift) < eps && abs(flex_v) < eps
+                    continue
+                end
+                price = get(price_lookup, (ah_e, ps, Int(h)), 0.0)
+                push!(hour_col,  Int(h))
+                push!(tech_col,  tname)
+                push!(per_col,   Int(ps))
+                push!(ref_col,   ref)
+                push!(shift_col, shift)
+                push!(flex_col,  flex_v)
+                push!(price_col, price)
+            end
+        end
+    end
+
+    df = DataFrames.DataFrame(
+        hour               = hour_col,
+        technology         = tech_col,
+        period             = per_col,
+        referenceProfile_h = ref_col,
+        shiftNet_h         = shift_col,
+        flexProfile_h      = flex_col,
+        electricityPrice_h = price_col;
+        copycols = false,
     )
     return _write_table(df, path)
 end
