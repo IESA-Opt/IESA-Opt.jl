@@ -600,7 +600,7 @@ function renderResults(results) {
   state.dispatchLegendOff = new Set();
   const dispPayload = results.hourlyDispatch || { periods: [], nodes: [], series: [] };
   state.dispatchPayload = dispPayload;
-  state.dispatchSelectedNode = String(dispPayload.selectedNode || (dispPayload.nodes?.[0] || ""));
+  state.dispatchSelectedNode = String(dispPayload.selectedNode || defaultNode(dispPayload.nodes || []) || "");
   state.dispatchSelectedPeriod = Number(dispPayload.selectedPeriod || (dispPayload.periods?.[0] || 0));
   state.dispatchFromHour = 1;
   state.dispatchToHour = 8760;
@@ -804,15 +804,24 @@ function populateDispatchPeriods(payload) {
   else if (periods.length) sel.value = String(periods[0]);
   state.dispatchSelectedPeriod = Number(sel.value) || 0;
 }
+function defaultNode(nodes) {
+  if (!nodes || !nodes.length) return "";
+  if (nodes.includes("NL")) return "NL";
+  const exact = nodes.find(n => String(n).trim().toUpperCase() === "NL");
+  if (exact) return exact;
+  const prefix = nodes.find(n => { const s = String(n).trim().toUpperCase(); return s.startsWith("NL_") || s.startsWith("NL-"); });
+  if (prefix) return prefix;
+  return nodes[0];
+}
 function populateDispatchNodes(payload) {
   const sel = $("hourlyDispatchNode"); if (!sel) return;
   const nodes = payload?.nodes || [];
   sel.innerHTML = nodes.length
     ? nodes.map(n => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("")
     : `<option value="">(all)</option>`;
-  const want = state.dispatchSelectedNode || payload?.selectedNode || nodes[0] || "";
+  const want = state.dispatchSelectedNode || payload?.selectedNode || defaultNode(nodes);
   if (want && nodes.includes(want)) sel.value = want;
-  else if (nodes.length) sel.value = nodes[0];
+  else if (nodes.length) sel.value = defaultNode(nodes);
   state.dispatchSelectedNode = sel.value || "";
 }
 async function refreshHourlyDispatch() {

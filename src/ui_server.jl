@@ -2295,6 +2295,27 @@ function _power_capacities(out_dir::AbstractString)
     return Dict("rows" => out, "periods" => sort!(collect(period_set)))
 end
 
+"""
+    _default_ui_node(nodes_list) -> String
+
+Pick a sensible default node for UI selectors. Prefers exact "NL", then any
+case-insensitive "NL" match, then any node starting with `NL_` / `NL-`, and
+finally falls back to the first node in the supplied list. Returns the empty
+string when `nodes_list` is empty.
+"""
+function _default_ui_node(nodes_list::AbstractVector{<:AbstractString})
+    isempty(nodes_list) && return ""
+    "NL" in nodes_list && return "NL"
+    for n in nodes_list
+        uppercase(strip(String(n))) == "NL" && return String(n)
+    end
+    for n in nodes_list
+        s = uppercase(strip(String(n)))
+        (startswith(s, "NL_") || startswith(s, "NL-")) && return String(n)
+    end
+    return String(nodes_list[1])
+end
+
 function _hourly_dispatch_payload(out_dir::AbstractString; node::AbstractString = "", period::Union{Nothing,Integer} = nothing)
     df = _read_result_df(out_dir, "tech_use_TS")
     mode = :ts
@@ -2366,8 +2387,9 @@ function _hourly_dispatch_payload(out_dir::AbstractString; node::AbstractString 
         sel_node = ""
     end
     if isempty(sel_node) && !isempty(nodes_list)
-        # Default: first node alphabetically (typically the user's local node)
-        sel_node = nodes_list[1]
+        # Default: prefer the Netherlands node ("NL", or any NL_* / NL-*
+        # variant) when present, otherwise the first node alphabetically.
+        sel_node = _default_ui_node(nodes_list)
     end
 
     mask = [keep_for_node(String(t), sel_node) for t in df.tech]
