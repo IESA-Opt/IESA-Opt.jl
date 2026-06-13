@@ -6,7 +6,12 @@ IESA-Opt.jl separates workbook ingestion, set derivation, parameter derivation, 
 Excel workbook
     |
     v
-read_data(xlsx_path)
+read_data_cached(xlsx_path)
+    |
+    +--> data/.iesa_cache/*.iesa_input.duckdb is reused until the workbook changes
+    |
+    v
+read_data(xlsx_path) when cache is missing or stale
     |
     +--> ModelSets: periods, hours, activities, technologies, nodes, type sets
     |
@@ -32,9 +37,9 @@ model build
 solve
     |
     v
-write_parquet_results(...)
+write_duckdb_results(...)
     |
-    +--> Output/*.parquet and Output/*.csv
+    +--> Output/<run>/results.duckdb
 ```
 
 ## Core Julia Entry Points
@@ -45,7 +50,7 @@ derive_sets!(md)
 compute_derived_params!(md)
 ```
 
-`read_data` already calls `derive_sets!` and `compute_derived_params!`. The separate calls are useful when a script edits `md.sets` or `md.params` after reading and then needs to recompute derived structures.
+`read_data_cached` is preferred for repeated runs from the same workbook. It calls the normal Excel reader when needed, stores the compiled model data in DuckDB, and returns the cached model data on later runs if the workbook timestamp and size are unchanged. `read_data` already calls `derive_sets!` and `compute_derived_params!`. The separate calls are useful when a script edits `md.sets` or `md.params` after reading and then needs to recompute derived structures.
 
 ## Sheet To Model Link
 

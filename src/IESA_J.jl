@@ -30,7 +30,7 @@ catch err
     @warn "Gurobi.jl not available — Gurobi-based runs will fail. Use highs_optimizer() instead." err=err
 end
 
-# Parquet2 is used by clustering input and result writers.
+# Parquet2 is still used for legacy cluster-map inputs; DuckDB is used by the UI runtime cache and result database.
 
 # ---------------------------------------------------------------------------
 # Core types
@@ -83,6 +83,7 @@ include("clustering.jl")
 include("solve.jl")
 # include("postprocess.jl")
 include("writers.jl")
+include("ui_server.jl")
 # include("sweeps.jl")
 
 # ---------------------------------------------------------------------------
@@ -115,7 +116,8 @@ export add_infrastructure_constraints!
 export add_policy_constraints!
 export add_cyclic_closures!
 # Phase 7: writers
-export write_parquet_results
+export write_parquet_results, write_duckdb_results
+export serve_ui!
 # Phase 7+: export sweep_ts_postfix
 
 end # module

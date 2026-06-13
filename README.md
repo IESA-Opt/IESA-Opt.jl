@@ -60,7 +60,7 @@ For repeated study runs, keep local run wrappers under `local/`, which is ignore
 
 IESA-Opt.jl reads Excel workbooks from paths relative to the repository root. The tracked example input is [data/default_data.xlsx](data/default_data.xlsx). Additional local study workbooks can be placed in `data/` or `data_Batch/`; those folders are configured so private scenario files stay out of Git.
 
-Solve results are written under `Output/` or `Output_Batch/`. Parquet is the primary output format, and most writers also create CSV sidecars for quick inspection. Common result tables include run statistics, total costs, cost breakdowns, technology stock, technology use, representative-day dispatch, cluster maps, and emission-price outputs. See the [outputs guide](https://iesa-opt.github.io/IESA-Opt.jl/v0.1/user-guide/outputs/) for details.
+Solve results are written under `Output/` or `Output_Batch/`. New runs store model outputs in a single DuckDB database named `results.duckdb` in each run folder. Common result tables include run statistics, solve timings, total costs, cost breakdowns, technology stock, technology use, representative-day dispatch, cluster maps, and emission-price outputs. The Excel workbook remains the editable input source; repeated runs automatically reuse a compiled DuckDB input cache and rebuild it when the workbook changes. See the [outputs guide](https://iesa-opt.github.io/IESA-Opt.jl/v0.1/user-guide/outputs/) for details.
 
 ## Repository Layout
 

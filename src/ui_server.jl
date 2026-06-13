@@ -1,0 +1,2541 @@
+# =============================================================================
+# ui_server.jl -- local browser UI and run API
+# =============================================================================
+
+using HTTP
+using JSON3
+
+const UI_JOBS = Dict{String,Dict{String,Any}}()
+const UI_TASKS = Dict{String,Task}()
+const UI_JOBS_LOCK = ReentrantLock()
+const COMMERCIAL_SOLVER_IDS = ("gurobi", "cplex", "xpress")
+const UI_MAX_LOG_LINES = 5000
+const UI_DATA_CACHE_LOCK = ReentrantLock()
+const UI_CACHE_WARM_LOCK = ReentrantLock()
+const UI_CACHE_WARM_TASKS = Dict{String,Task}()
+# In-memory ModelData cache so repeated runs from the same workbook do not
+# re-deserialize the ~7 MB DuckDB payload (which triggers JIT and dominates the
+# read phase for the first run after server start). Keyed by canonical XLSX
+# path; invalidated when the workbook mtime or size changes.
+const UI_MODEL_DATA_CACHE = Dict{String,NamedTuple{(:mtime, :size, :md),Tuple{Float64,Int64,ModelData}}}()
+const UI_MODEL_DATA_CACHE_LOCK = ReentrantLock()
+# Reports background warm-up progress to the browser so the user can see when
+# Julia and DuckDB are fully ready before clicking Run. Possible state values:
+# "idle", "warming", "ready", "failed", "missing".
+const UI_WARMUP_STATUS = Dict{String,Any}(
+    "state" => "idle",
+    "message" => "Julia and DuckDB warm-up has not started yet.",
+    "workbook" => "",
+    "startedAt" => "",
+    "readyAt" => "",
+    "elapsedSec" => 0.0,
+    "error" => "",
+)
+const UI_WARMUP_STATUS_LOCK = ReentrantLock()
+
+"""
+    serve_ui!(; host="127.0.0.1", port=8123, open_browser=true)
+
+Serve the local IESA-Opt web UI. The server exposes a small JSON API for
+listing scenarios, detecting solvers, launching runs, polling progress, and
+reading DuckDB result summaries.
+"""
+function serve_ui!(; host::AbstractString = "127.0.0.1",
+                   port::Integer = 8123,
+                   open_browser::Bool = true)
+    url = "http://$(host):$(port)"
+    if Base.Threads.nthreads() == 1
+        @warn "Start Julia with --threads=auto to keep progress polling responsive during long solves"
+    end
+    if open_browser
+        @async begin
+            sleep(1.0)
+            _open_browser(url)
+        end
+    end
+    # Start warming the default workbook in the background so that JIT for the
+    # DuckDB-cache deserialize path is paid before the user clicks Run.
+    _warm_default_workbook_cache!("data/default_data.xlsx")
+    @info "IESA-Opt UI serving" url julia_threads = Base.Threads.nthreads()
+    HTTP.serve(_ui_handler, host, port; verbose = false)
+end
+
+function _ui_handler(req::HTTP.Request)
+    uri = HTTP.URI(req.target)
+    path = isempty(uri.path) ? "/" : String(uri.path)
+    query = uri.query === nothing ? nothing : String(uri.query)
+    method = String(req.method)
+    try
+        if startswith(path, "/api/")
+            return _api_response(method, path, query, req)
+        end
+        return _static_response(path)
+    catch err
+        message = sprint(showerror, err)
+        @error "UI request failed" method path error = message exception=(err, catch_backtrace())
+        return _json_response(Dict("error" => message); status = 500)
+    end
+end
+
+function _api_response(method::String, path::String, query::Union{Nothing,String}, req::HTTP.Request)
+    if method == "GET" && path == "/api/options"
+        return _json_response(_ui_options())
+    elseif method == "GET" && path == "/api/status"
+        return _json_response(_ui_warmup_status_snapshot())
+    elseif method == "GET" && path == "/api/solvers"
+        return _json_response(Dict("solvers" => _detect_solvers()))
+    elseif method == "GET" && path == "/api/outputs"
+        return _json_response(Dict("outputs" => _list_output_runs()))
+    elseif method == "POST" && path == "/api/run"
+        config = _json_body(req)
+        job_id = _start_ui_job!(config)
+        return _json_response(Dict("jobId" => job_id, "job" => _job_snapshot(job_id)); status = 202)
+    elseif method == "POST" && path == "/api/outputs/results"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        return _json_response(_read_ui_results(out_dir))
+    elseif method == "POST" && path == "/api/outputs/supplyDemand"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        activity = String(_config_get(body, "activity", ""))
+        period = _config_get(body, "period", nothing)
+        return _json_response(_supply_demand_payload(out_dir, activity, period))
+    elseif method == "POST" && path == "/api/outputs/emissions"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        group_by = String(_config_get(body, "groupBy", "activity"))
+        return _json_response(_emissions_payload(out_dir, group_by))
+    elseif method == "POST" && path == "/api/outputs/hourlyDispatch"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        node = String(_config_get(body, "node", ""))
+        period_raw = _config_get(body, "period", nothing)
+        period = period_raw === nothing ? nothing : (period_raw isa Integer ? Int(period_raw) : (period_raw isa AbstractString && !isempty(period_raw) ? parse(Int, period_raw) : nothing))
+        return _json_response(_hourly_dispatch_payload(out_dir; node = node, period = period))
+    elseif method == "POST" && path == "/api/outputs/compare"
+        body = _json_body(req)
+        return _json_response(_compare_output_runs(_as_string_vector(_config_get(body, "outputDirs", String[]))))
+    elseif method == "POST" && path == "/api/outputs/delete"
+        body = _json_body(req)
+        return _json_response(_delete_output_runs!(body))
+    elseif method == "POST" && path == "/api/browseInputFile"
+        return _json_response(Dict("path" => _browse_for_input_file()))
+    elseif method == "GET" && startswith(path, "/api/jobs/")
+        parts = _url_parts(path)
+        if length(parts) == 3
+            return _json_response(_job_snapshot(parts[3]))
+        elseif length(parts) == 4 && parts[4] == "results"
+            return _json_response(_job_results(parts[3]))
+        end
+    elseif method == "POST" && startswith(path, "/api/jobs/")
+        parts = _url_parts(path)
+        if length(parts) == 4 && parts[4] == "cancel"
+            return _json_response(_cancel_ui_job!(parts[3]))
+        end
+    end
+    return _json_response(Dict("error" => "Not found"); status = 404)
+end
+
+function _json_body(req::HTTP.Request)
+    return isempty(req.body) ? Dict{String,Any}() : JSON3.read(String(req.body))
+end
+
+function _json_response(payload; status::Integer = 200)
+    HTTP.Response(status,
+        ["Content-Type" => "application/json; charset=utf-8",
+         "Cache-Control" => "no-store"],
+        JSON3.write(payload))
+end
+
+function _static_response(path::String)
+    static_path = path == "/" ? "/index.html" : path
+    if static_path == "/assets/iesa-opt-logo.png"
+        return _file_response(joinpath(_repo_root(), "docs", "src", "assets", "iesa-opt-logo.png"), "image/png")
+    end
+
+    parts = _url_parts(static_path)
+    full_path = normpath(joinpath(_ui_dir(), parts...))
+    root = normpath(_ui_dir())
+    startswith(lowercase(full_path), lowercase(root)) || return HTTP.Response(403, "Forbidden")
+    isfile(full_path) || return HTTP.Response(404, "Not found")
+    return _file_response(full_path, _mime_type(full_path))
+end
+
+function _url_parts(path::AbstractString)
+    return [String(part) for part in split(strip(path, ['/']), '/') if !isempty(part)]
+end
+
+function _file_response(path::AbstractString, mime::AbstractString)
+    HTTP.Response(200,
+        ["Content-Type" => mime,
+         "Cache-Control" => "no-store"],
+        read(path))
+end
+
+function _mime_type(path::AbstractString)
+    ext = lowercase(splitext(path)[2])
+    ext == ".html" && return "text/html; charset=utf-8"
+    ext == ".css" && return "text/css; charset=utf-8"
+    ext == ".js" && return "text/javascript; charset=utf-8"
+    ext == ".png" && return "image/png"
+    ext == ".svg" && return "image/svg+xml"
+    return "application/octet-stream"
+end
+
+_repo_root() = normpath(joinpath(@__DIR__, ".."))
+_ui_dir() = joinpath(_repo_root(), "ui")
+
+function _open_browser(url::AbstractString)
+    try
+        if Sys.iswindows()
+            run(`cmd /c start "" $url`)
+        elseif Sys.isapple()
+            run(`open $url`)
+        else
+            run(`xdg-open $url`)
+        end
+    catch err
+        @warn "Could not open browser automatically" url err
+    end
+end
+
+function _ui_options()
+    options = Dict(
+        "scenarios" => _list_workbooks(),
+        "periods" => [2022, 2025, 2030, 2035, 2040, 2045, 2050],
+        "hoursPerDayOptions" => [24, 12, 8, 6, 4, 3, 2, 1],
+        "solveMethods" => [
+            Dict("id" => "barrier", "label" => "Barrier"),
+            Dict("id" => "barrier_crossover", "label" => "Barrier + crossover"),
+            Dict("id" => "concurrent", "label" => "Concurrent"),
+            Dict("id" => "dual_simplex", "label" => "Dual simplex"),
+            Dict("id" => "primal_simplex", "label" => "Primal simplex"),
+        ],
+        "clusteringApproaches" => ["kmeans_avg", "kmeans_shape", "kmedoids_shape", "maxdiss", "maxdiss_shape", "hull_convex", "hull_conical"],
+        "constraintGroups" => ["Base", "Base + Bunkers", "Base + Scope3", "Base + Bunkers + Scope3", "ADAPT", "TRANSFORM", "ADAPT + bunker aviation & navigation policy", "ADAPT with bunkers in single constraint", "Base + RFNBO targets", "Linking scenario", "Linking scenario + Scope3"],
+        "defaults" => Dict(
+            "inputWorkbook" => "data/default_data.xlsx",
+            "periods" => [2050],
+            "mode" => "timeslice",
+            "hoursPerDay" => 24,
+            "representativeDays" => 30,
+            "solver" => _preferred_default_solver_id(),
+            "solveMethod" => "barrier_crossover",
+            "threads" => 0,
+            "clusteringApproach" => "kmeans_avg",
+            "extremePeriods" => true,
+            "extremeDays" => 5,
+            "boundaryRamping" => true,
+            "hourlyReports" => true,
+            "saveCase" => false,
+            "showViolations" => false,
+            "outputMode" => "automatic",
+            "constraintGroup" => "Base + Bunkers + Scope3"
+        )
+    )
+    _warm_default_workbook_cache!(String(options["defaults"]["inputWorkbook"]))
+    return options
+end
+
+function _list_workbooks()
+    root = _repo_root()
+    dirs = [joinpath(root, "data"), joinpath(root, "data_Batch")]
+    files = String[]
+    for dir in dirs
+        isdir(dir) || continue
+        for name in sort(readdir(dir))
+            path = joinpath(dir, name)
+            isfile(path) || continue
+            lowercase(splitext(name)[2]) in (".xlsx", ".xls") || continue
+            push!(files, replace(relpath(path, root), '\\' => '/'))
+        end
+    end
+    return files
+end
+
+# Opens a native OS file-open dialog and returns the absolute path that the user
+# picked, or an empty string if the dialog was cancelled or the platform is not
+# supported. Windows-only for now (PowerShell + System.Windows.Forms). The dialog
+# is launched in a single-threaded apartment (-STA) because OpenFileDialog
+# requires it.
+function _browse_for_input_file()
+    Sys.iswindows() || return ""
+    initial_dir = joinpath(_repo_root(), "data")
+    if !isdir(initial_dir)
+        initial_dir = _repo_root()
+    end
+    ps_quote(s) = "'" * replace(String(s), "'" => "''") * "'"
+    # The dialog owner is a 1x1 invisible TopMost form so the picker
+    # is brought above the browser window. Without an owner the dialog
+    # often opens behind VS Code / Chrome and looks like a hang.
+    script = """
+\$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms | Out-Null
+Add-Type -AssemblyName System.Drawing | Out-Null
+\$owner = New-Object System.Windows.Forms.Form
+\$owner.TopMost = \$true
+\$owner.ShowInTaskbar = \$false
+\$owner.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::FixedToolWindow
+\$owner.StartPosition = [System.Windows.Forms.FormStartPosition]::CenterScreen
+\$owner.Opacity = 0
+\$owner.Size = New-Object System.Drawing.Size(1, 1)
+\$owner.Show()
+\$owner.Activate()
+\$owner.BringToFront()
+try {
+    \$dlg = New-Object System.Windows.Forms.OpenFileDialog
+    \$dlg.Title = 'Select IESA-Opt input workbook'
+    \$dlg.Filter = 'Excel files (*.xlsx;*.xlsm;*.xls)|*.xlsx;*.xlsm;*.xls|All files (*.*)|*.*'
+    \$dlg.InitialDirectory = $(ps_quote(initial_dir))
+    \$dlg.RestoreDirectory = \$true
+    if (\$dlg.ShowDialog(\$owner) -eq [System.Windows.Forms.DialogResult]::OK) {
+        [Console]::Out.WriteLine(\$dlg.FileName)
+    }
+} finally {
+    \$owner.Close()
+    \$owner.Dispose()
+}
+"""
+    tmpfile = tempname() * ".ps1"
+    # Resolve a real PowerShell executable. The bare name `powershell` may
+    # not be on PATH (e.g. under VS Code Julia child env) and PS 7 (`pwsh`)
+    # also works with WinForms once `-STA` is set.
+    ps_exe = Sys.which("powershell")
+    if ps_exe === nothing
+        ps_exe = Sys.which("pwsh")
+    end
+    if ps_exe === nothing
+        ps_exe = joinpath(get(ENV, "SystemRoot", "C:\\Windows"),
+                          "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+    end
+    try
+        write(tmpfile, script)
+        out = read(`$ps_exe -STA -NoProfile -ExecutionPolicy Bypass -File $tmpfile`, String)
+        return String(strip(out))
+    catch err
+        @warn "Browse dialog failed" error = sprint(showerror, err)
+        return ""
+    finally
+        try
+            isfile(tmpfile) && rm(tmpfile; force = true)
+        catch
+        end
+    end
+end
+
+function _warm_default_workbook_cache!(input_workbook::AbstractString)
+    input_path = isabspath(input_workbook) ? normpath(input_workbook) : normpath(joinpath(_repo_root(), input_workbook))
+    if !isfile(input_path)
+        _ui_warmup_status_update!(state = "missing", workbook = input_workbook,
+                                  message = "Workbook not found at $(input_workbook). Place the file under data/ and reload.",
+                                  error = "", elapsedSec = 0.0, readyAt = "")
+        return nothing
+    end
+    if _ui_model_data_cache_hit(input_path)
+        _ui_warmup_status_update!(state = "ready", workbook = input_workbook,
+                                  message = "Workbook already loaded in memory. Ready to run.",
+                                  readyAt = string(Dates.now()), elapsedSec = 0.0, error = "")
+        return nothing
+    end
+    key = _canonical_path(input_path)
+    lock(UI_CACHE_WARM_LOCK)
+    try
+        task = get(UI_CACHE_WARM_TASKS, key, nothing)
+        task !== nothing && !istaskdone(task) && return nothing
+        _ui_warmup_status_update!(state = "warming", workbook = input_workbook,
+                                  message = "Loading $(input_workbook) into memory for fast first run.",
+                                  startedAt = string(Dates.now()), readyAt = "",
+                                  elapsedSec = 0.0, error = "")
+        UI_CACHE_WARM_TASKS[key] = Base.Threads.@spawn begin
+            t0 = time()
+            try
+                @info "IESA-Opt UI warming workbook cache" workbook = input_workbook
+                md = _read_ui_data_cached(input_path)
+                md === nothing && return nothing
+                _ui_warmup_status_update!(message = "Workbook loaded. Compiling run paths for fast first run…")
+                _warm_compile_run_paths!(md)
+                elapsed = round(time() - t0, digits = 2)
+                _ui_warmup_status_update!(state = "ready",
+                                          message = "Workbook loaded and run paths compiled in $(elapsed) seconds. Ready to run.",
+                                          readyAt = string(Dates.now()), elapsedSec = elapsed,
+                                          error = "")
+                @info "IESA-Opt UI workbook cache ready" workbook = input_workbook elapsed_s = elapsed
+            catch err
+                elapsed = round(time() - t0, digits = 2)
+                _ui_warmup_status_update!(state = "failed",
+                                          message = "Warm-up failed after $(elapsed) seconds.",
+                                          elapsedSec = elapsed, error = sprint(showerror, err))
+                @warn "IESA-Opt UI workbook cache warm-up failed" workbook = input_workbook err
+            end
+        end
+    finally
+        unlock(UI_CACHE_WARM_LOCK)
+    end
+    return nothing
+end
+
+function _ui_warmup_status_snapshot()
+    lock(UI_WARMUP_STATUS_LOCK)
+    try
+        return Dict{String,Any}(UI_WARMUP_STATUS)
+    finally
+        unlock(UI_WARMUP_STATUS_LOCK)
+    end
+end
+
+function _ui_warmup_status_update!(; state = nothing, message = nothing, workbook = nothing,
+                                     startedAt = nothing, readyAt = nothing, elapsedSec = nothing,
+                                     error = nothing)
+    lock(UI_WARMUP_STATUS_LOCK)
+    try
+        state !== nothing && (UI_WARMUP_STATUS["state"] = state)
+        message !== nothing && (UI_WARMUP_STATUS["message"] = message)
+        workbook !== nothing && (UI_WARMUP_STATUS["workbook"] = workbook)
+        startedAt !== nothing && (UI_WARMUP_STATUS["startedAt"] = startedAt)
+        readyAt !== nothing && (UI_WARMUP_STATUS["readyAt"] = readyAt)
+        elapsedSec !== nothing && (UI_WARMUP_STATUS["elapsedSec"] = elapsedSec)
+        error !== nothing && (UI_WARMUP_STATUS["error"] = error)
+    finally
+        unlock(UI_WARMUP_STATUS_LOCK)
+    end
+    return nothing
+end
+
+# Compile the heaviest run-time code paths against a tiny 1-period / 1-rep-day
+# copy of `md` so the first real user run does not pay JIT cost for derive /
+# compute_derived / clustering / model building. Best-effort: any failure is
+# logged and silently ignored.
+function _warm_compile_run_paths!(md::ModelData)
+    try
+        md_copy = deepcopy(md)
+        periods_available = collect(md_copy.sets.periods)
+        isempty(periods_available) && return nothing
+        target = 2050 in periods_available ? 2050 : last(periods_available)
+        md_copy.sets.periods_solve = [target]
+        md_copy.params.hoursPer_day = 24
+        md_copy.params.n_repDays = 1
+        md_copy.params.hoursPer_day_cluster = 24
+        md_copy.params.clustering_approach = :kmeans_avg
+        md_copy.params.ts_extremePeriods = false
+        md_copy.params.ts_extremeDays_count = 0
+        md_copy.params.ts_boundaryRamping = true
+        md_copy.params.ts_capacityProfile_autoMode = true
+        md_copy.params.ts_capacityProfile_autoFloor = 0.23
+        md_copy.params.ts_capacityProfile_autoCap = 1.00
+        md_copy.params.ts_capacityProfile_autoFloor_effective = 0.23
+        md_copy.params.ts_capacityProfile_envelopeMode = 0
+        md_copy.params.dayMix_softness = 0.0
+        md_copy.params.dayMix_weightType = :auto
+
+        derive_sets!(md_copy)
+        compute_derived_params!(md_copy)
+        build_temporal_clusters!(md_copy)
+        model = JuMP.Model()
+        build_ts_lp!(model, md_copy)
+        model = nothing
+        GC.gc()
+    catch err
+        @warn "IESA-Opt UI run-path compile failed (warm-up will still report ready)" err
+    end
+    return nothing
+end
+
+function _cancel_ui_job!(job_id::String)
+    model_ref = nothing
+    job_status = "unknown"
+    lock(UI_JOBS_LOCK)
+    try
+        job = get(UI_JOBS, job_id, nothing)
+        job === nothing && return Dict("error" => "Unknown job id: $(job_id)")
+        job_status = String(get(job, "status", "unknown"))
+        if job_status in ("completed", "failed", "cancelled")
+            return Dict("jobId" => job_id, "cancelled" => false, "status" => job_status,
+                        "message" => "Job is already $(job_status); nothing to stop.")
+        end
+        job["cancelRequested"] = true
+        model_ref = get(job, "model", nothing)
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    _job_update!(job_id; message = "Stop requested by user. Trying to terminate the running solver…")
+    terminated = false
+    if model_ref !== nothing
+        terminated = _terminate_solver!(model_ref)
+    end
+    msg = terminated ?
+        "Solver termination signal sent. The run will stop at the next safe checkpoint." :
+        "Stop requested. The run will stop at the next safe checkpoint (no solver running yet, or solver does not support live cancel)."
+    return Dict("jobId" => job_id, "cancelled" => true, "status" => job_status,
+                "terminatedSolver" => terminated, "message" => msg)
+end
+
+function _terminate_solver!(model)
+    model isa JuMP.Model || return false
+    inner = nothing
+    try
+        inner = JuMP.unsafe_backend(model)
+    catch
+        return false
+    end
+    inner === nothing && return false
+    try
+        if isdefined(@__MODULE__, :Gurobi) && inner isa Gurobi.Optimizer
+            try
+                Gurobi.GRBterminate(inner.inner)
+                return true
+            catch err
+                @warn "Gurobi terminate failed" err
+            end
+        end
+        if isdefined(@__MODULE__, :HiGHS) && inner isa HiGHS.Optimizer
+            try
+                HiGHS.Highs_resetGlobalScheduler(Int32(0))
+            catch
+            end
+            try
+                if isdefined(HiGHS, :Highs_interrupt)
+                    HiGHS.Highs_interrupt(inner.inner)
+                    return true
+                end
+            catch err
+                @warn "HiGHS interrupt failed" err
+            end
+        end
+    catch err
+        @warn "Could not terminate solver" err
+    end
+    return false
+end
+
+function _check_cancel(job_id::String)
+    lock(UI_JOBS_LOCK)
+    try
+        job = get(UI_JOBS, job_id, nothing)
+        job === nothing && return false
+        return get(job, "cancelRequested", false) === true
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+end
+
+function _set_job_model!(job_id::String, model)
+    lock(UI_JOBS_LOCK)
+    try
+        job = get(UI_JOBS, job_id, nothing)
+        job === nothing && return nothing
+        job["model"] = model
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    return nothing
+end
+
+struct UICancelled <: Exception
+    message::String
+end
+Base.showerror(io::IO, err::UICancelled) = print(io, err.message)
+
+function _read_ui_data_cached(input_path::AbstractString)
+    cached = _ui_model_data_cache_lookup(input_path)
+    cached !== nothing && return deepcopy(cached)
+    lock(UI_DATA_CACHE_LOCK)
+    try
+        cached = _ui_model_data_cache_lookup(input_path)
+        cached !== nothing && return deepcopy(cached)
+        md = read_data_cached(input_path)
+        _ui_model_data_cache_store!(input_path, md)
+        return deepcopy(md)
+    finally
+        unlock(UI_DATA_CACHE_LOCK)
+    end
+end
+
+function _ui_model_data_cache_lookup(input_path::AbstractString)
+    isfile(input_path) || return nothing
+    xstat = stat(input_path)
+    key = _canonical_path(input_path)
+    lock(UI_MODEL_DATA_CACHE_LOCK)
+    try
+        entry = get(UI_MODEL_DATA_CACHE, key, nothing)
+        entry === nothing && return nothing
+        if entry.mtime == xstat.mtime && entry.size == Int64(xstat.size)
+            return entry.md
+        end
+        delete!(UI_MODEL_DATA_CACHE, key)
+        return nothing
+    finally
+        unlock(UI_MODEL_DATA_CACHE_LOCK)
+    end
+end
+
+function _ui_model_data_cache_store!(input_path::AbstractString, md::ModelData)
+    isfile(input_path) || return nothing
+    xstat = stat(input_path)
+    key = _canonical_path(input_path)
+    lock(UI_MODEL_DATA_CACHE_LOCK)
+    try
+        UI_MODEL_DATA_CACHE[key] = (mtime = xstat.mtime, size = Int64(xstat.size), md = md)
+    finally
+        unlock(UI_MODEL_DATA_CACHE_LOCK)
+    end
+    return nothing
+end
+
+function _ui_model_data_cache_hit(input_path::AbstractString)
+    return _ui_model_data_cache_lookup(input_path) !== nothing
+end
+
+function _ui_cache_warm_running(input_path::AbstractString)
+    key = _canonical_path(input_path)
+    lock(UI_CACHE_WARM_LOCK)
+    try
+        task = get(UI_CACHE_WARM_TASKS, key, nothing)
+        return task !== nothing && !istaskdone(task)
+    finally
+        unlock(UI_CACHE_WARM_LOCK)
+    end
+end
+
+function _ui_data_cache_valid(input_path::AbstractString)
+    cache_path = _ui_data_cache_path(input_path)
+    isfile(input_path) && isfile(cache_path) || return false
+    xstat = stat(input_path)
+    con = nothing
+    try
+        con = _duckdb_connect(cache_path; readonly = true)
+        metadata = _duckdb_metadata(con)
+        return get(metadata, "cache_format", "") == string(_IESA_CACHE_FORMAT_VERSION) &&
+               get(metadata, "schema_version", "") == string(_IESA_INPUT_DUCKDB_SCHEMA_VERSION) &&
+               get(metadata, "xlsx_mtime", "") == string(xstat.mtime) &&
+               get(metadata, "xlsx_size", "") == string(xstat.size)
+    catch
+        return false
+    finally
+        con !== nothing && DBInterface.close!(con)
+        GC.gc()
+    end
+end
+
+function _ui_data_cache_path(input_path::AbstractString)
+    cache_dir = joinpath(dirname(abspath(input_path)), ".iesa_cache")
+    return _duckdb_input_cache_path(input_path, cache_dir)
+end
+
+function _detect_solvers()
+    solvers = Vector{Dict{String,Any}}()
+    highs_version = _solver_display_version(:HiGHS)
+    highs_wrapper_version = _solver_wrapper_version(:HiGHS)
+    highs_available = isdefined(@__MODULE__, :HiGHS)
+    push!(solvers, Dict(
+        "id" => "highs",
+        "label" => "HiGHS",
+        "available" => highs_available,
+        "default" => false,
+        "commercial" => false,
+        "version" => highs_version,
+        "wrapperVersion" => highs_wrapper_version,
+        "message" => ""
+    ))
+    gurobi_version = _solver_display_version(:Gurobi)
+    gurobi_wrapper_version = _solver_wrapper_version(:Gurobi)
+    gurobi_available = isdefined(@__MODULE__, :Gurobi)
+    push!(solvers, Dict(
+        "id" => "gurobi",
+        "label" => "Gurobi",
+        "available" => gurobi_available,
+        "default" => false,
+        "commercial" => true,
+        "version" => gurobi_version,
+        "wrapperVersion" => gurobi_wrapper_version,
+        "message" => gurobi_available ? _commercial_solver_message(:Gurobi, "Gurobi") : ""
+    ))
+    cplex_ok, cplex_msg, cplex_version = _try_import_solver_module(:CPLEX, "CPLEX")
+    push!(solvers, Dict("id" => "cplex", "label" => "CPLEX", "available" => cplex_ok, "default" => false, "commercial" => true, "version" => cplex_version, "message" => cplex_msg))
+    xpress_ok, xpress_msg, xpress_version = _try_import_solver_module(:Xpress, "XPRESS")
+    push!(solvers, Dict("id" => "xpress", "label" => "XPRESS", "available" => xpress_ok, "default" => false, "commercial" => true, "version" => xpress_version, "message" => xpress_msg))
+    push!(solvers, Dict("id" => "auto", "label" => "Auto", "available" => true, "default" => false, "commercial" => false, "version" => "", "message" => ""))
+    default_id = _preferred_solver_id(solvers)
+    for solver in solvers
+        solver["default"] = solver["id"] == default_id
+    end
+    return solvers
+end
+
+function _try_import_solver_module(name::Symbol, label::AbstractString = String(name))
+    if isdefined(@__MODULE__, name)
+        version = _solver_display_version(name)
+        return true, _commercial_solver_message(name, label), version
+    end
+    try
+        Core.eval(@__MODULE__, Meta.parse("import $(String(name))"))
+        version = _solver_display_version(name)
+        return true, _commercial_solver_message(name, label), version
+    catch err
+        return false, "", ""
+    end
+end
+
+function _solver_display_version(name::Symbol)
+    native_version = _solver_native_version(name)
+    return isempty(native_version) ? _solver_wrapper_version(name) : native_version
+end
+
+function _solver_wrapper_version(name::Symbol)
+    isdefined(@__MODULE__, name) || return ""
+    solver_module = getfield(@__MODULE__, name)
+    try
+        version = Base.pkgversion(solver_module)
+        version === nothing && return ""
+        return "$(String(name)).jl $(version)"
+    catch
+        return ""
+    end
+end
+
+function _solver_native_version(name::Symbol)
+    isdefined(@__MODULE__, name) || return ""
+    name == :Gurobi && return _gurobi_native_version()
+    return ""
+end
+
+function _gurobi_native_version()
+    isdefined(@__MODULE__, :Gurobi) || return ""
+    try
+        major = getfield(Gurobi, :GRB_VERSION_MAJOR)
+        minor = getfield(Gurobi, :GRB_VERSION_MINOR)
+        technical = getfield(Gurobi, :GRB_VERSION_TECHNICAL)
+        return "$(major).$(minor).$(technical)"
+    catch
+        return ""
+    end
+end
+
+function _commercial_solver_message(name::Symbol, label::AbstractString)
+    name == :Gurobi && return _gurobi_license_message()
+    return ""
+end
+
+function _gurobi_license_message()
+    info = _gurobi_license_file_info()
+    isempty(info) && return ""
+    license_type = _license_type_label(get(info, "TYPE", get(info, "LICENSE_TYPE", "")))
+    if isempty(license_type) && (haskey(info, "TOKENSERVER") || haskey(info, "PORT"))
+        license_type = "Network license"
+    end
+    expires = strip(get(info, "EXPIRATION", get(info, "EXPIRES", get(info, "EXPIRATION_DATE", ""))))
+    parts = String[]
+    isempty(license_type) || push!(parts, license_type)
+    isempty(expires) || push!(parts, "expires $(expires)")
+    return join(parts, ", ")
+end
+
+function _license_type_label(value)
+    text = strip(String(value))
+    isempty(text) && return ""
+    normalized = uppercase(replace(text, '_' => ' ', '-' => ' '))
+    occursin("ACADEMIC", normalized) && return "Academic license"
+    occursin("COMMERCIAL", normalized) && return "Commercial license"
+    occursin("WLS", normalized) && return "WLS license"
+    occursin("TOKEN", normalized) && return "Network license"
+    return titlecase(lowercase(normalized)) * " license"
+end
+
+function _gurobi_license_file_info()
+    for path in _gurobi_license_file_candidates()
+        isfile(path) || continue
+        info = Dict{String,String}()
+        try
+            for line in eachline(path)
+                stripped = strip(line)
+                isempty(stripped) && continue
+                startswith(stripped, "#") && continue
+                occursin("=", stripped) || continue
+                key, value = split(stripped, "="; limit = 2)
+                info[uppercase(strip(key))] = strip(value)
+            end
+        catch
+            empty!(info)
+        end
+        isempty(info) || return info
+    end
+    return Dict{String,String}()
+end
+
+function _gurobi_license_file_candidates()
+    candidates = String[]
+    if haskey(ENV, "GRB_LICENSE_FILE")
+        raw_value = strip(ENV["GRB_LICENSE_FILE"])
+        if !isempty(raw_value)
+            values = Sys.iswindows() ? split(raw_value, ';') : split(raw_value, ':')
+            append!(candidates, strip.(String.(values)))
+            push!(candidates, raw_value)
+        end
+    end
+    push!(candidates, joinpath(homedir(), "gurobi.lic"))
+    if Sys.iswindows()
+        push!(candidates, raw"C:\gurobi\gurobi.lic")
+    else
+        push!(candidates, "/opt/gurobi/gurobi.lic")
+    end
+    haskey(ENV, "GUROBI_HOME") && push!(candidates, joinpath(ENV["GUROBI_HOME"], "gurobi.lic"))
+    return unique(filter(path -> !isempty(path) && !occursin('@', path), candidates))
+end
+
+function _preferred_solver_id(solvers::Vector{Dict{String,Any}})
+    for solver_id in COMMERCIAL_SOLVER_IDS
+        any(solver -> solver["id"] == solver_id && solver["available"] == true, solvers) && return solver_id
+    end
+    any(solver -> solver["id"] == "highs" && solver["available"] == true, solvers) && return "highs"
+    return "auto"
+end
+
+function _preferred_default_solver_id()
+    isdefined(@__MODULE__, :Gurobi) && return "gurobi"
+    cplex_ok, _, _ = _try_import_solver_module(:CPLEX, "CPLEX")
+    cplex_ok && return "cplex"
+    xpress_ok, _, _ = _try_import_solver_module(:Xpress, "XPRESS")
+    xpress_ok && return "xpress"
+    return isdefined(@__MODULE__, :HiGHS) ? "highs" : "auto"
+end
+
+_short_error(err) = first(split(sprint(showerror, err), '\n'))
+
+function _start_ui_job!(raw_config)
+    config = _normalize_run_config(raw_config)
+    job_id = Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
+    created_at = string(now())
+    created_epoch = time()
+    job = Dict{String,Any}(
+        "id" => job_id,
+        "status" => "queued",
+        "stage" => "queued",
+        "createdAt" => created_at,
+        "createdAtEpoch" => created_epoch,
+        "updatedAt" => created_at,
+        "config" => config,
+        "logs" => Vector{Dict{String,String}}(),
+        "outputDir" => "",
+        "effectiveSolver" => "",
+        "resultReady" => false,
+        "cancelRequested" => false,
+        "model" => nothing
+    )
+    lock(UI_JOBS_LOCK)
+    try
+        UI_JOBS[job_id] = job
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    task = Base.Threads.@spawn _run_ui_job!(job_id, config, created_epoch)
+    lock(UI_JOBS_LOCK)
+    try
+        UI_TASKS[job_id] = task
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    return job_id
+end
+
+function _normalize_run_config(raw_config)
+    input_value = String(_config_get(raw_config, "inputWorkbook", "data/default_data.xlsx"))
+    input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
+    isfile(input_path) || error("Input workbook not found: $input_value")
+
+    mode_raw = lowercase(String(_config_get(raw_config, "mode", "timeslice")))
+    mode = mode_raw in ("full_hourly", "fh", "full-hourly") ? "full_hourly" : "timeslice"
+    periods = _as_int_vector(_config_get(raw_config, "periods", [2050]))
+    isempty(periods) && error("Select at least one solve period")
+
+    output_mode = lowercase(String(_config_get(raw_config, "outputMode", "automatic")))
+    output_name = String(_config_get(raw_config, "outputName", ""))
+    scenario_name = splitext(basename(input_path))[1]
+    if output_mode == "custom" && !isempty(strip(output_name))
+        out_name = _sanitize_run_name(output_name)
+    else
+        stamp = Dates.format(now(), "yymmdd_HHMMSS")
+        rep_days = _as_int(_config_get(raw_config, "representativeDays", 30), 30)
+        hours_per_day = _as_int(_config_get(raw_config, "hoursPerDay", 24), 24)
+        mode_tag = mode == "timeslice" ? "$(rep_days)rd" : "$(hours_per_day)h"
+        periods_tag = isempty(periods) ? "" : join(string.(periods), "-")
+        out_name = isempty(periods_tag) ? "$(stamp)_$(mode_tag)" : "$(stamp)_$(mode_tag)_$(periods_tag)"
+    end
+
+    return Dict{String,Any}(
+        "inputWorkbook" => replace(relpath(input_path, _repo_root()), '\\' => '/'),
+        "inputPath" => input_path,
+        "scenario" => scenario_name,
+        "periods" => periods,
+        "mode" => mode,
+        "hoursPerDay" => _as_int(_config_get(raw_config, "hoursPerDay", 24), 24),
+        "representativeDays" => _as_int(_config_get(raw_config, "representativeDays", 30), 30),
+        "solver" => lowercase(String(_config_get(raw_config, "solver", "highs"))),
+        "solveMethod" => lowercase(String(_config_get(raw_config, "solveMethod", "barrier_crossover"))),
+        "threads" => _as_int(_config_get(raw_config, "threads", 0), 0),
+        "clusteringApproach" => lowercase(String(_config_get(raw_config, "clusteringApproach", "kmeans_avg"))),
+        "extremePeriods" => _as_bool(_config_get(raw_config, "extremePeriods", true), true),
+        "extremeDays" => _as_int(_config_get(raw_config, "extremeDays", 5), 5),
+        "boundaryRamping" => _as_bool(_config_get(raw_config, "boundaryRamping", true), true),
+        "hourlyReports" => _as_bool(_config_get(raw_config, "hourlyReports", true), true),
+        "saveCase" => _as_bool(_config_get(raw_config, "saveCase", false), false),
+        "showViolations" => _as_bool(_config_get(raw_config, "showViolations", false), false),
+        "constraintGroup" => String(_config_get(raw_config, "constraintGroup", "Base + Bunkers + Scope3")),
+        "outputMode" => output_mode,
+        "outputName" => out_name,
+        "outputDir" => normpath(joinpath(_repo_root(), "Output", out_name))
+    )
+end
+
+function _sanitize_run_name(name::AbstractString)
+    cleaned = replace(strip(name), r"[^A-Za-z0-9_.-]+" => "_")
+    isempty(cleaned) && error("Custom output name is empty after sanitizing")
+    return cleaned
+end
+
+function _config_get(config, key::String, default)
+    if config isa AbstractDict
+        haskey(config, key) && return config[key]
+        sym = Symbol(key)
+        haskey(config, sym) && return config[sym]
+    end
+    try
+        value = getproperty(config, Symbol(key))
+        value === nothing || return value
+    catch
+    end
+    try
+        return config[key]
+    catch
+    end
+    return default
+end
+
+function _as_int(value, default::Int)
+    value === nothing && return default
+    value isa Integer && return Int(value)
+    value isa Real && return Int(round(value))
+    try
+        return parse(Int, String(value))
+    catch
+        return default
+    end
+end
+
+function _as_bool(value, default::Bool)
+    value === nothing && return default
+    value isa Bool && return value
+    value isa Number && return value != 0
+    text = lowercase(String(value))
+    return text in ("1", "true", "yes", "on")
+end
+
+function _as_int_vector(value)
+    if value isa AbstractString
+        stripped = strip(value)
+        isempty(stripped) && return Int[]
+        return [parse(Int, strip(part)) for part in split(stripped, ',')]
+    end
+    return [Int(v) for v in collect(value)]
+end
+
+function _as_string_vector(value)
+    value === nothing && return String[]
+    value isa AbstractString && return isempty(strip(value)) ? String[] : [String(value)]
+    return [String(v) for v in collect(value)]
+end
+
+function _job_update!(job_id::String; status = nothing, stage = nothing, message = nothing, extra = Dict{String,Any}())
+    lock(UI_JOBS_LOCK)
+    try
+        job = get(UI_JOBS, job_id, nothing)
+        job === nothing && return nothing
+        status !== nothing && (job["status"] = status)
+        stage !== nothing && (job["stage"] = stage)
+        job["updatedAt"] = string(now())
+        for (key, value) in extra
+            job[key] = value
+        end
+        if message !== nothing
+            push!(job["logs"], Dict(
+                "time" => Dates.format(now(), "HH:MM:SS"),
+                "stage" => String(job["stage"]),
+                "message" => String(message)
+            ))
+            if length(job["logs"]) > UI_MAX_LOG_LINES
+                deleteat!(job["logs"], 1:(length(job["logs"]) - UI_MAX_LOG_LINES))
+            end
+        end
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    yield()
+    return nothing
+end
+function _job_snapshot(job_id::String)
+    lock(UI_JOBS_LOCK)
+    try
+        haskey(UI_JOBS, job_id) || error("Unknown job id: $job_id")
+        # Drop the live JuMP model from the snapshot — it cannot be JSON encoded.
+        snap = copy(UI_JOBS[job_id])
+        snap["model"] = nothing
+        return snap
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+end
+
+function _elapsed(f)
+    start = time()
+    value = f()
+    return value, round(time() - start, digits = 3)
+end
+
+function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Float64 = time())
+    stage_times = Dict{String,Float64}()
+    run_start = time()
+    stage_times["queue_sec"] = round(max(0.0, run_start - queued_start), digits = 3)
+    total_start = queued_start
+    try
+        _check_cancel(job_id) && throw(UICancelled("Run was stopped before reading the workbook."))
+        memory_hit = _ui_model_data_cache_hit(config["inputPath"])
+        duckdb_ready = !memory_hit && _ui_data_cache_valid(config["inputPath"])
+        cache_warm_running = !memory_hit && !duckdb_ready && _ui_cache_warm_running(config["inputPath"])
+        read_message = memory_hit ?
+            "Loading workbook $(config["inputWorkbook"]) from in-memory cache" :
+            duckdb_ready ?
+                "Loading workbook $(config["inputWorkbook"]) from DuckDB input cache" :
+                cache_warm_running ?
+                    "Waiting for workbook cache warm-up, then loading $(config["inputWorkbook"])" :
+                    "Reading workbook $(config["inputWorkbook"]) from XLSX and building DuckDB input cache for faster next runs"
+        _job_update!(job_id; status = "running", stage = "reading", message = read_message)
+        md, read_seconds = _elapsed() do
+            _read_ui_data_cached(config["inputPath"])
+        end
+        stage_times["data_read_sec"] = read_seconds
+        done_message = memory_hit ?
+            "Workbook loaded from in-memory cache in $(read_seconds) seconds" :
+            duckdb_ready ?
+                "Workbook loaded from DuckDB input cache in $(read_seconds) seconds" :
+                "Workbook read and DuckDB input cache updated in $(read_seconds) seconds"
+        _job_update!(job_id; stage = "reading", message = done_message)
+
+        selected_periods = [p for p in config["periods"] if p in md.sets.periods]
+        isempty(selected_periods) && error("Selected periods are not present in the workbook: $(config["periods"])")
+        md.sets.periods_solve = selected_periods
+
+        mode = config["mode"] == "full_hourly" ? :fh : :ts
+        md.params.hoursPer_day = mode == :ts ? 24 : config["hoursPerDay"]
+        md.params.n_repDays = max(1, config["representativeDays"])
+        md.params.hoursPer_day_cluster = 24
+        md.params.clustering_approach = Symbol(config["clusteringApproach"])
+        md.params.ts_extremePeriods = config["extremePeriods"]
+        md.params.ts_extremeDays_count = max(0, config["extremeDays"])
+        md.params.ts_boundaryRamping = config["boundaryRamping"]
+        md.params.ts_capacityProfile_autoMode = true
+        md.params.ts_capacityProfile_autoFloor = 0.23
+        md.params.ts_capacityProfile_autoCap = 1.00
+        md.params.ts_capacityProfile_autoFloor_effective = 0.23
+        md.params.ts_capacityProfile_envelopeMode = 0
+        md.params.dayMix_softness = 0.0
+        md.params.dayMix_weightType = :auto
+        _job_update!(job_id; stage = "reading", message = "Selected solve periods: $(join(string.(selected_periods), ", "))")
+
+        _job_update!(job_id; stage = "preparing", message = "Deriving sets and parameters for periods $(selected_periods)")
+        _, derive_seconds = _elapsed() do
+            derive_sets!(md)
+            compute_derived_params!(md)
+        end
+        stage_times["derive_sec"] = derive_seconds
+        _job_update!(job_id; stage = "preparing", message = "Derived sets and parameters in $(derive_seconds) seconds")
+
+        if mode == :ts
+            _check_cancel(job_id) && throw(UICancelled("Run was stopped before clustering."))
+            _job_update!(job_id; stage = "clustering", message = "Preparing $(md.params.n_repDays) representative days x $(md.params.hoursPer_day_cluster) hours")
+            _, cluster_seconds = _elapsed() do
+                build_temporal_clusters!(md)
+            end
+            stage_times["cluster_sec"] = cluster_seconds
+            _job_update!(job_id; stage = "clustering", message = "Clustering complete in $(cluster_seconds) seconds")
+        else
+            stage_times["cluster_sec"] = 0.0
+            _job_update!(job_id; stage = "clustering", message = "Full-hourly mode selected; representative-day clustering is skipped")
+        end
+
+        _check_cancel(job_id) && throw(UICancelled("Run was stopped before model generation."))
+        solver_log_path = joinpath(tempdir(), "iesa_opt_$(job_id)_solver.log")
+        rm(solver_log_path; force = true)
+        optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path)
+        model_label = mode == :ts ? "time-slice" : "full-hourly"
+        _job_update!(job_id; stage = "generation", message = "Generating $(model_label) model with $(effective_solver)", extra = Dict("effectiveSolver" => effective_solver))
+        model = Model(optimizer)
+        _set_job_model!(job_id, model)
+        vars, generation_seconds = _elapsed() do
+            mode == :ts ? build_ts_lp!(model, md) : build_fh_lp!(model, md)
+        end
+        stage_times["generation_sec"] = generation_seconds
+        n_rows = try
+            num_constraints(model; count_variable_in_set_constraints = false)
+        catch
+            0
+        end
+        n_cols = num_variables(model)
+        _job_update!(job_id; stage = "generation", message = "Model generated in $(generation_seconds) seconds ($(n_rows) rows, $(n_cols) columns)", extra = Dict("nRows" => n_rows, "nCols" => n_cols))
+
+        _check_cancel(job_id) && throw(UICancelled("Run was stopped before solving."))
+        _job_update!(job_id; stage = "solve", message = "Solving with $(effective_solver) using $(config["solveMethod"]) on $(n_rows) rows and $(n_cols) columns")
+        _, solve_seconds = _elapsed() do
+            _optimize_with_solver_progress!(model, job_id, effective_solver, solver_log_path)
+        end
+        stage_times["solve_sec"] = solve_seconds
+        term = string(termination_status(model))
+        primal = string(primal_status(model))
+        if _check_cancel(job_id) || term in ("INTERRUPTED", "USER_LIMIT")
+            _job_update!(job_id; status = "cancelled", stage = "cancelled",
+                         message = "Run stopped by user (solver status: $(term)). No results were written.",
+                         extra = Dict("cancelled" => true, "resultReady" => false))
+            return nothing
+        end
+        obj = try
+            objective_value(model)
+        catch
+            NaN
+        end
+        _job_update!(job_id; stage = "solve", message = "Solve complete in $(solve_seconds) seconds, status=$(term), objective=$(round(obj, digits = 4))")
+
+        out_dir = config["outputDir"]
+        mkpath(out_dir)
+        rr = RunResult(
+            out_dir, now(), mode,
+            term, primal, _categorize_status(termination_status(model), primal_status(model)),
+            Float64(obj), solve_seconds, round(time() - total_start, digits = 3),
+            n_rows, n_cols, 0, 0, 0,
+            Dict{String,Any}(attrs), config["scenario"],
+            md.params.n_repDays, md.params.hoursPer_day,
+            md.params.clustering_approach,
+        )
+
+        _job_update!(job_id; stage = "writing", message = "Writing DuckDB outputs to $(replace(relpath(out_dir, _repo_root()), '\\' => '/'))")
+        written = Dict{Symbol,String}()
+        writer_progress = _job_writer_progress(job_id)
+        db_path = joinpath(out_dir, IESA_RESULTS_DUCKDB_FILE)
+        _remove_duckdb_database!(db_path)
+        co2_prices = _extract_co2_prices(model, md)
+        emission_prices = _extract_emission_prices(model, md)
+        activity_prices = _extract_activity_prices(model, md)
+        activity_prices_hourly = _extract_activity_prices_hourly(model, md, mode)
+        activity_prices_daily  = _extract_activity_prices_daily(model, md, mode)
+        _with_duckdb_write_connection(db_path; persist = true) do
+            _, write_seconds = _elapsed() do
+                merge!(written, write_duckdb_results(rr, vars, md, out_dir; mode = mode, reset = false,
+                    co2_prices = co2_prices,
+                    activity_prices = activity_prices,
+                    emission_prices = emission_prices,
+                    activity_prices_hourly = activity_prices_hourly,
+                    activity_prices_daily = activity_prices_daily,
+                    progress = writer_progress))
+            end
+            stage_times["results_write_sec"] = write_seconds
+            stage_times["total_sec"] = round(time() - total_start, digits = 3)
+            _write_ui_run_metadata(out_dir, config, stage_times, rr, effective_solver, attrs; progress = writer_progress)
+        end
+        rel_out = replace(relpath(out_dir, _repo_root()), '\\' => '/')
+        _job_update!(job_id; status = "completed", stage = "done", message = "Run complete. Results are in $(rel_out)", extra = Dict("outputDir" => out_dir, "resultReady" => true, "written" => [String(k) for k in keys(written)]))
+    catch err
+        if err isa UICancelled
+            _job_update!(job_id; status = "cancelled", stage = "cancelled",
+                         message = err.message,
+                         extra = Dict("cancelled" => true, "resultReady" => false))
+        else
+            message = sprint(showerror, err)
+            _job_update!(job_id; status = "failed", stage = "failed", message = message, extra = Dict("error" => message))
+        end
+    end
+    return nothing
+end
+
+function _optimizer_for_ui_run(requested_solver::AbstractString, method::AbstractString, threads::Integer; solver_log_path::AbstractString = "")
+    solver = lowercase(String(requested_solver))
+    solver = solver == "auto" ? _choose_auto_solver() : solver
+    if solver == "highs"
+        attrs = default_highs_attributes(; threads = Int(threads))
+        _apply_highs_method!(attrs, method)
+        return highs_optimizer(; attrs), attrs, "HiGHS"
+    elseif solver == "gurobi"
+        attrs = default_gurobi_attributes(; threads = Int(threads))
+        _apply_gurobi_method!(attrs, method)
+        isempty(solver_log_path) || (attrs["LogFile"] = solver_log_path)
+        return gurobi_optimizer(; attrs), attrs, "Gurobi"
+    elseif solver == "cplex"
+        attrs = _cplex_attributes(method, Int(threads))
+        return _optional_optimizer(:CPLEX, attrs), attrs, "CPLEX"
+    elseif solver == "xpress"
+        attrs = _xpress_attributes(method, Int(threads))
+        return _optional_optimizer(:Xpress, attrs), attrs, "XPRESS"
+    end
+    error("Unknown solver: $requested_solver")
+end
+
+function _optimize_with_solver_progress!(model::JuMP.Model, job_id::String, solver_label::AbstractString, solver_log_path::AbstractString)
+    if lowercase(String(solver_label)) == "gurobi" && !isempty(solver_log_path)
+        stop_tail = Base.Threads.Atomic{Bool}(false)
+        tail_task = Base.Threads.@spawn _tail_solver_log!(job_id, solver_log_path, stop_tail)
+        try
+            optimize!(model)
+        finally
+            stop_tail[] = true
+            try
+                wait(tail_task)
+            catch err
+                _job_update!(job_id; stage = "solve", message = "Solver log tail stopped: $(_short_error(err))")
+            end
+        end
+    else
+        optimize!(model)
+    end
+    return nothing
+end
+
+function _tail_solver_log!(job_id::String, solver_log_path::AbstractString, stop_tail::Base.Threads.Atomic{Bool})
+    offset = 0
+    while !stop_tail[]
+        offset = _flush_solver_log!(job_id, solver_log_path, offset)
+        sleep(0.4)
+    end
+    for _ in 1:3
+        offset = _flush_solver_log!(job_id, solver_log_path, offset)
+        sleep(0.05)
+    end
+    return nothing
+end
+
+function _flush_solver_log!(job_id::String, solver_log_path::AbstractString, offset::Integer)
+    isfile(solver_log_path) || return offset
+    current_size = filesize(solver_log_path)
+    current_size < offset && (offset = 0)
+    current_size == offset && return offset
+    text = open(solver_log_path, "r") do io
+        seek(io, offset)
+        read(io, String)
+    end
+    new_offset = offset + ncodeunits(text)
+    for raw_line in split(replace(replace(text, "\r\n" => "\n"), '\r' => '\n'), '\n')
+        line = strip(raw_line)
+        isempty(line) && continue
+        _job_update!(job_id; stage = "solve", message = line)
+    end
+    return new_offset
+end
+
+function _choose_auto_solver()
+    isdefined(@__MODULE__, :Gurobi) && return "gurobi"
+    cplex_ok, _, _ = _try_import_solver_module(:CPLEX, "CPLEX")
+    cplex_ok && return "cplex"
+    xpress_ok, _, _ = _try_import_solver_module(:Xpress, "XPRESS")
+    xpress_ok && return "xpress"
+    return "highs"
+end
+
+function _apply_gurobi_method!(attrs::Dict{String,Any}, method::AbstractString)
+    m = lowercase(String(method))
+    if m == "barrier"
+        attrs["Method"] = 2
+        attrs["Crossover"] = 0
+        attrs["BarHomogeneous"] = 1
+    elseif m == "barrier_crossover"
+        attrs["Method"] = 2
+        attrs["Crossover"] = -1
+        delete!(attrs, "BarHomogeneous")
+    elseif m == "concurrent"
+        attrs["Method"] = 3
+        attrs["Crossover"] = -1
+        attrs["BarHomogeneous"] = 0
+    elseif m == "primal_simplex"
+        attrs["Method"] = 0
+        attrs["Crossover"] = -1
+        delete!(attrs, "BarHomogeneous")
+    elseif m == "dual_simplex"
+        attrs["Method"] = 1
+        attrs["Crossover"] = -1
+        delete!(attrs, "BarHomogeneous")
+    end
+    return attrs
+end
+
+function _apply_highs_method!(attrs::Dict{String,Any}, method::AbstractString)
+    m = lowercase(String(method))
+    if m == "barrier"
+        attrs["solver"] = "ipm"
+        attrs["run_crossover"] = "off"
+    elseif m == "barrier_crossover"
+        attrs["solver"] = "ipm"
+        attrs["run_crossover"] = "on"
+    elseif m == "concurrent"
+        attrs["solver"] = "choose"
+    elseif m == "primal_simplex"
+        attrs["solver"] = "simplex"
+        attrs["simplex_strategy"] = 4
+    elseif m == "dual_simplex"
+        attrs["solver"] = "simplex"
+        attrs["simplex_strategy"] = 1
+    end
+    return attrs
+end
+
+function _cplex_attributes(method::AbstractString, threads::Int)
+    attrs = Dict{String,Any}()
+    threads > 0 && (attrs["CPX_PARAM_THREADS"] = threads)
+    m = lowercase(String(method))
+    if m == "barrier" || m == "barrier_crossover"
+        attrs["CPX_PARAM_LPMETHOD"] = 4
+    elseif m == "concurrent"
+        attrs["CPX_PARAM_LPMETHOD"] = 6
+    elseif m == "primal_simplex"
+        attrs["CPX_PARAM_LPMETHOD"] = 1
+    elseif m == "dual_simplex"
+        attrs["CPX_PARAM_LPMETHOD"] = 2
+    end
+    return attrs
+end
+
+function _xpress_attributes(method::AbstractString, threads::Int)
+    attrs = Dict{String,Any}()
+    threads > 0 && (attrs["THREADS"] = threads)
+    return attrs
+end
+
+function _optional_optimizer(module_name::Symbol, attrs::AbstractDict)
+    ok, msg, _ = _try_import_solver_module(module_name)
+    ok || error(msg)
+    optimizer = getfield(getfield(@__MODULE__, module_name), :Optimizer)
+    pairs_vec = [string(k) => v for (k, v) in attrs]
+    return optimizer_with_attributes(optimizer, pairs_vec...)
+end
+
+function _job_writer_progress(job_id::String)
+    return function (name::Symbol, path::AbstractString, event::Symbol, seconds::Real)
+        target = basename(String(path))
+        table = string(name)
+        if event == :start
+            _job_update!(job_id; stage = "writing", message = "Saving $(table) to $(target)")
+        elseif event == :finish
+            size_text = isfile(path) ? " ($(_format_bytes(filesize(path))))" : ""
+            _job_update!(job_id; stage = "writing", message = "Saved $(table) in $(seconds) seconds$(size_text)")
+        elseif event == :failed
+            _job_update!(job_id; stage = "writing", message = "Failed to save $(table) to $(target) after $(seconds) seconds")
+        end
+    end
+end
+
+function _write_table_with_progress!(df, path::AbstractString, name::Symbol, progress::Function)
+    progress(name, _storage_display_path(path), :start, 0.0)
+    started = time()
+    try
+        written_path = _write_table(df, path)
+        elapsed = round(time() - started, digits = 3)
+        progress(name, _storage_display_path(written_path), :finish, elapsed)
+        return written_path
+    catch err
+        elapsed = round(time() - started, digits = 3)
+        progress(name, _storage_display_path(path), :failed, elapsed)
+        rethrow()
+    end
+end
+
+function _format_bytes(bytes::Integer)
+    value = Float64(bytes)
+    for unit in ("B", "KB", "MB")
+        value < 1024 && return unit == "B" ? "$(Int(round(value))) B" : "$(round(value, digits = 1)) $(unit)"
+        value /= 1024
+    end
+    return "$(round(value, digits = 1)) GB"
+end
+
+# Read the dual of the per-period emission-cap constraints to compute an
+# implied CO2 price (EUR / tCO2eq). Mirrors IESA-Opt 1.0's CO2_price report,
+# which is the shadow price of the EU/NL emission target constraint.
+# Returns an empty dict if duals are unavailable for the active solver/method.
+function _extract_co2_prices(model, md::ModelData)
+    prices = Dict{Int,Float64}()
+    # Probe a generous set of constraint names per period. The first one that
+    # actually exists with a finite shadow price wins (per IESA-Opt 1.0
+    # convention this is `emTargetAir[NL,p]` when air-only mode is on).
+    candidate_names = ps -> String[
+        "emTargetAir[NL,$(ps)]",
+        "emTargetInclScope3FuelEx[$(ps)]",
+        "emTargetInclScope3[$(ps)]",
+        "emTargetAll[NL,$(ps)]",
+        "emTargetBunker[NL,$(ps)]",
+        "emTargetFS[NL,$(ps)]",
+    ]
+    for ps in md.sets.periods_solve
+        for name in candidate_names(ps)
+            con = try
+                constraint_by_name(model, name)
+            catch
+                nothing
+            end
+            con === nothing && continue
+            price = try
+                # `<= cap` minimization: shadow_price ≤ 0; the implied CO2 price
+                # (cost of one more tCO2 of headroom) is its absolute magnitude.
+                # IESA-Opt 1.0 reports EUR/tCO2; with objective in MEUR and
+                # caps in MtonCO2 the ratio is already in EUR/tCO2.
+                abs(shadow_price(con))
+            catch
+                NaN
+            end
+            isfinite(price) || continue
+            prices[ps] = price
+            break
+        end
+    end
+    return prices
+end
+
+# Sweep every per-period emission-cap constraint registered in the model and
+# extract its absolute shadow price (EUR / tCO2eq). Returns a Vector of Dicts
+# suitable for `write_emission_prices_parquet`. Robust to constraints that are
+# not in this build (returns an empty list when no duals are available).
+function _extract_emission_prices(model, md::ModelData)
+    out = Vector{Dict{String,Any}}()
+    nodes = unique(vcat([:NL, :EU], md.sets.nodes))
+    # (constraint base name, node-scoped?) — for each period we generate every
+    # plausible registered name and capture the shadow price if it exists.
+    cap_kinds = [
+        ("emTargetAir",                true),
+        ("emTargetBunker",             true),
+        ("emTargetFS",                 true),
+        ("emTargetAll",                true),
+        ("emTargetInclScope3",         false),
+        ("emTargetInclScope3FuelEx",   false),
+        ("co2StorageCum",              true),  # cumulative, period column = 0
+    ]
+    for ps in md.sets.periods_solve
+        for (base, per_node) in cap_kinds
+            iter = per_node ? nodes : [Symbol("")]
+            for n in iter
+                name = per_node ? "$(base)[$(n),$(ps)]" : "$(base)[$(ps)]"
+                con = try
+                    constraint_by_name(model, name)
+                catch
+                    nothing
+                end
+                con === nothing && continue
+                price = try
+                    abs(shadow_price(con))
+                catch
+                    NaN
+                end
+                isfinite(price) || continue
+                push!(out, Dict{String,Any}(
+                    "name"   => base,
+                    "node"   => per_node ? string(n) : "",
+                    "period" => Int(ps),
+                    "price"  => Float64(price),
+                ))
+            end
+        end
+    end
+    return out
+end
+
+# Extract the annual activity prices = shadow prices of `balance[<a>,<p>]`,
+# `balanceFix[<a>,<p>]`, and `balanceMatconv[<a>,<p>]` constraints. Returned as
+# a Dict keyed by (activity::Symbol, period::Int, constraint_kind::Symbol) →
+# price::Float64. The constraint_kind tag distinguishes the three balance
+# families (one activity can appear in multiple). The dict can be passed
+# straight to `write_activity_prices_parquet`.
+function _extract_activity_prices(model, md::ModelData)
+    prices = Dict{Tuple{Symbol,Int,Symbol},Float64}()
+    # Activities that ever appear in `activity_balances`; capture all three
+    # constraint families (most activities only show up in one of them).
+    activities_seen = Set{Symbol}()
+    for ((_, a, _), _) in md.params.activity_balances
+        push!(activities_seen, a)
+    end
+    isempty(activities_seen) && (activities_seen = Set(md.sets.activities))
+    constraint_families = (:balance, :balanceFix, :balanceMatconv)
+    for ps in md.sets.periods_solve, a in activities_seen, kind in constraint_families
+        name = "$(kind)[$(a),$(ps)]"
+        con = try
+            constraint_by_name(model, name)
+        catch
+            nothing
+        end
+        con === nothing && continue
+        v = try
+            shadow_price(con)
+        catch
+            NaN
+        end
+        isfinite(v) || continue
+        prices[(a, Int(ps), kind)] = Float64(v)
+    end
+    return prices
+end
+
+# Hourly shadow prices for `balH_TS[<a>,<hc>,<ps>]` (TS) or `balH[<a>,<h>,<ps>]`
+# (FH). Iterates over `md.sets.activities_hour` × hours × periods. Only returns
+# entries whose absolute shadow price exceeds `threshold`. The mode tag is
+# stored alongside each entry so downstream tools can interpret `time_index`.
+function _extract_activity_prices_hourly(model, md::ModelData, mode_sym::Symbol; threshold::Float64 = 1e-6)
+    out = Vector{Dict{String,Any}}()
+    activities = md.sets.activities_hour
+    isempty(activities) && return out
+    periods = md.sets.periods_solve
+    is_ts = mode_sym == :ts
+    hours = is_ts ? md.sets.hours_cluster : md.sets.hours
+    isempty(hours) && return out
+    base = is_ts ? "balH_TS" : "balH"
+    mode_str = is_ts ? "ts" : "fh"
+    for ps in periods, a in activities, h in hours
+        name = "$(base)[$(a),$(h),$(ps)]"
+        con = try
+            constraint_by_name(model, name)
+        catch
+            nothing
+        end
+        con === nothing && continue
+        v = try
+            shadow_price(con)
+        catch
+            NaN
+        end
+        (isfinite(v) && abs(v) > threshold) || continue
+        push!(out, Dict{String,Any}(
+            "activity"   => String(a),
+            "period"     => Int(ps),
+            "mode"       => mode_str,
+            "time_index" => Int(h),
+            "price"      => Float64(v),
+        ))
+    end
+    return out
+end
+
+# Daily shadow prices for `balD_TS[<a>,<rd>,<ps>]` (TS) or `balD[<a>,<d>,<ps>]`
+# (FH). Same convention as the hourly extractor.
+function _extract_activity_prices_daily(model, md::ModelData, mode_sym::Symbol; threshold::Float64 = 1e-6)
+    out = Vector{Dict{String,Any}}()
+    activities = md.sets.activities_day
+    isempty(activities) && return out
+    periods = md.sets.periods_solve
+    is_ts = mode_sym == :ts
+    days = is_ts ? md.sets.repDays : md.sets.days
+    isempty(days) && return out
+    base = is_ts ? "balD_TS" : "balD"
+    mode_str = is_ts ? "ts" : "fh"
+    for ps in periods, a in activities, d in days
+        name = "$(base)[$(a),$(d),$(ps)]"
+        con = try
+            constraint_by_name(model, name)
+        catch
+            nothing
+        end
+        con === nothing && continue
+        v = try
+            shadow_price(con)
+        catch
+            NaN
+        end
+        (isfinite(v) && abs(v) > threshold) || continue
+        push!(out, Dict{String,Any}(
+            "activity"   => String(a),
+            "period"     => Int(ps),
+            "mode"       => mode_str,
+            "time_index" => Int(d),
+            "price"      => Float64(v),
+        ))
+    end
+    return out
+end
+
+function _write_ui_run_metadata(out_dir::AbstractString, config::Dict{String,Any}, stage_times::Dict{String,Float64}, rr::RunResult, effective_solver::String, attrs::AbstractDict; progress::Function = _no_writer_progress)
+    solver_version = _solver_version_for_label(effective_solver)
+    timing = DataFrames.DataFrame(
+        engine = ["Julia"],
+        scenario = [config["scenario"]],
+        inputWorkbook = [config["inputWorkbook"]],
+        mode = [String(rr.mode)],
+        periods = [join(string.(config["periods"]), ",")],
+        solver = [effective_solver],
+        solverVersion = [solver_version],
+        solveMethod = [config["solveMethod"]],
+        n_repDays = [rr.n_repDays],
+        hoursPer_day = [rr.hoursPer_day],
+        queue_sec = [get(stage_times, "queue_sec", 0.0)],
+        dataRead_sec = [get(stage_times, "data_read_sec", 0.0)],
+        derive_sec = [get(stage_times, "derive_sec", 0.0)],
+        cluster_sec = [get(stage_times, "cluster_sec", 0.0)],
+        generation_sec = [get(stage_times, "generation_sec", 0.0)],
+        solve_sec = [get(stage_times, "solve_sec", 0.0)],
+        resultsWrite_sec = [get(stage_times, "results_write_sec", 0.0)],
+        total_sec = [get(stage_times, "total_sec", rr.total_seconds)],
+        n_rows = [rr.n_rows],
+        n_cols = [rr.n_cols],
+        objective = [rr.objective_value],
+        termination_status = [rr.termination_status],
+    )
+    # The UI no longer renders the wide timing_summary table; instead the same
+    # information is folded into the long-form `solver_settings` (attribute,
+    # value) table next to the stacked-bar chart. We still persist the wide
+    # table for tooling that already consumes it.
+    db_path = joinpath(out_dir, IESA_RESULTS_DUCKDB_FILE)
+    _with_duckdb_write_connection(db_path) do
+        _write_table_with_progress!(timing, _duckdb_table_uri(db_path, "timing_summary"), :timing_summary, progress)
+
+        settings = DataFrames.DataFrame(attribute = String[], value = String[])
+        # Run identity / configuration
+        push!(settings, ("engine", "Julia"))
+        push!(settings, ("scenario", String(config["scenario"])))
+        push!(settings, ("inputWorkbook", String(config["inputWorkbook"])))
+        push!(settings, ("mode", String(rr.mode)))
+        push!(settings, ("periods", join(string.(config["periods"]), ",")))
+        push!(settings, ("solver", effective_solver))
+        push!(settings, ("solver_version", solver_version))
+        push!(settings, ("requested_solver", String(config["solver"])))
+        push!(settings, ("solve_method", String(config["solveMethod"])))
+        push!(settings, ("n_repDays", string(rr.n_repDays)))
+        push!(settings, ("hoursPer_day", string(rr.hoursPer_day)))
+        # Sizing
+        push!(settings, ("n_rows", string(rr.n_rows)))
+        push!(settings, ("n_cols", string(rr.n_cols)))
+        # Outcome
+        push!(settings, ("objective", string(rr.objective_value)))
+        push!(settings, ("termination_status", string(rr.termination_status)))
+        # Stage timings (seconds). Same numbers shown in the stacked bar.
+        for (label, key) in [
+                ("queue_sec",        "queue_sec"),
+                ("dataRead_sec",     "data_read_sec"),
+                ("derive_sec",       "derive_sec"),
+                ("cluster_sec",      "cluster_sec"),
+                ("generation_sec",   "generation_sec"),
+                ("solve_sec",        "solve_sec"),
+                ("resultsWrite_sec", "results_write_sec"),
+                ("total_sec",        "total_sec"),
+            ]
+            v = get(stage_times, key, key == "total_sec" ? rr.total_seconds : 0.0)
+            push!(settings, (label, string(round(Float64(v); digits = 3))))
+        end
+        # Solver attributes (sorted), prefixed so they don't collide with the
+        # canonical UI keys above.
+        for (key, value) in sort(collect(attrs); by = first)
+            push!(settings, ("attr:" * string(key), string(value)))
+        end
+        _write_table_with_progress!(settings, _duckdb_table_uri(db_path, "solver_settings"), :solver_settings, progress)
+    end
+    return nothing
+end
+
+function _solver_version_for_label(label::AbstractString)
+    lower_label = lowercase(String(label))
+    lower_label == "highs" && return _solver_display_version(:HiGHS)
+    lower_label == "gurobi" && return _solver_display_version(:Gurobi)
+    lower_label == "cplex" && return _solver_display_version(:CPLEX)
+    lower_label == "xpress" && return _solver_display_version(:Xpress)
+    return ""
+end
+
+function _job_results(job_id::String)
+    job = _job_snapshot(job_id)
+    out_dir = String(get(job, "outputDir", ""))
+    isempty(out_dir) && error("No output directory is available for job $job_id")
+    isdir(out_dir) || error("Output directory does not exist: $out_dir")
+    results = _read_ui_results(out_dir)
+    results["job"] = job
+    return results
+end
+
+function _output_roots()
+    root = _repo_root()
+    return [joinpath(root, "Output"), joinpath(root, "Output_Batch")]
+end
+
+function _is_child_path(path::AbstractString, root::AbstractString)
+    rel = relpath(normpath(path), normpath(root))
+    parts = splitpath(rel)
+    return rel != "." && !isempty(parts) && first(parts) != ".." && !isabspath(rel)
+end
+
+function _resolve_output_dir(output_id::AbstractString)
+    cleaned = replace(strip(String(output_id)), '\\' => '/')
+    isempty(cleaned) && error("No output folder was selected")
+    parts = [part for part in split(cleaned, '/') if !isempty(part)]
+    candidate = isabspath(cleaned) ? normpath(cleaned) : normpath(joinpath(_repo_root(), parts...))
+    any(root -> _is_child_path(candidate, root), _output_roots()) || error("Output folder is outside Output/ or Output_Batch/: $output_id")
+    isdir(candidate) || error("Output folder does not exist: $output_id")
+    return candidate
+end
+
+function _has_direct_result_files(dir::AbstractString)
+    isdir(dir) || return false
+    isfile(joinpath(dir, IESA_RESULTS_DUCKDB_FILE)) && return true
+    return any(name -> isfile(joinpath(dir, name)) && lowercase(splitext(name)[2]) == ".parquet", readdir(dir))
+end
+
+function _list_output_runs()
+    runs = Vector{Dict{String,Any}}()
+    for root in _output_roots()
+        isdir(root) || continue
+        local names
+        try
+            names = sort(readdir(root))
+        catch
+            continue
+        end
+        for name in names
+            dir = joinpath(root, name)
+            try
+                isdir(dir) || continue
+                _has_direct_result_files(dir) || continue
+                push!(runs, _output_run_summary(dir))
+            catch
+                # Skip folders that can't currently be summarized (e.g., temporarily
+                # locked files on Windows after a recent close). They will reappear on
+                # the next listing once the OS releases the handles.
+                continue
+            end
+        end
+    end
+    sort!(runs; by = run -> get(run, "modifiedAt", ""), rev = true)
+    return runs
+end
+
+function _output_run_summary(out_dir::AbstractString)
+    rel = replace(relpath(out_dir, _repo_root()), '\\' => '/')
+    files = _result_file_names(out_dir)
+    timing = _first_result_row(out_dir, "timing_summary")
+    stats = _first_result_row(out_dir, "run_statistics")
+    total = _first_result_row(out_dir, "totalCosts")
+    modified = Dates.unix2datetime(stat(out_dir).mtime)
+    return Dict{String,Any}(
+        "id" => rel,
+        "name" => basename(out_dir),
+        "path" => rel,
+        "storage" => isfile(_result_db_path(out_dir)) ? "DuckDB" : "Parquet",
+        "modifiedAt" => string(modified),
+        "fileCount" => length(files),
+        "files" => files,
+        "scenario" => string(get(timing, "scenario", basename(out_dir))),
+        "mode" => string(get(timing, "mode", "")),
+        "periods" => string(get(timing, "periods", "")),
+        "solver" => string(get(timing, "solver", "")),
+        "solverVersion" => string(get(timing, "solverVersion", "")),
+        "status" => string(get(stats, "termination_status", get(timing, "termination_status", ""))),
+        "objective" => get(total, "value", get(stats, "objective", get(timing, "objective", nothing))),
+        "totalSeconds" => get(timing, "total_sec", get(stats, "total_seconds", nothing)),
+        "solveSeconds" => get(timing, "solve_sec", get(stats, "solve_seconds", nothing)),
+    )
+end
+
+function _first_row(path::AbstractString)
+    rows = _read_table_rows(path, 1)
+    return isempty(rows) ? Dict{String,Any}() : first(rows)
+end
+
+function _first_result_row(out_dir::AbstractString, table_name::AbstractString)
+    rows = _read_result_table_rows(out_dir, table_name, 1)
+    return isempty(rows) ? Dict{String,Any}() : first(rows)
+end
+
+function _delete_output_runs!(body)
+    ids = _as_string_vector(_config_get(body, "outputDirs", String[]))
+    if isempty(ids)
+        ids = _as_string_vector(_config_get(body, "outputDir", ""))
+    end
+    isempty(ids) && error("Select at least one output folder to delete")
+    deleted = String[]
+    failed = Vector{Dict{String,String}}()
+    for id in ids
+        out_dir = _resolve_output_dir(id)
+        if _active_output_dir(out_dir)
+            push!(failed, Dict("id" => id, "error" => "Cannot delete $(basename(out_dir)) because a run is still using that output folder"))
+            continue
+        end
+        try
+            _remove_output_dir!(out_dir)
+            push!(deleted, replace(relpath(out_dir, _repo_root()), '\\' => '/'))
+        catch err
+            push!(failed, Dict("id" => id, "error" => _short_error(err)))
+        end
+    end
+    return Dict("deleted" => deleted, "failed" => failed, "outputs" => _list_output_runs())
+end
+
+function _active_output_dir(out_dir::AbstractString)
+    target = _canonical_path(out_dir)
+    lock(UI_JOBS_LOCK)
+    try
+        for job in values(UI_JOBS)
+            status = String(get(job, "status", ""))
+            status in ("queued", "running") || continue
+            output_dir = String(get(job, "outputDir", ""))
+            !isempty(output_dir) && _canonical_path(output_dir) == target && return true
+            config = get(job, "config", Dict{String,Any}())
+            config isa AbstractDict || continue
+            configured_dir = String(get(config, "outputDir", ""))
+            !isempty(configured_dir) && _canonical_path(configured_dir) == target && return true
+        end
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    return false
+end
+
+function _canonical_path(path::AbstractString)
+    canonical = normpath(abspath(path))
+    return Sys.iswindows() ? lowercase(canonical) : canonical
+end
+
+function _remove_output_dir!(out_dir::AbstractString)
+    isdir(out_dir) || return nothing
+    db_path = joinpath(out_dir, IESA_RESULTS_DUCKDB_FILE)
+    try
+        _close_duckdb_write_connection!(db_path)
+    catch
+    end
+    # Force any lingering DuckDB finalizers to run so Windows releases file handles
+    # that were opened by read-only views earlier in this session.
+    for _ in 1:3
+        GC.gc(true)
+    end
+    Sys.iswindows() && sleep(0.1)
+
+    last_error = nothing
+    for attempt in 1:10
+        try
+            _make_tree_writable!(out_dir)
+        catch err
+            last_error = err
+        end
+        # Delete each file individually so we surface (and retry) per-file lock errors
+        # instead of letting recursive rm silently swallow them.
+        try
+            _delete_files_in_tree!(out_dir, last_error)
+        catch err
+            last_error = err
+        end
+        try
+            rm(out_dir; recursive = true, force = true)
+        catch err
+            last_error = err
+        end
+        isdir(out_dir) || return nothing
+        if Sys.iswindows() && attempt >= 2
+            try
+                _windows_force_remove_dir!(out_dir)
+            catch err
+                last_error = err
+            end
+            isdir(out_dir) || return nothing
+        end
+        for _ in 1:2
+            GC.gc(true)
+        end
+        attempt < 10 && sleep(0.3 * attempt)
+    end
+    error("Could not delete $(replace(relpath(out_dir, _repo_root()), '\\' => '/')). Close any program that may be viewing files in this folder and try again. Last error: $(_short_error(last_error))")
+end
+
+function _delete_files_in_tree!(out_dir::AbstractString, last_error)
+    isdir(out_dir) || return last_error
+    for (root, _dirs, files) in walkdir(out_dir; topdown = false)
+        for file in files
+            path = joinpath(root, file)
+            try
+                rm(path; force = true)
+            catch err
+                last_error = err
+            end
+        end
+    end
+    return last_error
+end
+
+function _windows_force_remove_dir!(out_dir::AbstractString)
+    target = abspath(out_dir)
+    isdir(target) || return nothing
+    # cmd /c rd /s /q "<path>" -- recursive, quiet, no confirmation
+    cmd = Cmd(`cmd /c rd /s /q $target`; windows_verbatim = true)
+    try
+        run(pipeline(cmd; stdout = devnull, stderr = devnull); wait = true)
+    catch
+    end
+    return nothing
+end
+
+function _make_tree_writable!(dir::AbstractString)
+    isdir(dir) || return nothing
+    for (root, dirs, files) in walkdir(dir; topdown = false)
+        for file in files
+            path = joinpath(root, file)
+            try
+                chmod(path, 0o666)
+            catch
+            end
+        end
+        for child in dirs
+            path = joinpath(root, child)
+            try
+                chmod(path, 0o777)
+            catch
+            end
+        end
+    end
+    try
+        chmod(dir, 0o777)
+    catch
+    end
+    return nothing
+end
+
+function _compare_output_runs(output_ids::Vector{String})
+    isempty(output_ids) && error("Select at least one output folder to compare")
+    runs = Vector{Dict{String,Any}}()
+    total_costs = Vector{Dict{String,Any}}()
+    cost_components = Vector{Dict{String,Any}}()
+    timing_rows = Vector{Dict{String,Any}}()
+    for id in output_ids
+        out_dir = _resolve_output_dir(id)
+        summary = _output_run_summary(out_dir)
+        push!(runs, summary)
+        output_name = String(summary["name"])
+        output_id = String(summary["id"])
+
+        for row in _read_result_table_rows(out_dir, "totalCosts", 100)
+            item = copy(row)
+            item["output"] = output_name
+            item["outputId"] = output_id
+            push!(total_costs, item)
+        end
+        for row in _cost_by_component(out_dir)
+            item = copy(row)
+            item["output"] = output_name
+            item["outputId"] = output_id
+            push!(cost_components, item)
+        end
+        timing = _first_result_row(out_dir, "timing_summary")
+        if !isempty(timing)
+            timing["output"] = output_name
+            timing["outputId"] = output_id
+            push!(timing_rows, timing)
+        else
+            push!(timing_rows, Dict("output" => output_name, "outputId" => output_id))
+        end
+    end
+    return Dict(
+        "runs" => runs,
+        "totalCosts" => total_costs,
+        "costByComponent" => cost_components,
+        "timing" => timing_rows,
+    )
+end
+
+function _read_ui_results(out_dir::AbstractString)
+    files = _result_file_names(out_dir)
+    nodes_df = _read_result_df(out_dir, "nodes_meta")
+    nodes_list = isempty(nodes_df) ? String[] : String.(nodes_df.node)
+    result = Dict{String,Any}(
+        "outputDir" => replace(relpath(out_dir, _repo_root()), '\\' => '/'),
+        "storage" => isfile(_result_db_path(out_dir)) ? "DuckDB" : "Parquet",
+        "files" => files,
+        "runStatistics" => _read_result_table_rows(out_dir, "run_statistics", 20),
+        "timingSummary" => _read_result_table_rows(out_dir, "timing_summary", 20),
+        "solverSettings" => _read_result_table_rows(out_dir, "solver_settings", 200),
+        "totalCosts" => _read_result_table_rows(out_dir, "totalCosts", 50),
+        "costByComponent" => _cost_by_component(out_dir),
+        "costByTechnology" => _cost_by_technology(out_dir),
+        "co2Price" => _read_result_table_rows(out_dir, "CO2_price", 50),
+        "emissionPrices" => _read_result_table_rows(out_dir, "emission_prices", 500),
+        "activityPrices" => _read_result_table_rows(out_dir, "activity_prices", 5000),
+        "activityPricesHourly" => _read_result_table_rows(out_dir, "activity_prices_hourly", 200_000),
+        "activityPricesDaily"  => _read_result_table_rows(out_dir, "activity_prices_daily", 50_000),
+        "nodes" => nodes_list,
+        "powerCapacities" => _power_capacities(out_dir),
+        "hourlyDispatch" => _hourly_dispatch_payload(out_dir),
+        "hourlyProfiles" => _hourly_profile_preview(out_dir),
+        "balanceActivities" => _balance_activity_options(out_dir),
+        "emissionGroupings" => _emission_grouping_options(out_dir),
+    )
+    return result
+end
+
+function _result_db_path(out_dir::AbstractString)
+    return joinpath(out_dir, IESA_RESULTS_DUCKDB_FILE)
+end
+
+function _result_file_names(out_dir::AbstractString)
+    if isfile(_result_db_path(out_dir))
+        return [IESA_RESULTS_DUCKDB_FILE]
+    end
+    return sort([name for name in readdir(out_dir) if isfile(joinpath(out_dir, name)) && lowercase(splitext(name)[2]) == ".parquet"])
+end
+
+function _read_result_df(out_dir::AbstractString, table_name::AbstractString)
+    db_path = _result_db_path(out_dir)
+    if isfile(db_path)
+        df = _read_duckdb_table_df(db_path, table_name)
+        isempty(df) || return df
+    end
+    return _read_parquet_df(joinpath(out_dir, table_name * ".parquet"))
+end
+
+function _read_result_table_rows(out_dir::AbstractString, table_name::AbstractString, limit::Int)
+    return _df_rows(_read_result_df(out_dir, table_name), limit)
+end
+
+function _read_duckdb_table_df(db_path::AbstractString, table_name::AbstractString)
+    query = "SELECT * FROM $(_duckdb_quote_identifier(table_name))"
+    active_con = _active_duckdb_write_connection(db_path)
+    if active_con !== nothing
+        try
+            return _duckdb_query_df(active_con, query)
+        catch
+            return DataFrames.DataFrame()
+        end
+    end
+
+    con = nothing
+    try
+        con = _duckdb_connect(db_path; readonly = true)
+        return _duckdb_query_df(con, query)
+    catch
+        return DataFrames.DataFrame()
+    finally
+        con !== nothing && DBInterface.close!(con)
+        GC.gc()
+    end
+end
+
+function _read_parquet_df(path::AbstractString)
+    isfile(path) || return DataFrames.DataFrame()
+    return DataFrames.DataFrame(Parquet2.Dataset(path))
+end
+
+function _read_table_rows(path::AbstractString, limit::Int)
+    df = _read_parquet_df(path)
+    return _df_rows(df, limit)
+end
+
+function _df_rows(df::DataFrames.DataFrame, limit::Int = 100)
+    isempty(df) && return Vector{Dict{String,Any}}()
+    rows = Vector{Dict{String,Any}}()
+    max_rows = min(limit, nrow(df))
+    for row in eachrow(first(df, max_rows))
+        item = Dict{String,Any}()
+        for name in names(df)
+            value = row[name]
+            item[name] = _json_value(value)
+        end
+        push!(rows, item)
+    end
+    return rows
+end
+
+function _json_value(value)
+    value === missing && return nothing
+    value isa Symbol && return String(value)
+    value isa DateTime && return string(value)
+    value isa AbstractFloat && !isfinite(value) && return string(value)
+    return value
+end
+
+function _cost_by_component(out_dir::AbstractString)
+    df = _read_result_df(out_dir, "cost_breakdown")
+    isempty(df) && return Vector{Dict{String,Any}}()
+    all(col in names(df) for col in ["component", "cost_MEUR"]) || return _df_rows(df, 40)
+    grouped = DataFrames.combine(DataFrames.groupby(df, :component), :cost_MEUR => sum => :cost_MEUR)
+    grouped.abs_cost = abs.(grouped.cost_MEUR)
+    sort!(grouped, :abs_cost; rev = true)
+    select!(grouped, Not(:abs_cost))
+    return _df_rows(grouped, 40)
+end
+
+function _cost_by_technology(out_dir::AbstractString)
+    df = _read_result_df(out_dir, "cost_breakdown")
+    isempty(df) && return Vector{Dict{String,Any}}()
+    all(col in names(df) for col in ["tech", "cost_MEUR"]) || return Vector{Dict{String,Any}}()
+    grouped = DataFrames.combine(DataFrames.groupby(df, :tech), :cost_MEUR => sum => :cost_MEUR)
+    grouped.abs_cost = abs.(grouped.cost_MEUR)
+    sort!(grouped, :abs_cost; rev = true)
+    select!(grouped, Not(:abs_cost))
+    return _df_rows(grouped, 25)
+end
+
+function _hourly_profile_preview(out_dir::AbstractString)
+    df = _read_result_df(out_dir, "tech_use_TS")
+    isempty(df) && (df = _read_result_df(out_dir, "tech_use_h"))
+    isempty(df) && return Dict("timeColumn" => "", "rows" => Vector{Dict{String,Any}}(), "topTechnologies" => String[])
+    time_col = "hc" in names(df) ? :hc : :hour
+    all(col in names(df) for col in [String(time_col), "tech", "value"]) || return Dict("timeColumn" => String(time_col), "rows" => _df_rows(df, 300), "topTechnologies" => String[])
+
+    tech_totals = DataFrames.combine(DataFrames.groupby(df, :tech), :value => (x -> sum(abs, x)) => :activity)
+    sort!(tech_totals, :activity; rev = true)
+    top_tech = String.(tech_totals.tech[1:min(6, nrow(tech_totals))])
+    grouped = DataFrames.combine(DataFrames.groupby(df, [time_col, :tech]), :value => sum => :value)
+    filtered = grouped[in.(String.(grouped.tech), Ref(top_tech)), :]
+    sort!(filtered, [time_col, :tech])
+    return Dict("timeColumn" => String(time_col), "rows" => _df_rows(filtered, 900), "topTechnologies" => top_tech)
+end
+
+# -------------------------------------------------------------------
+# Power capacities, hourly dispatch payload, supply/demand, emissions
+# -------------------------------------------------------------------
+
+_is_power_tech_row(row) = begin
+    fields = (lowercase(string(get(row, "sector", ""))),
+              lowercase(string(get(row, "subsector", ""))),
+              lowercase(string(get(row, "category", ""))),
+              lowercase(string(get(row, "label", ""))))
+    any(f -> occursin("power", f) || occursin("electricity", f), fields)
+end
+
+# Best-effort coercion to Int. Tolerates Int/Float/String columns coming back
+# from Parquet or DuckDB; returns nothing for missing/empty/unparseable.
+function _to_int_safe(x)::Union{Nothing,Int}
+    x === missing && return nothing
+    x === nothing && return nothing
+    x isa Integer && return Int(x)
+    if x isa AbstractFloat
+        isfinite(x) || return nothing
+        return Int(round(x))
+    end
+    if x isa AbstractString
+        s = strip(String(x))
+        isempty(s) && return nothing
+        v = tryparse(Int, s)
+        v !== nothing && return v
+        f = tryparse(Float64, s)
+        return f === nothing ? nothing : Int(round(f))
+    end
+    return nothing
+end
+
+function _power_capacities(out_dir::AbstractString)
+    stock = _read_result_df(out_dir, "techStock")
+    meta = _read_result_df(out_dir, "tech_meta")
+    isempty(stock) && return Dict("rows" => Vector{Dict{String,Any}}(), "periods" => Int[])
+    rows = _df_rows(stock, 50_000)
+
+    meta_by_tech = Dict{String,Dict{String,Any}}()
+    if !isempty(meta)
+        for r in _df_rows(meta, 5_000)
+            meta_by_tech[string(get(r, "tech", ""))] = r
+        end
+    end
+
+    out = Vector{Dict{String,Any}}()
+    period_set = Set{Int}()
+    for r in rows
+        tech = string(get(r, "tech", ""))
+        m = get(meta_by_tech, tech, nothing)
+        keep = m === nothing ? false : _is_power_tech_row(m)
+        keep || continue
+        v = Float64(get(r, "value", 0))
+        abs(v) < 1e-6 && continue
+        item = Dict{String,Any}(
+            "tech" => tech,
+            "period" => Int(get(r, "period", 0)),
+            "value" => v,
+            "sector" => m === nothing ? "" : string(get(m, "sector", "")),
+            "subsector" => m === nothing ? "" : string(get(m, "subsector", "")),
+            "category" => m === nothing ? "" : string(get(m, "category", "")),
+        )
+        push!(out, item)
+        push!(period_set, Int(get(r, "period", 0)))
+    end
+    sort!(out; by = x -> (x["period"], -Float64(x["value"])))
+    return Dict("rows" => out, "periods" => sort!(collect(period_set)))
+end
+
+function _hourly_dispatch_payload(out_dir::AbstractString; node::AbstractString = "", period::Union{Nothing,Integer} = nothing)
+    df = _read_result_df(out_dir, "tech_use_TS")
+    mode = :ts
+    time_col = :hc
+    if isempty(df)
+        df = _read_result_df(out_dir, "tech_use_h")
+        mode = :fh
+        time_col = :hour
+    end
+    empty_payload = Dict(
+        "timeColumn" => "hour",
+        "periods" => Int[],
+        "techs" => String[],
+        "nodes" => String[],
+        "selectedNode" => "",
+        "selectedPeriod" => 0,
+        "hours" => Int[],
+        "techMeta" => Vector{Dict{String,Any}}(),
+        "series" => Vector{Dict{String,Any}}(),
+        "rows" => Vector{Dict{String,Any}}(),
+        "mode" => String(mode),
+    )
+    isempty(df) && return empty_payload
+    all(col in names(df) for col in [String(time_col), "tech", "value", "period"]) || return empty_payload
+
+    # Load tech metadata so we can filter to power / XC-interconnection techs at
+    # a chosen node. Older runs without `nodes_meta` still work; node selectors
+    # just won't filter anything in that case.
+    meta_df = _read_result_df(out_dir, "tech_meta")
+    nodes_df = _read_result_df(out_dir, "nodes_meta")
+    nodes_list = isempty(nodes_df) ? String[] : String.(nodes_df.node)
+    if isempty(nodes_list) && !isempty(meta_df) && "node" in names(meta_df)
+        nodes_list = sort!(unique(filter(!isempty, String.(meta_df.node))))
+    end
+    sort!(nodes_list)
+
+    meta_by_tech = Dict{String,Dict{String,Any}}()
+    if !isempty(meta_df)
+        for r in _df_rows(meta_df, 5_000)
+            meta_by_tech[string(get(r, "tech", ""))] = r
+        end
+    end
+
+    # Power-tech + cross-border-interconnection eligibility helpers
+    is_xc_tech = function (m)
+        m === nothing && return false
+        ptype = lowercase(string(get(m, "process_type", "")))
+        cat   = lowercase(string(get(m, "category", "")))
+        sub   = lowercase(string(get(m, "subsector", "")))
+        return occursin("interconnect", ptype) || occursin("interconnect", cat) ||
+               occursin("interconnect", sub) ||
+               occursin("hourly interconnected", ptype)
+    end
+    keep_for_node = function (tech, sel_node)
+        m = get(meta_by_tech, tech, nothing)
+        m === nothing && return isempty(sel_node)
+        is_power = _is_power_tech_row(m)
+        is_xc = is_xc_tech(m)
+        (is_power || is_xc) || return false
+        if !isempty(sel_node)
+            tech_node = string(get(m, "node", ""))
+            tech_node == sel_node || return false
+        end
+        return true
+    end
+
+    sel_node = String(node)
+    if !isempty(sel_node) && !isempty(nodes_list) && !(sel_node in nodes_list)
+        sel_node = ""
+    end
+    if isempty(sel_node) && !isempty(nodes_list)
+        # Default: first node alphabetically (typically the user's local node)
+        sel_node = nodes_list[1]
+    end
+
+    mask = [keep_for_node(String(t), sel_node) for t in df.tech]
+    filtered = df[mask, :]
+    isempty(filtered) && return merge(empty_payload, Dict(
+        "nodes" => nodes_list, "selectedNode" => sel_node,
+    ))
+
+    periods_avail = sort!(unique(Int[v for v in (_to_int_safe(x) for x in filtered.period) if v !== nothing]))
+    sel_period = period === nothing ? (isempty(periods_avail) ? 0 : periods_avail[1]) : Int(period)
+    sel_period in periods_avail || (sel_period = isempty(periods_avail) ? 0 : periods_avail[1])
+    sel_period == 0 && return merge(empty_payload, Dict("nodes" => nodes_list, "selectedNode" => sel_node))
+
+    period_mask = [(_to_int_safe(p) === sel_period) for p in filtered.period]
+    period_df = filtered[period_mask, [time_col, :tech, :value]]
+    isempty(period_df) && return merge(empty_payload, Dict(
+        "nodes" => nodes_list, "selectedNode" => sel_node,
+        "periods" => periods_avail, "selectedPeriod" => sel_period,
+    ))
+
+    # In TS mode, expand the (rep-hour-of-rep-day) axis to a full calendar year
+    # using `cluster_map` (calendar_day → rep_day) and the rep-day length
+    # derived from the data. In FH mode the axis is already 1..8760.
+    DAYS_PER_YEAR = 365
+    hours_full = collect(1:(DAYS_PER_YEAR * 24))
+
+    # tech → vector of length 8760
+    techs_present = unique(String.(period_df.tech))
+    series_per_tech = Dict{String,Vector{Float64}}()
+    for t in techs_present
+        series_per_tech[t] = zeros(Float64, DAYS_PER_YEAR * 24)
+    end
+
+    if mode == :fh
+        for r in eachrow(period_df)
+            t = String(r.tech)
+            h = Int(r.hour)
+            (1 <= h <= length(hours_full)) || continue
+            series_per_tech[t][h] += Float64(r.value)
+        end
+    else
+        cluster_df = _read_result_df(out_dir, "cluster_map")
+        # Determine hours-per-rep-day from the data: max(hc) / n_repDays.
+        max_hc = isempty(period_df) ? 0 : maximum(_to_int_safe(h) === nothing ? 0 : _to_int_safe(h)::Int for h in period_df.hc)
+        rep_day_ints = isempty(cluster_df) ? Int[] : Int[v for v in (_to_int_safe(x) for x in cluster_df.rep_day) if v !== nothing]
+        n_repDays = isempty(rep_day_ints) ? 0 : length(unique(rep_day_ints))
+        if n_repDays <= 0
+            # Fall back: assume hpd=24 and infer rep_days from max_hc
+            n_repDays = max(1, div(max_hc, 24))
+        end
+        hpd = max(1, n_repDays == 0 ? 24 : div(max_hc, n_repDays))
+
+        # Build (rep_day, slot-in-day) → value per tech
+        rep_lookup = Dict{Tuple{String,Int,Int},Float64}()
+        for r in eachrow(period_df)
+            hc_v = _to_int_safe(r.hc)
+            hc_v === nothing && continue
+            hc = hc_v::Int
+            rd = ((hc - 1) ÷ hpd) + 1
+            slot = ((hc - 1) % hpd) + 1
+            rep_lookup[(String(r.tech), rd, slot)] = Float64(r.value)
+        end
+        # calendar_day → rep_day. cluster_map writes `calendar_day::String` and
+        # `rep_day::Float64`, so coerce defensively.
+        cal_to_rep = Dict{Int,Int}()
+        if !isempty(cluster_df) && "calendar_day" in names(cluster_df) && "rep_day" in names(cluster_df)
+            for r in eachrow(cluster_df)
+                cd = _to_int_safe(r.calendar_day)
+                rd_v = _to_int_safe(r.rep_day)
+                (cd === nothing || rd_v === nothing) && continue
+                cal_to_rep[cd] = rd_v
+            end
+        end
+        # If cluster_map is missing, map every calendar day to rep_day 1 .. n_repDays cyclically
+        if isempty(cal_to_rep)
+            for d in 1:DAYS_PER_YEAR
+                cal_to_rep[d] = ((d - 1) % n_repDays) + 1
+            end
+        end
+
+        # Expand to 8760 by distributing each rep-day slot evenly across the
+        # calendar day's `hours_per_calendar_day = 24` (slots themselves cover
+        # `24/hpd` real hours each).
+        hours_per_slot = 24 ÷ max(1, hpd)
+        hours_per_slot == 0 && (hours_per_slot = 1)
+        for cal_day in 1:DAYS_PER_YEAR
+            rd = get(cal_to_rep, cal_day, 0)
+            rd == 0 && continue
+            for t in techs_present
+                for slot in 1:hpd
+                    val = get(rep_lookup, (t, rd, slot), 0.0)
+                    abs(val) < 1e-9 && continue
+                    for k in 0:(hours_per_slot - 1)
+                        h_in_day = (slot - 1) * hours_per_slot + k + 1
+                        h_in_day > 24 && break
+                        h = (cal_day - 1) * 24 + h_in_day
+                        series_per_tech[t][h] = val
+                    end
+                end
+            end
+        end
+    end
+
+    # Order techs so the BIGGEST (by total absolute hourly contribution) sits
+    # at the BOTTOM of a stacked area. We return the order; the frontend stacks
+    # in that order from bottom to top.
+    techs_by_total = sort(collect(keys(series_per_tech)); by = t -> -sum(abs, series_per_tech[t]))
+
+    tech_meta_out = Vector{Dict{String,Any}}()
+    for t in techs_by_total
+        m = get(meta_by_tech, t, nothing)
+        push!(tech_meta_out, Dict{String,Any}(
+            "tech" => t,
+            "sector" => m === nothing ? "" : string(get(m, "sector", "")),
+            "subsector" => m === nothing ? "" : string(get(m, "subsector", "")),
+            "category" => m === nothing ? "" : string(get(m, "category", "")),
+            "node" => m === nothing ? "" : string(get(m, "node", "")),
+            "process_type" => m === nothing ? "" : string(get(m, "process_type", "")),
+            "isInterconnection" => m === nothing ? false : is_xc_tech(m),
+            "total" => sum(abs, series_per_tech[t]),
+        ))
+    end
+
+    series_out = Vector{Dict{String,Any}}()
+    for t in techs_by_total
+        push!(series_out, Dict{String,Any}(
+            "tech" => t,
+            "values" => series_per_tech[t],
+        ))
+    end
+
+    return Dict(
+        "timeColumn" => "hour",
+        "periods" => periods_avail,
+        "techs" => techs_by_total,
+        "nodes" => nodes_list,
+        "selectedNode" => sel_node,
+        "selectedPeriod" => sel_period,
+        "hours" => hours_full,
+        "techMeta" => tech_meta_out,
+        "series" => series_out,
+        "rows" => Vector{Dict{String,Any}}(),  # legacy field; series is the new API
+        "mode" => String(mode),
+    )
+end
+
+function _balance_activity_options(out_dir::AbstractString)
+    bal = _read_result_df(out_dir, "activity_balances")
+    isempty(bal) && return Dict("activities" => Vector{Dict{String,Any}}(), "periods" => Int[])
+    acts_seen = unique(String.(bal.activity))
+    periods = sort!(unique(Int.(bal.period)))
+    meta_df = _read_result_df(out_dir, "activities_meta")
+    label_by = Dict{String,String}()
+    type_by = Dict{String,String}()
+    if !isempty(meta_df)
+        for r in _df_rows(meta_df, 10_000)
+            a = string(get(r, "activity", ""))
+            label_by[a] = string(get(r, "label", ""))
+            type_by[a] = string(get(r, "type", ""))
+        end
+    end
+    out = Vector{Dict{String,Any}}()
+    for a in acts_seen
+        push!(out, Dict{String,Any}(
+            "activity" => a,
+            "label" => get(label_by, a, ""),
+            "type" => get(type_by, a, ""),
+        ))
+    end
+    sort!(out; by = x -> lowercase(String(get(x, "activity", ""))))
+    return Dict("activities" => out, "periods" => periods)
+end
+
+function _emission_grouping_options(out_dir::AbstractString)
+    bal = _read_result_df(out_dir, "activity_balances")
+    isempty(bal) && return Dict("periods" => Int[])
+    periods = sort!(unique(Int.(bal.period)))
+    return Dict("periods" => periods)
+end
+
+function _supply_demand_payload(out_dir::AbstractString, activity::AbstractString, period)
+    isempty(activity) && return Dict("rows" => Vector{Dict{String,Any}}(), "supplyTotal" => 0.0, "demandTotal" => 0.0)
+    bal = _read_result_df(out_dir, "activity_balances")
+    use = _read_result_df(out_dir, "tech_use")
+    (isempty(bal) || isempty(use)) && return Dict("rows" => Vector{Dict{String,Any}}(), "supplyTotal" => 0.0, "demandTotal" => 0.0)
+
+    periods = period === nothing ? sort!(unique(Int.(bal.period))) : [Int(period)]
+    rows = Vector{Dict{String,Any}}()
+    supply_total = 0.0
+    demand_total = 0.0
+    use_lookup = Dict{Tuple{String,Int},Float64}()
+    for r in _df_rows(use, 200_000)
+        use_lookup[(String(get(r, "tech", "")), Int(get(r, "period", 0)))] = Float64(get(r, "value", 0))
+    end
+    activity_str = String(activity)
+    for r in _df_rows(bal, 200_000)
+        String(get(r, "activity", "")) == activity_str || continue
+        ps = Int(get(r, "period", 0))
+        ps in periods || continue
+        coef = Float64(get(r, "coef", 0))
+        tech = String(get(r, "tech", ""))
+        u = get(use_lookup, (tech, ps), 0.0)
+        contribution = coef * u
+        abs(contribution) < 1e-6 && continue
+        push!(rows, Dict{String,Any}(
+            "tech" => tech,
+            "period" => ps,
+            "coef" => coef,
+            "use" => u,
+            "value" => contribution,
+        ))
+        if contribution > 0
+            supply_total += contribution
+        else
+            demand_total += contribution
+        end
+    end
+    sort!(rows; by = x -> (Int(x["period"]), -Float64(x["value"])))
+    return Dict(
+        "activity" => activity_str,
+        "periods" => periods,
+        "rows" => rows,
+        "supplyTotal" => supply_total,
+        "demandTotal" => demand_total,
+    )
+end
+
+function _emissions_payload(out_dir::AbstractString, group_by::AbstractString)
+    bal = _read_result_df(out_dir, "activity_balances")
+    use = _read_result_df(out_dir, "tech_use")
+    acts = _read_result_df(out_dir, "activities_meta")
+    meta = _read_result_df(out_dir, "tech_meta")
+    (isempty(bal) || isempty(use) || isempty(acts)) && return Dict("rows" => Vector{Dict{String,Any}}(), "groupBy" => String(group_by))
+
+    emission_acts = Set{String}()
+    for r in _df_rows(acts, 10_000)
+        t = lowercase(string(get(r, "type", "")))
+        if t == "emission" || t == "emissionreport"
+            push!(emission_acts, String(get(r, "activity", "")))
+        end
+    end
+    isempty(emission_acts) && return Dict("rows" => Vector{Dict{String,Any}}(), "groupBy" => String(group_by))
+
+    use_lookup = Dict{Tuple{String,Int},Float64}()
+    for r in _df_rows(use, 200_000)
+        use_lookup[(String(get(r, "tech", "")), Int(get(r, "period", 0)))] = Float64(get(r, "value", 0))
+    end
+
+    meta_by_tech = Dict{String,Dict{String,Any}}()
+    if !isempty(meta)
+        for r in _df_rows(meta, 5_000)
+            meta_by_tech[String(get(r, "tech", ""))] = r
+        end
+    end
+
+    group_key = lowercase(strip(String(group_by)))
+    function _group_for(tech::String, activity::String)
+        if group_key == "activity"
+            return activity
+        end
+        m = get(meta_by_tech, tech, nothing)
+        m === nothing && return ""
+        if group_key == "sector"
+            return string(get(m, "sector", ""))
+        elseif group_key == "subsector"
+            return string(get(m, "subsector", ""))
+        elseif group_key == "kev" || group_key == "sectorkev" || group_key == "sector_kev"
+            return string(get(m, "sector_kev", ""))
+        elseif group_key == "category"
+            return string(get(m, "category", ""))
+        end
+        return string(get(m, "sector", ""))
+    end
+
+    totals = Dict{Tuple{String,Int},Float64}()
+    # Per-tech breakdown so the UI can surface "what's inside this group?"
+    # in the optional detail table. Keyed by (group, tech, activity, period).
+    tech_totals = Dict{Tuple{String,String,String,Int},Float64}()
+    period_set = Set{Int}()
+    for r in _df_rows(bal, 400_000)
+        activity = String(get(r, "activity", ""))
+        activity in emission_acts || continue
+        ps = Int(get(r, "period", 0))
+        push!(period_set, ps)
+        coef = Float64(get(r, "coef", 0))
+        tech = String(get(r, "tech", ""))
+        u = get(use_lookup, (tech, ps), 0.0)
+        contribution = coef * u
+        abs(contribution) < 1e-9 && continue
+        g = _group_for(tech, activity)
+        isempty(g) && (g = "(unmapped)")
+        totals[(g, ps)] = get(totals, (g, ps), 0.0) + contribution
+        tk = (g, tech, activity, ps)
+        tech_totals[tk] = get(tech_totals, tk, 0.0) + contribution
+    end
+
+    rows = Vector{Dict{String,Any}}()
+    for ((g, ps), v) in totals
+        push!(rows, Dict{String,Any}("group" => g, "period" => ps, "value" => v))
+    end
+    sort!(rows; by = x -> (Int(x["period"]), -abs(Float64(x["value"]))))
+
+    # Detail rows are sorted by period, then group (alphabetical), then by
+    # |value| within each group so the dominant techs surface first.
+    detail_rows = Vector{Dict{String,Any}}()
+    for ((g, tech, activity, ps), v) in tech_totals
+        push!(detail_rows, Dict{String,Any}(
+            "group" => g, "tech" => tech, "activity" => activity,
+            "period" => ps, "value" => v,
+        ))
+    end
+    sort!(detail_rows; by = x -> (Int(x["period"]), String(x["group"]), -abs(Float64(x["value"]))))
+    return Dict(
+        "groupBy" => String(group_by),
+        "periods" => sort!(collect(period_set)),
+        "rows" => rows,
+        "detailRows" => detail_rows,
+    )
+end
