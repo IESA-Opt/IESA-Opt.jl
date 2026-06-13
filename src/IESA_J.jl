@@ -106,6 +106,7 @@ export gurobi_optimizer, highs_optimizer, apply_solver_attributes!
 export AnnualVars, add_annual_variables!
 export add_stock_constraints!, add_balance_constraints!, add_objective!
 export build_annual_lp!, solve_annual!, extract_annual_results
+export apply_lp_generation_speedups!
 # Phase 3: full-hourly LP
 export add_hourly_variables!, add_hourly_constraints!
 export build_fh_lp!

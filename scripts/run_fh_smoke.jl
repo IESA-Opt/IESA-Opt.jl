@@ -37,6 +37,7 @@ compute_derived_params!(md)
 @info "Building FH LP (no optimizer attached — pure model assembly)"
 t_build = time()
 m = Model()
+apply_lp_generation_speedups!(m)
 vars = build_fh_lp!(m, md)
 build_seconds = time() - t_build
 n_rows = num_constraints(m; count_variable_in_set_constraints = false)

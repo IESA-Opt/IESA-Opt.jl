@@ -48,6 +48,7 @@ IESA_J.build_temporal_clusters!(md)
 
 @info "build_ts_lp! (no optimizer)"
 m = Model()
+IESA_J.apply_lp_generation_speedups!(m)
 t0 = time()
 vars = IESA_J.build_ts_lp!(m, md)
 build_s = round(time() - t0, digits = 1)

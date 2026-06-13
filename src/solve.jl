@@ -12,6 +12,36 @@
 using Dates
 
 """
+    apply_lp_generation_speedups!(m::JuMP.Model; keep_names::Bool=false) -> JuMP.Model
+
+Apply JuMP's documented performance-tip settings before adding variables and
+constraints. The dominant win is disabling string-name creation: every
+`@variable` / `@constraint` in the model passes a `base_name="…"` argument,
+which (a) forces string interpolation per call and (b) stores the name in
+JuMP's per-model name dictionary. For an IESA-Opt LP with hundreds of
+thousands of constraints that overhead is non-trivial — JuMP's own
+performance guide recommends turning names off for production runs.
+See https://jump.dev/JuMP.jl/stable/tutorials/getting_started/performance_tips/#Disable-string-names
+
+Names are only useful for:
+  - reading solver log lines such as "constraint balH_TS[…] has invalid bound"
+  - mapping `JuMP.compute_conflict!` IIS members back to source constraints
+  - the elastic-relaxation slack report (`report_nonzero_slacks`).
+
+If you need any of those, pass `keep_names = true` (the UI passes this when
+"Show violations" is enabled) or set the environment variable
+`IESA_OPT_KEEP_NAMES=1`.
+
+Always call this **before** building the model — `set_string_names_on_creation`
+only affects subsequently-created variables and constraints.
+"""
+function apply_lp_generation_speedups!(m::JuMP.Model; keep_names::Bool = false)
+    keep = keep_names || get(ENV, "IESA_OPT_KEEP_NAMES", "0") == "1"
+    JuMP.set_string_names_on_creation(m, keep)
+    return m
+end
+
+"""
     build_annual_lp!(m::JuMP.Model, md::ModelData) -> AnnualVars
 
 Build the annual LP (Phase 2 subset) on `m`. Returns the variable container.
@@ -131,6 +161,7 @@ function solve_annual!(md::ModelData, optimizer;
                        mode::Symbol = :fh)
     t_build_start = time()
     m = Model(optimizer)
+    apply_lp_generation_speedups!(m)
     vars = build_annual_lp!(m, md)
     build_seconds = time() - t_build_start
     @info "build_annual_lp! finished" build_seconds

@@ -110,6 +110,7 @@ function main()
 
     optimizer = IESA_J.gurobi_optimizer(; attrs = attrs)
     model = Model(optimizer)
+    IESA_J.apply_lp_generation_speedups!(model)
     vars, generation_s = elapsed() do
         IESA_J.build_ts_lp!(model, md)
     end

@@ -487,6 +487,7 @@ function _warm_compile_run_paths!(md::ModelData)
         compute_derived_params!(md_copy)
         build_temporal_clusters!(md_copy)
         model = JuMP.Model()
+        apply_lp_generation_speedups!(model)
         build_ts_lp!(model, md_copy)
         model = nothing
         GC.gc()
@@ -1202,6 +1203,13 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
             model_label = mode == :ts ? "time-slice" : "full-hourly"
             _job_update!(job_id; stage = "generation", message = "Generating $(model_label) model with $(effective_solver)", extra = Dict("effectiveSolver" => effective_solver))
             model = Model(optimizer)
+            # Disable JuMP string-name creation by default — large IESA-Opt
+            # LPs spend a non-trivial fraction of generation time / RAM on
+            # interpolating and storing constraint base_names. Keep names
+            # only when violation diagnostics are requested (slack report
+            # and IIS labels need them).
+            apply_lp_generation_speedups!(model;
+                keep_names = config["showViolations"] === true)
             _set_job_model!(job_id, model)
         end
         stage_times["optimizer_init_sec"] = optimizer_init_seconds
