@@ -233,12 +233,18 @@ function bindControls() {
 function clampHour(value, lo, hi) { const v = Math.round(Number(value)); if (!Number.isFinite(v)) return lo; return Math.max(lo, Math.min(hi, v)); }
 function syncRange(a, b, fn) { const r=$(a), n=$(b); const u=v=>{ r.value=v; n.value=v; if(fn) fn(); }; r.addEventListener("input",()=>u(r.value)); n.addEventListener("input",()=>u(n.value)); }
 
+function detectedCpuThreads(options = state.options) {
+  const fromServer = Number(options && options.cpuThreads);
+  if (Number.isFinite(fromServer) && fromServer > 0) return fromServer;
+  return Number(navigator.hardwareConcurrency) || 64;
+}
+
 function populateOptions() {
   const o = state.options, d = o.defaults;
   fillSelect("inputWorkbook", o.scenarios || [], d.inputWorkbook); fillSelect("clusteringApproach", o.clusteringApproaches || [], d.clusteringApproach); fillSelect("constraintGroup", o.constraintGroups || [], d.constraintGroup);
   renderPeriods(o.periods || [], d.periods || []); renderHours(o.hoursPerDayOptions || [], d.hoursPerDay); renderSolveMethods(o.solveMethods || [], d.solveMethod);
   $("representativeDays").value = d.representativeDays; $("representativeDaysNumber").value = d.representativeDays;
-  const cores = String(Math.max(4, navigator.hardwareConcurrency || 64)); $("threads").max = cores; $("threadsNumber").max = cores; updateTotalSlices();
+  const threads = String(Math.max(4, detectedCpuThreads(o))); $("threads").max = threads; $("threadsNumber").max = threads; updateTotalSlices();
   updateTimeSlicingControls();
 }
 function fillSelect(id, values, selected) { const s=$(id); s.innerHTML=""; const opts = values.includes(selected) ? values : [selected, ...values].filter(Boolean); opts.forEach(v=>{ const o=document.createElement("option"); o.value=v; o.textContent=v; o.selected=v===selected; s.appendChild(o); }); }

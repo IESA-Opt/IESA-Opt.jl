@@ -85,6 +85,105 @@ using Statistics
         @test spec2.rows[1].min == 0.0
         @test spec2.rows[1].max == 1.0
     end
+
+    @testset "UI validation resolves workbook coordinates" begin
+        direct_body = Dict(
+            "name" => "ui_valid",
+            "method" => "lhs",
+            "n_variants" => 2,
+            "seed" => 1,
+            "rows" => [Dict(
+                "parameter" => "Bunker emission cap",
+                "subparameter" => "NL 2050",
+                "sheet" => "emissionTargetBunker",
+                "cell" => "(NL, 2050)",
+                "type" => "multiply",
+                "min" => 0.5,
+                "max" => 1.5,
+            )],
+        )
+        direct = IESAOpt._scenario_validate(direct_body)
+        @test direct["valid"] == true
+
+        workbook_body = deepcopy(direct_body)
+        workbook_body["inputWorkbook"] = "data/default_data.xlsx"
+        workbook_body["rows"][1]["sheet"] = "NodeParameters"
+        workbook_body["rows"][1]["cell"] = "AE5"
+        workbook = IESAOpt._scenario_validate(workbook_body)
+        @test workbook["valid"] == true
+        @test any(occursin("NodeParameters!AE5 -> ModelParams.emissionTargetBunker", w) for w in workbook["warnings"])
+        @test any(occursin("emTargetBunker[NL,2050]", w) for w in workbook["warnings"])
+
+        feedstock_body = deepcopy(workbook_body)
+        feedstock_body["rows"][1]["parameter"] = "Feedstock emission cap"
+        feedstock_body["rows"][1]["sheet"] = "NodeParameters"
+        feedstock_body["rows"][1]["cell"] = "AL5"
+        feedstock = IESAOpt._scenario_validate(feedstock_body)
+        @test feedstock["valid"] == true
+        @test any(occursin("NodeParameters!AL5 -> ModelParams.emissionTargetFS", w) for w in feedstock["warnings"])
+
+        unsupported = deepcopy(direct_body)
+        unsupported["inputWorkbook"] = "data/default_data.xlsx"
+        unsupported["rows"][1]["sheet"] = "Technologies"
+        unsupported["rows"][1]["cell"] = "AA10"
+        invalid = IESAOpt._scenario_validate(unsupported)
+        @test invalid["valid"] == false
+        @test any(occursin("resolved to ModelParams.vom_cost", e) for e in invalid["errors"])
+        @test any(occursin("no live scenario mutation builder", e) for e in invalid["errors"])
+
+        unknown_sheet = deepcopy(direct_body)
+        unknown_sheet["rows"][1]["sheet"] = "UnknownSheet"
+        unknown_sheet["rows"][1]["cell"] = "AE5"
+        invalid_sheet = IESAOpt._scenario_validate(unknown_sheet)
+        @test invalid_sheet["valid"] == false
+        @test any(occursin("Workbook has no sheet named", e) for e in invalid_sheet["errors"])
+
+        bad_indices = deepcopy(direct_body)
+        bad_indices["rows"][1]["cell"] = "AA10"
+        invalid_indices = IESAOpt._scenario_validate(bad_indices)
+        @test invalid_indices["valid"] == false
+        @test any(occursin("expects (node, period)", e) for e in invalid_indices["errors"])
+    end
+
+    @testset "Campaign phases reset later cards on worker startup" begin
+        spec = CampaignSpec(name = "phase_reset", method = :lhs, n_variants = 2, seed = 1,
+            rows = [ParameterRow(parameter = "Bunker emission cap", sheet = "emissionTargetBunker",
+                                 cell = "(NL, 2050)", type = :multiply, min = 0.5, max = 1.5)])
+        snap = IESAOpt._campaign_session_skeleton("phase_reset", spec, 2, 1, :highs, :ts)
+        IESAOpt._campaign_set_phase!(snap, "generate", "done"; detail = "2 variants generated")
+
+        IESAOpt._campaign_set_phase!(snap, "workers", "active"; detail = "Starting 2 workers", advance = false)
+        IESAOpt._campaign_reset_after_phase!(snap, "workers")
+
+        phases = Dict(String(p["id"]) => p for p in snap["phases"])
+        @test phases["workers"]["status"] == "active"
+        @test phases["generate"]["status"] == "pending"
+        @test phases["generate"]["detail"] == ""
+    end
+
+    @testset "Campaign worker cards prefer actual worker pid" begin
+        spec = CampaignSpec(name = "worker_pid", method = :lhs, n_variants = 3, seed = 1,
+            rows = [ParameterRow(parameter = "Bunker emission cap", sheet = "emissionTargetBunker",
+                                 cell = "(NL, 2050)", type = :multiply, min = 0.5, max = 1.5)])
+        snap = IESAOpt._campaign_session_skeleton("worker_pid", spec, 3, 1, :highs, :ts)
+        snap["workers"][1]["pid"] = 101
+        snap["workers"][2]["pid"] = 202
+        snap["workers"][3]["pid"] = 303
+
+        @test IESAOpt._campaign_worker_slot(snap["workers"], 202, 1) == 2
+        @test IESAOpt._campaign_worker_slot(snap["workers"], 999, 3) == 3
+    end
+
+    @testset "Campaign worker cards show planned task totals" begin
+        spec = CampaignSpec(name = "worker_totals", method = :lhs, n_variants = 10, seed = 1,
+            rows = [ParameterRow(parameter = "Bunker emission cap", sheet = "emissionTargetBunker",
+                                 cell = "(NL, 2050)", type = :multiply, min = 0.5, max = 1.5)])
+        snap = IESAOpt._campaign_session_skeleton("worker_totals", spec, 3, 1, :highs, :ts)
+        IESAOpt._campaign_set_worker_task_totals!(snap, 10, 3)
+
+        @test [w["assigned"] for w in snap["workers"]] == [4, 3, 3]
+        @test [w["started"] for w in snap["workers"]] == [0, 0, 0]
+    end
 end
 
 @testset "scenario/sampling.jl" begin

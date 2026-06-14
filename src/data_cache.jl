@@ -24,7 +24,7 @@ using DuckDB
 import DBInterface
 
 const _IESA_CACHE_FORMAT_VERSION = 10
-const _IESA_INPUT_DUCKDB_SCHEMA_VERSION = 1
+const _IESA_INPUT_DUCKDB_SCHEMA_VERSION = 2
 
 """
     read_data_cached(xlsx_path; cache_dir=auto, force_refresh=false, kwargs...)
@@ -49,7 +49,15 @@ function read_data_cached(xlsx_path::AbstractString;
     cache_path = _duckdb_input_cache_path(xlsx_path, cache_dir)
 
     xstat = stat(xlsx_path)
-    if !force_refresh && isfile(cache_path)
+    cache_exists = false
+    if !force_refresh
+        try
+            cache_exists = isfile(cache_path)
+        catch err
+            @warn "read_data_cached: cannot inspect DuckDB cache, rebuilding from XLSX" cache_path err = err
+        end
+    end
+    if !force_refresh && cache_exists
         try
             t0 = time()
             cached_md = _read_duckdb_input_cache(cache_path, xlsx_path, xstat)

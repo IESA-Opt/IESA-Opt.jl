@@ -19,6 +19,13 @@
 
   const $ = (id) => document.getElementById(id);
   const DAYS_PER_YEAR = 360;
+  const PARAMETER_SPACE_STORAGE_KEY = "iesa.scenario.parameterSpace.v1";
+
+  function detectedCpuThreads(options) {
+    const fromServer = Number(options && options.cpuThreads);
+    if (Number.isFinite(fromServer) && fromServer > 0) return fromServer;
+    return Number(navigator.hardwareConcurrency) || 64;
+  }
 
   // ---------------------------------------------------------------------------
   // Parameter space columns: id -> descriptor. The selection checkbox is NOT
@@ -38,21 +45,35 @@
     { id: "notes",        label: "Notes",         kind: "text" },
   ];
 
-  // Default rows mirror the SSDashboard parameter_space_example.xlsx so the
-  // user immediately sees a valid spec they can edit/extend.
+  // Defaults use the workbook coordinates a user sees in the Excel database.
+  // The server resolves them to ModelParams fields/indices before launching.
   const DEFAULT_ROWS = [
-    { parameter: "CO2 cap",              subparameter: "CO2 cap",              sheet: "Technologies", cell: "AA10", type: "set",      min: 0,   max: 10,  step: "",  notes: "" },
-    { parameter: "RES capex multiplier", subparameter: "Wind",                 sheet: "Technologies", cell: "AB6",  type: "multiply", min: 0.5, max: 2.5, step: "",  notes: "" },
-    { parameter: "RES capex multiplier", subparameter: "Solar",                sheet: "Technologies", cell: "AB7",  type: "multiply", min: "",  max: "",  step: "",  notes: "" },
-    { parameter: "Import price biomass", subparameter: "Import price biomass", sheet: "Technologies", cell: "AC3",  type: "set",      min: 0,   max: 10,  step: 2,   notes: "" },
+    { parameter: "Bunker emission cap",    subparameter: "NL 2050", sheet: "NodeParameters", cell: "AE5", type: "multiply", min: 0.5, max: 1.5, step: "", notes: "" },
+    { parameter: "Feedstock emission cap", subparameter: "NL 2050", sheet: "NodeParameters", cell: "AL5", type: "multiply", min: 0.5, max: 1.5, step: "", notes: "" },
+    { parameter: "Cumulative CO2 budget",  subparameter: "NL",      sheet: "NodeParameters", cell: "I5",  type: "multiply", min: 0.8, max: 1.2, step: "", notes: "" },
   ];
 
   const state = {
     rows: DEFAULT_ROWS.map((r) => Object.assign({}, r)),
     selected: new Set(),
-    visibleColumns: new Set(COLUMNS.map((c) => c.id)),
     customWorkbookPath: "",
+    cpuThreads: 0,
     bound: false,
+  };
+
+  const CAMPAIGN_PHASES = [
+    { id: "workers", label: "Making workers" },
+    { id: "assign", label: "Assigning tasks" },
+    { id: "generate", label: "Generating" },
+    { id: "solve", label: "Solve" },
+    { id: "write", label: "Export" },
+  ];
+  const PHASE_STATUS_LABELS = {
+    pending: "Pending",
+    active: "Running",
+    done: "Done",
+    failed: "Failed",
+    skipped: "Skipped",
   };
 
   // Live / demo progress state. Shape matches the eventual Phase 3 endpoint.
@@ -64,8 +85,48 @@
     startedAt: 0,
     campaign: { name: "", total: 0, started_at: 0 },
     workers: [],
+    phases: defaultCampaignPhases(),
     failures: [],
   };
+
+  const scenarioResultsState = {
+    campaignId: null,
+    scatter: [],
+    campaigns: [],
+  };
+
+  function defaultCampaignPhases() {
+    return CAMPAIGN_PHASES.map((p) => ({ id: p.id, label: p.label, status: "pending", detail: "" }));
+  }
+
+  function normalizeCampaignPhases(phases, campaignState) {
+    const incoming = new Map((Array.isArray(phases) ? phases : [])
+      .filter((p) => p && p.id)
+      .map((p) => [String(p.id), p]));
+    const normalized = CAMPAIGN_PHASES.map((def) => {
+      const p = incoming.get(def.id) || {};
+      const rawStatus = String(p.status || "pending").toLowerCase();
+      const status = Object.prototype.hasOwnProperty.call(PHASE_STATUS_LABELS, rawStatus) ? rawStatus : "pending";
+      return {
+        id: def.id,
+        label: String(p.label || def.label),
+        status,
+        detail: String(p.detail || ""),
+        seconds: typeof p.seconds === "number" ? p.seconds : null,
+      };
+    });
+    if ((!phases || !phases.length) && campaignState === "completed") {
+      normalized.forEach((p) => { p.status = p.id === "write" ? "skipped" : "done"; });
+      const write = normalized.find((p) => p.id === "write");
+      if (write) write.detail = "Export not enabled";
+    }
+    return normalized;
+  }
+
+  function setProgressPhase(id, status, detail) {
+    const phases = progressState.phases || defaultCampaignPhases();
+    progressState.phases = phases.map((p) => p.id === id ? Object.assign({}, p, { status, detail: detail || "" }) : p);
+  }
 
   // ===========================================================================
   // Init / bindings
@@ -74,12 +135,14 @@
     if (state.bound) return;
     if (!$("scTableBody")) return; // tab markup not present (older HTML)
     state.bound = true;
+    restoreSavedParameterSpace();
     renderTable();
     bindRowControls();
-    bindColumnControls();
     bindScenarioFormControls();
     bindProgressControls();
+    bindScenarioResultsControls();
     renderProgress();
+    fetchScenarioCampaigns().catch(() => {});
     // Kick off an implicit validate so the implied count appears right away.
     validateNow().catch(() => {});
   }
@@ -92,6 +155,14 @@
     });
     $("scDuplicateRow").addEventListener("click", duplicateSelected);
     $("scRemoveRow").addEventListener("click", removeSelected);
+    const saveBtn = $("scSaveParameterSpace");
+    if (saveBtn) saveBtn.addEventListener("click", saveParameterSpace);
+    const loadBtn = $("scLoadParameterSpace");
+    const loadFile = $("scLoadParameterSpaceFile");
+    if (loadBtn && loadFile) {
+      loadBtn.addEventListener("click", () => loadFile.click());
+      loadFile.addEventListener("change", loadParameterSpaceFile);
+    }
     $("scValidateBtn").addEventListener("click", () => validateNow());
     $("scPreviewBtn").addEventListener("click", () => previewNow());
     ["scCampaignName", "scMethod", "scNVariants", "scSeed"].forEach((id) => {
@@ -105,38 +176,6 @@
   function onCampaignFieldChange() {
     updateCampaignSummary();
     scheduleValidate();
-  }
-
-  function bindColumnControls() {
-    const addBtn = $("scAddColumnBtn");
-    const menu = $("scAddColumnMenu");
-    if (!addBtn || !menu) return;
-    addBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const hidden = COLUMNS.filter((c) => !state.visibleColumns.has(c.id));
-      if (!hidden.length) {
-        menu.innerHTML = '<div class="sc-col-menu-empty">All columns visible.</div>';
-      } else {
-        menu.innerHTML = "";
-        hidden.forEach((c) => {
-          const b = document.createElement("button");
-          b.type = "button";
-          b.textContent = c.label;
-          b.addEventListener("click", () => {
-            state.visibleColumns.add(c.id);
-            menu.classList.add("hidden");
-            renderTable();
-          });
-          menu.appendChild(b);
-        });
-      }
-      menu.classList.toggle("hidden");
-    });
-    document.addEventListener("click", (e) => {
-      if (!menu.classList.contains("hidden") && !menu.contains(e.target) && e.target !== addBtn) {
-        menu.classList.add("hidden");
-      }
-    });
   }
 
   // ===========================================================================
@@ -157,26 +196,12 @@
     tr.appendChild(thSel);
 
     COLUMNS.forEach((col) => {
-      if (!state.visibleColumns.has(col.id)) return;
       const th = document.createElement("th");
       const wrap = document.createElement("span");
       wrap.className = "sc-col-head";
       const label = document.createElement("span");
       label.textContent = col.label;
       wrap.appendChild(label);
-      if (!col.essential) {
-        const hide = document.createElement("button");
-        hide.type = "button";
-        hide.className = "sc-col-hide";
-        hide.textContent = "\u2212"; // minus sign
-        hide.title = "Hide " + col.label + " column";
-        hide.addEventListener("click", (e) => {
-          e.stopPropagation();
-          state.visibleColumns.delete(col.id);
-          renderTable();
-        });
-        wrap.appendChild(hide);
-      }
       th.appendChild(wrap);
       tr.appendChild(th);
     });
@@ -204,7 +229,6 @@
       tr.appendChild(tdSel);
 
       COLUMNS.forEach((col) => {
-        if (!state.visibleColumns.has(col.id)) return;
         const td = document.createElement("td");
         if (col.kind === "select") {
           td.appendChild(makeSelectInput(row, col.id, col.options));
@@ -268,6 +292,154 @@
     scheduleValidate();
   }
 
+  function csvCell(value) {
+    const text = value === null || value === undefined ? "" : String(value);
+    return /[",\r\n]/.test(text) ? '"' + text.replace(/"/g, '""') + '"' : text;
+  }
+
+  function parameterSpaceCsv() {
+    const header = COLUMNS.map((c) => csvCell(c.label)).join(",");
+    const rows = state.rows.map((row) => COLUMNS.map((c) => csvCell(row[c.id])).join(","));
+    return [header].concat(rows).join("\r\n") + "\r\n";
+  }
+
+  function parseCsv(text) {
+    const rows = [];
+    let row = [];
+    let cell = "";
+    let quoted = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (quoted) {
+        if (ch === '"') {
+          if (text[i + 1] === '"') { cell += '"'; i++; }
+          else quoted = false;
+        } else {
+          cell += ch;
+        }
+      } else if (ch === '"') {
+        quoted = true;
+      } else if (ch === ",") {
+        row.push(cell); cell = "";
+      } else if (ch === "\n") {
+        row.push(cell); cell = "";
+        rows.push(row); row = [];
+      } else if (ch !== "\r") {
+        cell += ch;
+      }
+    }
+    if (cell !== "" || row.length) { row.push(cell); rows.push(row); }
+    return rows;
+  }
+
+  function normalizeParameterSpaceRows(rows) {
+    const headers = rows.length ? rows[0].map((h) => String(h || "").trim()) : [];
+    const headerToId = new Map();
+    COLUMNS.forEach((col) => {
+      headerToId.set(col.label.toLowerCase(), col.id);
+      headerToId.set(col.id.toLowerCase(), col.id);
+    });
+    const ids = headers.map((h) => headerToId.get(h.toLowerCase()) || null);
+    if (!ids.some(Boolean)) throw new Error("CSV header does not match the parameter-space columns.");
+    const out = [];
+    rows.slice(1).forEach((cells) => {
+      const r = {};
+      COLUMNS.forEach((col) => { r[col.id] = col.kind === "number" ? "" : ""; });
+      ids.forEach((id, i) => {
+        if (!id) return;
+        const col = COLUMNS.find((c) => c.id === id);
+        const raw = cells[i] === undefined ? "" : String(cells[i]).trim();
+        r[id] = col && col.kind === "number" ? (raw === "" ? "" : Number(raw)) : raw;
+      });
+      if (!Object.values(r).some((v) => String(v || "").trim() !== "")) return;
+      if (!COLUMNS.find((c) => c.id === "type").options.includes(r.type)) r.type = "set";
+      out.push(r);
+    });
+    if (!out.length) throw new Error("CSV has no parameter rows.");
+    return out;
+  }
+
+  function persistParameterSpace() {
+    try {
+      localStorage.setItem(PARAMETER_SPACE_STORAGE_KEY, JSON.stringify({
+        savedAt: new Date().toISOString(),
+        rows: state.rows,
+      }));
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function restoreSavedParameterSpace() {
+    try {
+      const raw = localStorage.getItem(PARAMETER_SPACE_STORAGE_KEY);
+      if (!raw) return false;
+      const payload = JSON.parse(raw);
+      if (!payload || !Array.isArray(payload.rows) || !payload.rows.length) return false;
+      state.rows = normalizeParameterSpaceRows([
+        COLUMNS.map((c) => c.id),
+        ...payload.rows.map((row) => COLUMNS.map((c) => row[c.id] === undefined ? "" : row[c.id])),
+      ]);
+      state.selected.clear();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function downloadText(filename, text, type) {
+    const blob = new Blob([text], { type });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function safeFilenamePart(value) {
+    const raw = String(value || "scenario_space").trim() || "scenario_space";
+    return raw.replace(/[^A-Za-z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "") || "scenario_space";
+  }
+
+  function saveParameterSpace() {
+    const campaign = safeFilenamePart(($("scCampaignName") || {}).value);
+    const filename = campaign + "_parameter_space.csv";
+    const persisted = persistParameterSpace();
+    downloadText(filename, parameterSpaceCsv(), "text/csv;charset=utf-8");
+    setStatus("Parameter space saved to " + filename + (persisted ? " and kept for reload." : "."), "ok");
+  }
+
+  function loadParameterSpaceFile(event) {
+    const input = event.target;
+    const file = input && input.files && input.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        state.rows = normalizeParameterSpaceRows(parseCsv(String(reader.result || "")));
+        state.selected.clear();
+        persistParameterSpace();
+        renderTable();
+        updateCampaignSummary();
+        scheduleValidate();
+        setStatus("Loaded parameter space from " + file.name + ".", "ok");
+      } catch (err) {
+        setStatus("Could not load parameter space: " + (err && err.message ? err.message : err), "error");
+      } finally {
+        input.value = "";
+      }
+    };
+    reader.onerror = () => {
+      setStatus("Could not read parameter space file.", "error");
+      input.value = "";
+    };
+    reader.readAsText(file);
+  }
+
   // ===========================================================================
   // Scenario form (mirrors the run-form options/solvers)
   // ===========================================================================
@@ -284,7 +456,7 @@
     const clear = $("scClearCustomInputButton");
     if (clear) clear.addEventListener("click", clearCustomInput);
     const wb = $("scInputWorkbook");
-    if (wb) wb.addEventListener("change", () => { if (state.customWorkbookPath) clearCustomInput(); else updateScenarioSummary(); });
+    if (wb) wb.addEventListener("change", () => { if (state.customWorkbookPath) clearCustomInput(); else updateScenarioSummary(); scheduleValidate(); });
 
     const ts = $("scTimeSlicingToggle");
     if (ts) ts.addEventListener("change", () => { updateTimeSlicingControls(); updateTotalSlices(); });
@@ -327,20 +499,21 @@
     renderPeriods(options.periods || [], d.periods || []);
     renderHours(options.hoursPerDayOptions || [], d.hoursPerDay);
     renderSolveMethods(options.solveMethods || [], d.solveMethod);
+    state.cpuThreads = detectedCpuThreads(options);
     if ($("scRepresentativeDays")) { $("scRepresentativeDays").value = d.representativeDays; }
     if ($("scRepresentativeDaysNumber")) { $("scRepresentativeDaysNumber").value = d.representativeDays; }
-    const cores = String(Math.max(4, navigator.hardwareConcurrency || 64));
-    if ($("scThreads")) $("scThreads").max = cores;
-    if ($("scThreadsNumber")) $("scThreadsNumber").max = cores;
-    if ($("scWorkers")) $("scWorkers").max = cores;
-    if ($("scWorkersNumber")) $("scWorkersNumber").max = cores;
+    const cpuThreads = String(Math.max(4, state.cpuThreads));
+    if ($("scThreads")) $("scThreads").max = cpuThreads;
+    if ($("scThreadsNumber")) $("scThreadsNumber").max = cpuThreads;
+    if ($("scWorkers")) $("scWorkers").max = cpuThreads;
+    if ($("scWorkersNumber")) $("scWorkersNumber").max = cpuThreads;
     // Sensible defaults so the user immediately sees a real Threads-per-worker
-    // number instead of "auto": total cores = detected, workers = half.
-    const detected = Number(navigator.hardwareConcurrency) || 0;
-    const defaultCores   = Math.max(1, Math.min(detected || 4, Number(cores)));
-    const defaultWorkers = Math.max(1, Math.min(detected ? Math.floor(detected / 2) : 4, Number(cores)));
-    if ($("scThreads") && !$("scThreads").dataset.touched) $("scThreads").value = defaultCores;
-    if ($("scThreadsNumber") && !$("scThreadsNumber").dataset.touched) $("scThreadsNumber").value = defaultCores;
+    // number instead of "auto": total threads = detected, workers = half.
+    const detected = state.cpuThreads;
+    const defaultThreads = Math.max(1, Math.min(detected || 4, Number(cpuThreads)));
+    const defaultWorkers = Math.max(1, Math.min(detected ? Math.floor(detected / 2) : 4, Number(cpuThreads)));
+    if ($("scThreads") && !$("scThreads").dataset.touched) $("scThreads").value = defaultThreads;
+    if ($("scThreadsNumber") && !$("scThreadsNumber").dataset.touched) $("scThreadsNumber").value = defaultThreads;
     if ($("scWorkers") && !$("scWorkers").dataset.touched) $("scWorkers").value = defaultWorkers;
     if ($("scWorkersNumber") && !$("scWorkersNumber").dataset.touched) $("scWorkersNumber").value = defaultWorkers;
 
@@ -467,31 +640,31 @@
 
   // ---------------------------------------------------------------------------
   // Compute and display the implied threads/worker.
-  //   - Total CPU cores (scThreads): cap on cores allocated to the campaign.
+  //   - Total CPU threads (scThreads): cap on threads allocated to the campaign.
   //     0 means "let the solver pick".
   //   - Parallel workers (scWorkers): how many variants run in parallel.
-  //   - Threads per worker = floor(totalCores / workers), with a floor of 1.
+  //   - Threads per worker = floor(totalThreads / workers), with a floor of 1.
   //
-  // When totalCores is 0 (auto), we report "auto" instead of dividing by the
-  // detected hardware concurrency since the actual core count the solver
+  // When totalThreads is 0 (auto), we report "auto" instead of dividing by the
+  // detected hardware concurrency since the actual thread count the solver
   // claims at runtime is decided by HiGHS/Gurobi internally.
   // ---------------------------------------------------------------------------
   function updateThreadsPerWorker() {
     const out = $("scThreadsPerWorker");
     if (!out) return;
-    const totalCores = Number(($("scThreads") || {}).value || 0);
+    const totalThreads = Number(($("scThreads") || {}).value || 0);
     const workers = Math.max(1, Number(($("scWorkers") || {}).value || 1));
-    if (totalCores <= 0) {
+    if (totalThreads <= 0) {
       out.innerHTML = `<strong>auto</strong> <span class="subtle">(solver picks; \u00f7 ${workers} workers)</span>`;
-      out.title = `Total CPU cores = 0 -> solver decides per worker.`;
+      out.title = `Total CPU threads = 0 -> solver decides per worker.`;
       return;
     }
     // floor(total / workers) is the threads-per-worker we send to the solver.
-    const perWorker = Math.max(1, Math.floor(totalCores / workers));
+    const perWorker = Math.max(1, Math.floor(totalThreads / workers));
     const allocated = perWorker * workers;
-    const slack = totalCores - allocated;
-    out.innerHTML = `<strong>${perWorker}</strong> <span class="subtle">= floor(${totalCores} \u00f7 ${workers})${slack > 0 ? `, ${slack} core(s) unused` : ""}</span>`;
-    out.title = `threads_per_worker = floor(total_cores / workers) = floor(${totalCores} / ${workers}) = ${perWorker}`;
+    const slack = totalThreads - allocated;
+    out.innerHTML = `<strong>${perWorker}</strong> <span class="subtle">= floor(${totalThreads} \u00f7 ${workers})${slack > 0 ? `, ${slack} thread(s) unused` : ""}</span>`;
+    out.title = `threads_per_worker = floor(total_threads / workers) = floor(${totalThreads} / ${workers}) = ${perWorker}`;
   }
 
   function updateScenarioSummary() {
@@ -544,6 +717,7 @@
     const clearBtn = $("scClearCustomInputButton");
     if (clearBtn) clearBtn.classList.remove("hidden");
     updateScenarioSummary();
+    scheduleValidate();
   }
 
   function clearCustomInput() {
@@ -555,6 +729,7 @@
     const clearBtn = $("scClearCustomInputButton");
     if (clearBtn) clearBtn.classList.add("hidden");
     updateScenarioSummary();
+    scheduleValidate();
   }
 
   // ===========================================================================
@@ -605,6 +780,9 @@
       method: $("scMethod").value,
       n_variants: Number($("scNVariants").value) || 0,
       seed: Number($("scSeed").value) || 0,
+      inputWorkbook: state.customWorkbookPath
+        || (($("scInputWorkbook") || {}).value)
+        || "data/default_data.xlsx",
       rows: state.rows.map((r) => ({
         parameter: r.parameter || "",
         subparameter: r.subparameter || "",
@@ -722,6 +900,13 @@
     });
   }
 
+  function bindScenarioResultsControls() {
+    const refresh = $("scenarioRefreshCampaigns");
+    if (refresh) refresh.addEventListener("click", () => {
+      fetchScenarioCampaigns().catch((err) => console.warn("scenario/campaigns refresh failed", err));
+    });
+  }
+
   // ---------------------------------------------------------------------------
   // Real-campaign launch + polling (Phase 3.5)
   // ---------------------------------------------------------------------------
@@ -774,6 +959,7 @@
     progressState.activeCampaignId = payload.campaign_id;
     // Seed the dashboard from the initial snapshot.
     applySnapshot(payload.snapshot);
+    fetchScenarioCampaigns().catch(() => {});
     // Switch the user to the Progress sub-tab so they can watch it run.
     activateProgressTab();
     startPolling(payload.campaign_id);
@@ -794,9 +980,9 @@
   }
 
   function computeThreadsPerWorker() {
-    const totalCores = Number(($("scThreads") || {}).value) || 0;
+    const totalThreads = Number(($("scThreads") || {}).value) || 0;
     const workers = Math.max(1, Number(($("scWorkers") || {}).value) || 1);
-    return totalCores > 0 ? Math.max(1, Math.floor(totalCores / workers)) : 1;
+    return totalThreads > 0 ? Math.max(1, Math.floor(totalThreads / workers)) : 1;
   }
 
   function computeMode() {
@@ -827,13 +1013,19 @@
       started_at: (snap.campaign.started_at || 0) * 1000,
       state: String(snap.campaign.state || snap.campaign.status || ""),
       stage: String(snap.campaign.stage || ""),
+      n_workers: Number(snap.campaign.n_workers || 0),
+      avg_task_seconds: Number(snap.campaign.avg_task_seconds || 0),
+      task_seconds_count: Number(snap.campaign.task_seconds_count || 0),
+      collect_save_seconds: Number(snap.campaign.collect_save_seconds || 0),
       error: snap.error || null,
     };
+    progressState.phases = normalizeCampaignPhases(snap.phases, progressState.campaign.state);
     progressState.workers = (snap.workers || []).map((w) => ({
       id: w.id,
       status: w.status,
       variant_id: w.variant_id,
       assigned: w.assigned || 0,
+      started: w.started || 0,
       completed: w.completed || 0,
       failed: w.failed || 0,
       progress: (w.progress || 0) * 100,
@@ -910,6 +1102,8 @@
         if (snap.done) {
           stopPolling();
           progressState.active = false;
+          fetchScenarioResult(id).catch((err) => console.warn("scenario/result fetch failed", err));
+          fetchScenarioCampaigns().catch((err) => console.warn("scenario/campaigns refresh failed", err));
           // applyLiveButtonVisibility (called from applySnapshot) already
           // restored the demo buttons and cleared activeCampaignId.
           renderProgress();
@@ -925,6 +1119,138 @@
       clearInterval(progressState.pollTimer);
       progressState.pollTimer = null;
     }
+  }
+
+  async function fetchScenarioResult(id) {
+    if (!id) return;
+    const r = await fetch("/api/scenario/result/" + encodeURIComponent(id));
+    const payload = await r.json();
+    if (!payload || payload.ok === false) {
+      renderScenarioResults({ scatter: [], error: payload && payload.error });
+      return;
+    }
+    scenarioResultsState.campaignId = id;
+    scenarioResultsState.scatter = Array.isArray(payload.scatter) ? payload.scatter : [];
+    renderScenarioResults(payload);
+  }
+
+  async function fetchScenarioCampaigns() {
+    const r = await fetch("/api/scenario/campaigns");
+    const payload = await r.json();
+    if (!payload || payload.ok === false) {
+      scenarioResultsState.campaigns = [];
+      renderScenarioCampaignList(payload && payload.error);
+      return;
+    }
+    scenarioResultsState.campaigns = Array.isArray(payload.campaigns) ? payload.campaigns : [];
+    renderScenarioCampaignList();
+  }
+
+  function renderScenarioCampaignList(error) {
+    const list = $("scenarioCampaignList");
+    const summary = $("scenarioCampaignListSummary");
+    const rows = scenarioResultsState.campaigns || [];
+    if (summary) {
+      summary.textContent = error ? "Could not load campaigns." : `${rows.length} campaign${rows.length === 1 ? "" : "s"} available.`;
+    }
+    if (!list) return;
+    list.innerHTML = "";
+    if (error) {
+      list.className = "scenario-campaign-list empty-state";
+      list.textContent = error;
+      return;
+    }
+    if (!rows.length) {
+      list.className = "scenario-campaign-list empty-state";
+      list.textContent = "No Scenario Space campaigns yet.";
+      return;
+    }
+    list.className = "scenario-campaign-list";
+    rows.forEach((c) => list.appendChild(renderScenarioCampaignItem(c)));
+  }
+
+  function renderScenarioCampaignItem(c) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "scenario-campaign-item" + (c.id === scenarioResultsState.campaignId ? " active" : "");
+    const finished = Number(c.completed || 0) + Number(c.failed || 0);
+    const total = Number(c.total || 0);
+    const started = c.started_at ? formatFinishClock(Number(c.started_at) * 1000) : "";
+    btn.innerHTML = `<span class="scenario-campaign-name">${escapeHtml(c.name || c.id)}</span>`
+      + `<span class="scenario-campaign-meta">${escapeHtml(c.state || "unknown")} · ${finished}/${total} done · ${Number(c.result_count || 0)} results</span>`
+      + (started ? `<span class="scenario-campaign-time">Started ${escapeHtml(started)}</span>` : "");
+    btn.addEventListener("click", () => {
+      scenarioResultsState.campaignId = c.id;
+      renderScenarioCampaignList();
+      fetchScenarioResult(c.id).catch((err) => {
+        renderScenarioResults({ scatter: [], error: err && err.message ? err.message : String(err) });
+      });
+    });
+    return btn;
+  }
+
+  function renderScenarioResults(payload) {
+    const rows = Array.isArray(payload && payload.scatter) ? payload.scatter : scenarioResultsState.scatter || [];
+    const summary = $("scenarioResultsSummary");
+    const total = rows.length;
+    const points = rows.map((r) => ({
+      variant_id: Number(r.variant_id),
+      worker_id: r.worker_id,
+      system_cost: Number(r.system_cost),
+      co2_price: Number(r.co2_price),
+      term_status: String(r.term_status || ""),
+    })).filter((r) => Number.isFinite(r.system_cost) && Number.isFinite(r.co2_price));
+
+    if (summary) {
+      if (payload && payload.error) {
+        summary.textContent = "Could not load campaign results: " + payload.error;
+      } else if (points.length) {
+        summary.textContent = `${points.length} plotted variant${points.length === 1 ? "" : "s"} from ${total} completed result${total === 1 ? "" : "s"}.`;
+      } else if (total) {
+        summary.textContent = `${total} result${total === 1 ? "" : "s"} loaded, but no finite CO2 prices were available.`;
+      } else {
+        summary.textContent = "No campaign results loaded.";
+      }
+    }
+
+    renderCostCo2Scatter(points, total);
+  }
+
+  function renderCostCo2Scatter(points, totalRows) {
+    const el = $("scenarioCostCo2Scatter");
+    if (!el) return;
+    if (!window.Plotly) {
+      el.className = "bar-chart empty-state";
+      el.textContent = "Plotly is not loaded.";
+      return;
+    }
+    if (!points.length) {
+      if (el._fullLayout) window.Plotly.purge(el);
+      el.className = "bar-chart empty-state";
+      el.textContent = totalRows ? "No finite CO2 price values available for completed variants." : "No campaign results yet.";
+      return;
+    }
+    el.className = "bar-chart plotly-chart";
+    const trace = {
+      type: "scattergl",
+      mode: "markers",
+      x: points.map((r) => r.system_cost),
+      y: points.map((r) => r.co2_price),
+      text: points.map((r) => `Variant ${r.variant_id}`),
+      customdata: points.map((r) => [r.variant_id, r.worker_id || "", r.term_status || ""]),
+      hovertemplate: "Variant %{customdata[0]}<br>System cost: %{x:,.3f}<br>CO2 price: %{y:,.3f} EUR/tCO2eq<br>Worker: %{customdata[1]}<br>Status: %{customdata[2]}<extra></extra>",
+      marker: { size: 8, color: "#007a78", opacity: 0.78, line: { color: "#0f2436", width: 0.5 } },
+    };
+    const layout = {
+      margin: { l: 64, r: 18, t: 16, b: 56 },
+      paper_bgcolor: "rgba(0,0,0,0)",
+      plot_bgcolor: "rgba(0,0,0,0)",
+      xaxis: { title: "System cost (objective)", gridcolor: "#dbe4ec", zerolinecolor: "#c8d5df", automargin: true },
+      yaxis: { title: "CO2 price (EUR/tCO2eq)", gridcolor: "#dbe4ec", zerolinecolor: "#c8d5df", automargin: true },
+      hovermode: "closest",
+      showlegend: false,
+    };
+    window.Plotly.react(el, [trace], layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
   }
 
   async function stopLiveCampaign() {
@@ -981,13 +1307,22 @@
     const configuredWorkers = Number(($("scWorkers") || {}).value || 0);
     const nWorkers = configuredWorkers > 0
       ? Math.min(50, configuredWorkers)
-      : Math.min(8, Math.max(2, Math.floor((navigator.hardwareConcurrency || 4) / 2)));
+      : Math.min(8, Math.max(2, Math.floor((state.cpuThreads || detectedCpuThreads()) / 2)));
     const total = Math.max(nWorkers, Number(($("scNVariants") || {}).value) || 60);
     const variantsPerWorker = Math.ceil(total / nWorkers);
     progressState.active = true;
     progressState.startedAt = Date.now();
-    progressState.campaign = { name: ($("scCampaignName") || {}).value || "demo_campaign", total, started_at: progressState.startedAt };
+    progressState.demoPhaseStartedAt = progressState.startedAt;
+    progressState.campaign = {
+      name: ($("scCampaignName") || {}).value || "demo_campaign",
+      total,
+      started_at: progressState.startedAt,
+      state: "running",
+      stage: "Demo campaign running",
+    };
     progressState.workers = [];
+    progressState.phases = defaultCampaignPhases();
+    setProgressPhase("workers", "active", `Starting ${nWorkers} demo workers`);
     progressState.failures = [];
     for (let i = 1; i <= nWorkers; i++) {
       progressState.workers.push({
@@ -997,6 +1332,7 @@
         completed: 0,
         failed: 0,
         assigned: variantsPerWorker,
+        started: 1,
         progress: 0,
         started_at: progressState.startedAt,
         last_change: progressState.startedAt,
@@ -1005,6 +1341,7 @@
         rss_bytes: (350 + Math.random() * 200) * 1024 * 1024, // 350-550 MB fake
       });
     }
+    updateDemoPhases();
     $("campaignDemoStart").classList.add("hidden");
     $("campaignDemoStop").classList.remove("hidden");
     progressState.demoTimer = setInterval(tickDemo, 250);
@@ -1017,6 +1354,9 @@
       progressState.demoTimer = null;
     }
     progressState.active = false;
+    progressState.campaign.state = "cancelled";
+    progressState.campaign.stage = "Demo stopped";
+    setProgressPhase("solve", "skipped", "Demo stopped");
     if ($("campaignDemoStart")) $("campaignDemoStart").classList.remove("hidden");
     if ($("campaignDemoStop")) $("campaignDemoStop").classList.add("hidden");
     renderProgress();
@@ -1071,6 +1411,7 @@
         if (variantsRemaining > 1) {
           w.status = "running";
           w.variant_id = w.id + (w.completed + w.failed) * progressState.workers.length;
+          w.started = (w.started || 0) + 1;
           w.progress = 0;
           w.next_finish_in = 800 + Math.random() * 2400;
         } else {
@@ -1083,12 +1424,124 @@
     // Auto-stop when everything is finished
     if (!anyRunning) {
       progressState.active = false;
+      progressState.campaign.state = "completed";
+      progressState.campaign.stage = "Demo completed";
       clearInterval(progressState.demoTimer);
       progressState.demoTimer = null;
       if ($("campaignDemoStart")) $("campaignDemoStart").classList.remove("hidden");
       if ($("campaignDemoStop")) $("campaignDemoStop").classList.add("hidden");
     }
+    updateDemoPhases();
     renderProgress();
+  }
+
+  function updateDemoPhases() {
+    if (!progressState.demoPhaseStartedAt) return;
+    const elapsed = Date.now() - progressState.demoPhaseStartedAt;
+    const workers = progressState.workers || [];
+    const total = (progressState.campaign || {}).total || 0;
+    const finished = workers.reduce((acc, w) => acc + (w.completed || 0) + (w.failed || 0), 0);
+    progressState.phases = defaultCampaignPhases();
+    if (!progressState.active && finished >= total && total > 0) {
+      setProgressPhase("workers", "done", `${workers.length} workers loaded`);
+      setProgressPhase("assign", "done", `${total} variants assigned`);
+      setProgressPhase("generate", "done", `${total} variants generated`);
+      setProgressPhase("solve", "done", `${finished}/${total} variants solved`);
+      setProgressPhase("write", "skipped", "Export not enabled");
+    } else if (elapsed < 900) {
+      setProgressPhase("workers", "active", `Starting ${workers.length} workers`);
+    } else if (elapsed < 1700) {
+      setProgressPhase("workers", "done", `${workers.length} workers loaded`);
+      setProgressPhase("assign", "active", `${total} variants waiting`);
+    } else if (elapsed < 2500) {
+      setProgressPhase("workers", "done", `${workers.length} workers loaded`);
+      setProgressPhase("assign", "done", `${total} variants assigned`);
+      setProgressPhase("generate", "active", "Building variant inputs");
+    } else {
+      setProgressPhase("workers", "done", `${workers.length} workers loaded`);
+      setProgressPhase("assign", "done", `${total} variants assigned`);
+      setProgressPhase("generate", "done", `${total} variants generated`);
+      setProgressPhase("solve", "active", `${finished}/${total} variants solved`);
+    }
+  }
+
+  function renderCampaignPhases(c, total) {
+    const grid = $("campaignPhaseGrid");
+    const summary = $("campaignPhaseSummary");
+    if (!grid) return;
+    const phases = normalizeCampaignPhases(progressState.phases || [], (c || {}).state || "");
+    grid.innerHTML = "";
+    phases.forEach((phase) => {
+      const card = document.createElement("div");
+      card.className = `campaign-phase-card ${phase.status || "pending"}`;
+
+      const head = document.createElement("div");
+      head.className = "campaign-phase-head";
+      const label = document.createElement("span");
+      label.className = "campaign-phase-label";
+      label.textContent = phase.label;
+      const status = document.createElement("span");
+      status.className = "campaign-phase-status";
+      status.textContent = PHASE_STATUS_LABELS[phase.status] || "Pending";
+      head.appendChild(label);
+      head.appendChild(status);
+
+      const detail = document.createElement("div");
+      detail.className = "campaign-phase-detail";
+      const parts = [];
+      if (phase.detail) parts.push(phase.detail);
+      if (typeof phase.seconds === "number" && isFinite(phase.seconds)) parts.push(fmtDuration(phase.seconds));
+      detail.textContent = parts.join(" - ") || "Waiting";
+
+      card.appendChild(head);
+      card.appendChild(detail);
+      grid.appendChild(card);
+    });
+
+    if (summary) {
+      const failed = phases.find((p) => p.status === "failed");
+      const active = phases.find((p) => p.status === "active");
+      const completed = total > 0 && phases.every((p) => p.status === "done" || p.status === "skipped");
+      if (failed) {
+        summary.textContent = `${failed.label}: ${failed.detail || "failed"}`;
+      } else if (active) {
+        summary.textContent = `${active.label}: ${active.detail || "running"}`;
+      } else if (completed) {
+        summary.textContent = "Campaign phases finished.";
+      } else {
+        summary.textContent = "Waiting for a campaign.";
+      }
+    }
+  }
+
+  function pad2(n) { return String(n).padStart(2, "0"); }
+
+  function formatFinishClock(ms) {
+    const d = new Date(ms);
+    const time = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+    const now = new Date();
+    const sameDay = d.getFullYear() === now.getFullYear()
+      && d.getMonth() === now.getMonth()
+      && d.getDate() === now.getDate();
+    if (sameDay) return time;
+    return `${time} (${d.getFullYear()}.${pad2(d.getMonth() + 1)}.${pad2(d.getDate())})`;
+  }
+
+  function estimateCampaignFinish(c, total, workerCount) {
+    const avgTaskSec = Number(c.avg_task_seconds || 0);
+    const startedAt = Number(c.started_at || 0);
+    if (!Number.isFinite(avgTaskSec) || avgTaskSec <= 0 || !startedAt || total <= 0) return null;
+    const workers = Math.max(1, Number(c.n_workers || workerCount || 1));
+    const waves = Math.ceil(total / workers);
+    const collectSaveSec = Number.isFinite(Number(c.collect_save_seconds))
+      ? Math.max(0, Number(c.collect_save_seconds))
+      : Math.max(20, workers * 2 + total * 0.05);
+    const projectedSec = waves * avgTaskSec * 1.15 + collectSaveSec;
+    let finishMs = startedAt + projectedSec * 1000;
+    if (progressState.active && finishMs < Date.now()) {
+      finishMs = Date.now() + Math.max(collectSaveSec, avgTaskSec * 1.15) * 1000;
+    }
+    return { finishMs, avgTaskSec, collectSaveSec, waves };
   }
 
   function renderProgress() {
@@ -1176,17 +1629,20 @@
     if (elapsedEl) elapsedEl.textContent = "Elapsed: " + (elapsedMs > 0 ? fmtDuration(elapsedMs / 1000) : "\u2014");
     const etaEl = $("campaignEta");
     if (etaEl) {
-      const finished = done + failed;
-      if (progressState.active && finished > 0 && total > 0) {
-        const perVariant = elapsedMs / finished;
-        const remaining = (total - finished) * perVariant / Math.max(1, running);
-        etaEl.textContent = "ETA: " + fmtDuration(remaining / 1000);
+      const estimate = estimateCampaignFinish(c, total, workers.length);
+      if (progressState.active && estimate) {
+        etaEl.textContent = "Finish: " + formatFinishClock(estimate.finishMs);
+        etaEl.title = `avg completed task ${estimate.avgTaskSec.toFixed(1)}s * ${estimate.waves} worker wave(s) * 1.15 + ${estimate.collectSaveSec.toFixed(1)}s collect/save`;
       } else if (!progressState.active && total === 0) {
-        etaEl.textContent = "ETA: \u2014";
+        etaEl.textContent = "Finish: \u2014";
+        etaEl.title = "";
       } else {
-        etaEl.textContent = "ETA: estimating\u2026";
+        etaEl.textContent = "Finish: estimating\u2026";
+        etaEl.title = "Waiting for at least one completed task.";
       }
     }
+
+    renderCampaignPhases(c, total);
 
     // Worker grid
     const grid = $("workerGrid");
@@ -1261,6 +1717,13 @@
   function renderWorkerCard(w) {
     const card = document.createElement("div");
     card.className = "worker-card status-" + (w.status || "idle");
+    const completed = Math.max(0, Number(w.completed || 0));
+    const failed = Math.max(0, Number(w.failed || 0));
+    const running = (w.status === "running" && w.variant_id != null) ? 1 : 0;
+    const assigned = Math.max(0, Number(w.assigned || 0));
+    const total = Math.max(assigned, completed + failed + running);
+    const queued = Math.max(0, total - completed - failed - running);
+    const pct = (value) => total > 0 ? Math.max(0, Math.min(100, (value / total) * 100)) : 0;
 
     const head = document.createElement("div");
     head.className = "worker-card-header";
@@ -1283,22 +1746,30 @@
 
     const bar = document.createElement("div");
     bar.className = "worker-progress";
-    const fill = document.createElement("div");
-    fill.className = "worker-progress-bar";
-    const pct = w.status === "done" ? 100
-              : w.status === "failed" ? 100
-              : w.status === "running" ? (w.progress || 0)
-              : 0;
-    fill.style.width = pct + "%";
-    bar.appendChild(fill);
+    bar.title = `${completed} done, ${running} running, ${failed} failed, ${queued} queued of ${total} task${total === 1 ? "" : "s"}`;
+    const doneSeg = document.createElement("div");
+    doneSeg.className = "worker-progress-segment worker-progress-done";
+    doneSeg.style.width = pct(completed).toFixed(1) + "%";
+    const currentSeg = document.createElement("div");
+    currentSeg.className = "worker-progress-segment worker-progress-current";
+    currentSeg.style.width = pct(running).toFixed(1) + "%";
+    const failedSeg = document.createElement("div");
+    failedSeg.className = "worker-progress-segment worker-progress-failed";
+    failedSeg.style.width = pct(failed).toFixed(1) + "%";
+    bar.appendChild(doneSeg);
+    bar.appendChild(currentSeg);
+    bar.appendChild(failedSeg);
     card.appendChild(bar);
 
     const meta = document.createElement("div");
     meta.className = "worker-meta";
     const left = document.createElement("span");
-    const total = w.assigned || 0;
-    const finished = (w.completed || 0) + (w.failed || 0);
-    left.textContent = `${finished}/${total} done${w.failed ? ` (${w.failed} failed)` : ""}`;
+    const taskLabel = total === 1 ? "task" : "tasks";
+    const parts = [`${completed} done`];
+    if (running) parts.push("1 running");
+    if (failed) parts.push(`${failed} failed`);
+    if (queued) parts.push(`${queued} queued`);
+    left.textContent = `${parts.join(", ")} / ${total} ${taskLabel}`;
     const right = document.createElement("span");
     const elapsed = w.started_at ? (Date.now() - w.started_at) / 1000 : 0;
     right.textContent = elapsed > 0 ? fmtDuration(elapsed) : "";

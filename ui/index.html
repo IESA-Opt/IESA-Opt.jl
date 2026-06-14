@@ -59,7 +59,7 @@
             <label class="field"><span>Solver</span><select id="solver"></select></label>
             <div id="solverDetails" class="subtle detail-text"></div>
             <div class="field"><span>Solve method</span><div id="solveMethod" class="segmented vertical"></div></div>
-            <label class="field"><span>CPU cores</span><div class="range-pair"><input id="threads" type="range" min="0" max="64" value="0"><input id="threadsNumber" type="number" min="0" max="64" value="0"></div></label>
+            <label class="field"><span>CPU threads</span><div class="range-pair"><input id="threads" type="range" min="0" max="64" value="0"><input id="threadsNumber" type="number" min="0" max="64" value="0"></div></label>
           </section>
         </aside>
 
@@ -189,8 +189,8 @@
             <label class="field"><span>Solver</span><select id="scSolver"></select></label>
             <div id="scSolverDetails" class="subtle detail-text"></div>
             <div class="field"><span>Solve method</span><div id="scSolveMethod" class="segmented vertical"></div></div>
-            <label class="field"><span>Total CPU cores</span><div class="range-pair"><input id="scThreads" type="range" min="0" max="64" value="0"><input id="scThreadsNumber" type="number" min="0" max="64" value="0"></div></label>
-            <div class="field threads-per-worker-field"><span>Threads per worker <span class="subtle">= floor(cores &divide; workers)</span></span><div id="scThreadsPerWorker" class="threads-per-worker-value">auto</div></div>
+            <label class="field"><span>Total CPU threads</span><div class="range-pair"><input id="scThreads" type="range" min="0" max="64" value="0"><input id="scThreadsNumber" type="number" min="0" max="64" value="0"></div></label>
+            <div class="field threads-per-worker-field"><span>Threads per worker <span class="subtle">= floor(threads &divide; workers)</span></span><div id="scThreadsPerWorker" class="threads-per-worker-value">auto</div></div>
           </section>
         </aside>
 
@@ -225,7 +225,9 @@
                 <button id="scAddRow" type="button" class="secondary-button">+ Add row</button>
                 <button id="scDuplicateRow" type="button" class="secondary-button">Duplicate</button>
                 <button id="scRemoveRow" type="button" class="danger-button">Remove selected</button>
-                <span class="sc-col-add-wrap"><button id="scAddColumnBtn" type="button" class="secondary-button" title="Add a hidden column back">+ Column</button><div id="scAddColumnMenu" class="sc-col-menu hidden"></div></span>
+                <button id="scSaveParameterSpace" type="button" class="secondary-button">Save parameter space</button>
+                <button id="scLoadParameterSpace" type="button" class="secondary-button">Load parameter space</button>
+                <input id="scLoadParameterSpaceFile" type="file" accept=".csv,text/csv" class="hidden">
                 <button id="scValidateBtn" type="button" class="secondary-button">Validate</button>
                 <button id="scPreviewBtn" type="button" class="primary-button" style="width:auto;">Preview sample</button>
               </div>
@@ -286,7 +288,7 @@
         <div class="panel-title">
           <div>
             <h2 id="campaignTitle">Campaign progress</h2>
-            <p class="subtle"><span id="campaignSubtitle">No campaign running.</span> &mdash; <span id="campaignEta" class="subtle">ETA: &mdash;</span></p>
+            <p class="subtle"><span id="campaignSubtitle">No campaign running.</span> &mdash; <span id="campaignEta" class="subtle">Finish: &mdash;</span></p>
           </div>
           <div class="campaign-actions">
             <span id="campaignStatusPill" class="status-pill muted">Idle</span>
@@ -309,6 +311,14 @@
           <div class="campaign-bar"><div id="campaignBarFill" class="campaign-bar-fill" style="width:0%"></div><div id="campaignBarFailed" class="campaign-bar-failed" style="width:0%"></div></div>
           <div class="campaign-bar-meta"><span id="campaignPct">0%</span><span id="campaignElapsed">Elapsed: &mdash;</span></div>
         </div>
+      </section>
+
+      <section class="panel campaign-phases-panel">
+        <div class="panel-title">
+          <h2>Campaign phases</h2>
+          <p id="campaignPhaseSummary" class="subtle">Waiting for a campaign.</p>
+        </div>
+        <div id="campaignPhaseGrid" class="campaign-phase-grid"></div>
       </section>
 
       <section class="panel">
@@ -337,13 +347,25 @@
     </section>
 
     <section id="tab-scenario-results" class="tab-panel">
-      <section class="panel">
-        <div class="panel-title">
-          <h2>Campaign results</h2>
-          <p class="subtle">Aggregated results across the variant set &mdash; UI hookup lands with the Phase&nbsp;4/5 results integration.</p>
-        </div>
-        <p class="subtle">No campaign results yet. Once a campaign finishes, summary tables and parameter-impact plots will appear here.</p>
-      </section>
+      <div class="scenario-results-layout">
+        <aside class="panel scenario-results-sidebar">
+          <div class="panel-title">
+            <div>
+              <h2>Campaigns</h2>
+              <p id="scenarioCampaignListSummary" class="subtle">No campaigns loaded.</p>
+            </div>
+            <button id="scenarioRefreshCampaigns" type="button" class="secondary-button">Refresh</button>
+          </div>
+          <div id="scenarioCampaignList" class="scenario-campaign-list empty-state">No Scenario Space campaigns yet.</div>
+        </aside>
+        <section class="panel scenario-results-main-panel">
+          <div class="panel-title">
+            <h2>Campaign results</h2>
+            <p id="scenarioResultsSummary" class="subtle">Select a campaign to view results.</p>
+          </div>
+          <div id="scenarioCostCo2Scatter" class="bar-chart empty-state">No campaign selected.</div>
+        </section>
+      </div>
     </section>
 
     <section id="tab-about" class="tab-panel">
@@ -371,7 +393,7 @@
         <ul class="about-list">
           <li><strong>Solver</strong> &mdash; chooses the optimisation backend (HiGHS, Gurobi, etc.). The detail line shows the solver version detected on the system.</li>
           <li><strong>Solve method</strong> &mdash; algorithm hint passed to the solver (for example <em>simplex</em>, <em>barrier</em>, <em>auto</em>). Available options depend on the selected solver.</li>
-          <li><strong>CPU cores</strong> &mdash; threads given to the solver; <em>0</em> lets the solver pick.</li>
+          <li><strong>CPU threads</strong> &mdash; threads given to the solver; <em>0</em> lets the solver pick.</li>
           <li><strong>Scenario database</strong> &mdash; picks one of the input workbooks bundled in the <code>data/</code> folder.</li>
           <li><strong>Browse&hellip;</strong> &mdash; selects an Excel/Parquet file from anywhere on disk; <strong>Clear</strong> reverts to the dropdown selection.</li>
           <li><strong>Years selection</strong> &mdash; chooses which model years (periods) to solve. Multiple years may be selected to run a transition path.</li>

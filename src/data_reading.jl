@@ -132,11 +132,8 @@ function _read_node_parameters_sheet!(s::ModelSets, p::ModelParams, xf)
     #   K..P                       Sector emission targets in 2030 (not used here)
     #   Q                          Data source label
     #   R..X  (7 cols, 2022-2050)  Emission target incl Scope3+FuelEx
-    #   Y..AE (7 cols, 2022-2050)  Emission target Bunker
-    #   Y..AE (7 cols, 2022-2050)  Emission target FeedStock
-    # IESA-Opt 1.0 reads emissionTarget_FeedStocks from the same Y:AE range as
-    # emissionTarget_Bunkers. Keep this exact mapping even though the workbook
-    # also contains AF:AL values.
+    #   Y..AE  (7 cols, 2022-2050)  Emission target Bunker
+    #   AF..AL (7 cols, 2022-2050)  Emission target FeedStock
     period_hdr_B    = _read_row_ints(sh, 3, "B", "H")          # B..H = 7 periods
     _read_table_sym_int_to_float!(p.emissionTargetAir, sh, nodes_col, period_hdr_B, "B", 5, last_row;
                                   keep_zeros=true)
@@ -151,7 +148,9 @@ function _read_node_parameters_sheet!(s::ModelSets, p::ModelParams, xf)
     period_hdr_Y = _read_row_ints(sh, 3, "Y", "AE")
     _read_table_sym_int_to_float!(p.emissionTargetBunker, sh, nodes_col, period_hdr_Y, "Y", 5, last_row;
                                   keep_zeros=true)
-    _read_table_sym_int_to_float!(p.emissionTargetFS, sh, nodes_col, period_hdr_Y, "Y", 5, last_row;
+
+    period_hdr_AF = _read_row_ints(sh, 3, "AF", "AL")
+    _read_table_sym_int_to_float!(p.emissionTargetFS, sh, nodes_col, period_hdr_AF, "AF", 5, last_row;
                                   keep_zeros=true)
     return nothing
 end

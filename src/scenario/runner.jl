@@ -42,6 +42,7 @@ Base.@kwdef struct VariantResult
     variant_id::Int
     leaf_values::Vector{Float64}     = Float64[]
     objective::Float64               = NaN
+    co2_price::Float64               = NaN
     term_status::String              = ""
     primal_status::String            = ""
     build_seconds::Float64           = 0.0
@@ -51,10 +52,43 @@ Base.@kwdef struct VariantResult
     error::Union{String,Nothing}     = nothing
 end
 
+function _variant_co2_price(model::JuMP.Model, md::ModelData)
+    candidate_names = ps -> String[
+        "emTargetAir[NL,$(ps)]",
+        "emTargetInclScope3FuelEx[$(ps)]",
+        "emTargetInclScope3[$(ps)]",
+        "emTargetAll[NL,$(ps)]",
+        "emTargetBunker[NL,$(ps)]",
+        "emTargetFS[NL,$(ps)]",
+    ]
+    prices = Float64[]
+    for ps in md.sets.periods_solve
+        for name in candidate_names(ps)
+            con = try
+                JuMP.constraint_by_name(model, name)
+            catch
+                nothing
+            end
+            con === nothing && continue
+            price = try
+                abs(JuMP.shadow_price(con))
+            catch
+                NaN
+            end
+            isfinite(price) || continue
+            push!(prices, price)
+            break
+        end
+    end
+    isempty(prices) && return NaN
+    return sum(prices) / length(prices)
+end
+
 # Default no-op callbacks used by `run_campaign`. Defined before
 # `run_campaign` so default-arg expressions resolve at definition time.
 _noop_progress(_x) = nothing
 _noop_result(_x) = nothing
+_noop_phase(_x) = nothing
 
 const _DEFAULT_HIGHS_ATTRS_CAMPAIGN = Dict{String,Any}(
     "presolve"          => "on",
@@ -165,10 +199,12 @@ function _run_one_variant!(model::JuMP.Model, md::ModelData,
         term = string(termination_status(model))
         prim = string(primal_status(model))
         obj  = (term == "OPTIMAL") ? objective_value(model) : NaN
+        co2p = (term == "OPTIMAL") ? _variant_co2_price(model, md) : NaN
         return VariantResult(
             variant_id     = variant_id,
             leaf_values    = collect(out.values),
             objective      = obj,
+            co2_price      = co2p,
             term_status    = term,
             primal_status  = prim,
             apply_seconds  = t_apply,
@@ -334,10 +370,12 @@ function _run_one_variant_filtered!(model::JuMP.Model, md_template::ModelData,
         term = string(termination_status(model))
         prim = string(primal_status(model))
         obj  = (term == "OPTIMAL") ? objective_value(model) : NaN
+        co2p = (term == "OPTIMAL") ? _variant_co2_price(model, md_template) : NaN
         return VariantResult(
             variant_id     = variant_id,
             leaf_values    = leaf_vals,
             objective      = obj,
+            co2_price      = co2p,
             term_status    = term,
             primal_status  = prim,
             apply_seconds  = t_apply,
@@ -401,7 +439,7 @@ function _run_campaign_serial(base_md::ModelData,
                     worker_pid  = pid)
                 continue
             end
-            on_progress((variant_id = vid, total = n, stage = "start"))
+            on_progress((variant_id = vid, total = n, stage = "start", worker_pid = pid))
             full_changes = changes_per_variant[vid]
             _, scalar_changes = _split_cluster_changes(full_changes)
             r = _run_one_variant_filtered!(model, md_template, full_changes,
@@ -413,6 +451,7 @@ function _run_campaign_serial(base_md::ModelData,
                 variant_id = r.variant_id, leaf_values = r.leaf_values,
                 objective = r.objective, term_status = r.term_status,
                 primal_status = r.primal_status,
+                co2_price = r.co2_price,
                 build_seconds = (k == 1 ? t_build : 0.0),
                 apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
                 worker_pid = pid,
@@ -455,6 +494,7 @@ function _worker_loop(task_ch::RemoteChannel, result_ch::RemoteChannel,
             item = take!(task_ch)
             item === nothing && break  # poison pill — clean shutdown
             variant_id, changes = item
+            put!(result_ch, (variant_id = variant_id, worker_pid = pid, stage = "start"))
             key = _cluster_cache_key(changes)
             t_build_this = 0.0
             entry = get(cache, key, nothing)
@@ -477,6 +517,7 @@ function _worker_loop(task_ch::RemoteChannel, result_ch::RemoteChannel,
                 variant_id = r.variant_id, leaf_values = r.leaf_values,
                 objective = r.objective, term_status = r.term_status,
                 primal_status = r.primal_status,
+                co2_price = r.co2_price,
                 build_seconds = t_build_this,
                 apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
                 worker_pid = pid,
@@ -511,6 +552,7 @@ function _run_campaign_distributed(base_md::ModelData,
                                    solver::Symbol, mode::Symbol,
                                    attrs_override::AbstractDict,
                                    on_progress::Function, on_result::Function,
+                                   on_phase::Function,
                                    cancel::Ref{Bool})
     n = length(changes_per_variant)
     # Reuse the env Julia process is already in (same Project.toml).
@@ -521,6 +563,7 @@ function _run_campaign_distributed(base_md::ModelData,
     @info "run_campaign: spawning $n_workers worker(s)" exeflags solver mode
     t_addprocs = @elapsed pids = addprocs(n_workers; exeflags = exeflags)
     @info "run_campaign: addprocs done" t_addprocs pids
+    on_phase((phase = :addprocs, seconds = t_addprocs, pids = pids))
     try
         # Bootstrap workers with IESAOpt.  We cannot use `@everywhere using ...`
         # inside a function body (the macro expands to a top-level expression).
@@ -535,13 +578,14 @@ function _run_campaign_distributed(base_md::ModelData,
             end
         end
         @info "run_campaign: workers loaded IESAOpt" t_using
+        on_phase((phase = :workers_loaded, seconds = t_using, pids = pids))
 
         # Bounded result channel — caps memory pressure on master under
         # a slow downstream consumer.
         task_cap = max(n_workers * 4, 16)
         res_cap  = max(n_workers * 4, 16)
         task_ch  = RemoteChannel(() -> Channel{Any}(task_cap))
-        result_ch = RemoteChannel(() -> Channel{VariantResult}(res_cap))
+        result_ch = RemoteChannel(() -> Channel{Any}(res_cap))
 
         # Start the worker loops.  This is where `base_md` gets serialized
         # and shipped to each worker — one ship per worker.  We fan out
@@ -557,6 +601,7 @@ function _run_campaign_distributed(base_md::ModelData,
             end
         end
         @info "run_campaign: base ModelData shipped to all workers" t_ship
+        on_phase((phase = :ship_base_data, seconds = t_ship, pids = pids))
 
         # Producer: push variants then `nothing` x n_workers (poison pills).
         producer = @async begin
@@ -572,10 +617,22 @@ function _run_campaign_distributed(base_md::ModelData,
             end
         end
 
-        # Collector: pull n results (or fewer if cancelled).
+        # Collector: pull n completed results, plus lightweight start events
+        # emitted by workers as soon as they take a task from the queue.
         results = Vector{VariantResult}(undef, n)
-        for slot in 1:n
-            r = take!(result_ch)
+        n_collected = 0
+        while n_collected < n
+            item = take!(result_ch)
+            if !(item isa VariantResult)
+                if get(item, :stage, "") == "start"
+                    on_progress((variant_id = get(item, :variant_id, 0),
+                                 total = n,
+                                 stage = "start",
+                                 worker_pid = get(item, :worker_pid, 0)))
+                end
+                continue
+            end
+            r = item::VariantResult
             if r.variant_id <= 0 || r.variant_id > n
                 # Worker error sentinel — log and break to avoid hanging.
                 @warn "Campaign worker error" error = r.error
@@ -591,6 +648,7 @@ function _run_campaign_distributed(base_md::ModelData,
             results[r.variant_id] = r
             on_result(r)
             on_progress((variant_id = r.variant_id, total = n, stage = "done", result = r))
+            n_collected += 1
         end
         wait(producer)
         # Wait for worker loops to drain so rmprocs is clean.
@@ -609,8 +667,10 @@ function _run_campaign_distributed(base_md::ModelData,
         try
             t_rmprocs = @elapsed rmprocs(pids; waitfor = 60)
             @info "run_campaign: rmprocs done" t_rmprocs
+            on_phase((phase = :rmprocs, seconds = t_rmprocs, pids = pids))
         catch err
             @warn "rmprocs failed; workers may linger" err
+            on_phase((phase = :rmprocs_failed, error = sprint(showerror, err), pids = pids))
         end
     end
 end
@@ -648,8 +708,9 @@ Keyword arguments:
     `base_md` was prepared for (TS requires the cluster pass).
   * `cancel::Ref{Bool} = Ref(false)` — set to `true` from another task to
     request an orderly stop (master stops dispatching new variants).
-  * `on_progress::Function = _noop_progress` — called as
-    `on_progress((variant_id, total, stage, [result]))` after each variant.
+    * `on_progress::Function = _noop_progress` — called as
+        `on_progress((variant_id, total, stage, [worker_pid], [result]))` when a
+        worker starts a variant and again after each variant finishes.
   * `on_result::Function = _noop_result` — called as `on_result(r::VariantResult)`
     for every completed variant; useful for streaming to disk / DuckDB.
 """
@@ -662,7 +723,8 @@ function run_campaign(base_md::ModelData,
                       mode::Symbol                  = :ts,
                       cancel::Ref{Bool}             = Ref(false),
                       on_progress::Function         = _noop_progress,
-                      on_result::Function           = _noop_result)
+                      on_result::Function           = _noop_result,
+                      on_phase::Function            = _noop_phase)
     n = length(changes_per_variant)
     n == 0 && return VariantResult[]
     @info "run_campaign: starting" n_variants=n n_workers=n_workers solver=solver mode=mode
@@ -679,7 +741,8 @@ function run_campaign(base_md::ModelData,
                                          solver = solver, mode = mode,
                                          attrs_override = solver_attrs,
                                          on_progress = on_progress,
-                                         on_result = on_result, cancel = cancel)
+                                         on_result = on_result, on_phase = on_phase,
+                                         cancel = cancel)
     end
 end
 

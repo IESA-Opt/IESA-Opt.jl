@@ -189,7 +189,9 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         return _json_response(_scenario_run(_json_body(req)); status = 202)
     elseif method == "GET" && startswith(path, "/api/scenario/")
         parts = _url_parts(path)
-        if length(parts) == 4 && parts[3] == "status"
+        if length(parts) == 3 && parts[3] == "campaigns"
+            return _json_response(_scenario_campaigns())
+        elseif length(parts) == 4 && parts[3] == "status"
             return _json_response(_scenario_status(parts[4]))
         elseif length(parts) == 4 && parts[3] == "result"
             return _json_response(_scenario_result(parts[4]))
@@ -301,6 +303,7 @@ end
 function _ui_options()
     options = Dict(
         "scenarios" => _list_workbooks(),
+        "cpuThreads" => Sys.CPU_THREADS,
         "periods" => [2022, 2025, 2030, 2035, 2040, 2045, 2050],
         "hoursPerDayOptions" => [24, 12, 8, 6, 4, 3, 2, 1],
         "solveMethods" => [
@@ -3095,7 +3098,7 @@ when validation fails — the UI is responsible for displaying messages.
 function _scenario_validate(body)
     try
         spec = spec_from_dict(body)
-        v = validate_spec(spec)
+        v = _validate_scenario_direct_run_spec(spec, _scenario_input_path(body))
         return Dict{String,Any}(
             "valid" => v.valid,
             "errors" => v.errors,
@@ -3127,7 +3130,7 @@ function _scenario_preview(body)
     preview_rows = clamp(preview_rows, 1, 200)
     try
         spec = spec_from_dict(body)
-        v = validate_spec(spec)
+        v = _validate_scenario_direct_run_spec(spec, _scenario_input_path(body))
         v.valid || return Dict{String,Any}(
             "ok" => false,
             "errors" => v.errors,
@@ -3171,13 +3174,157 @@ end
 # orchestrator stops dispatching new variants. /api/scenario/result/<id>
 # returns the final summary once the task has completed.
 #
-# Bridge from CampaignSpec (sheet/cell) to ScenarioSpec (field/indices):
-#   For Phase 3.5 we map `row.sheet` → Julia field name (Symbol) and parse
-#   `row.cell` as the indices tuple (e.g. "(NL, 2050)" -> (:NL, 2050)).
-#   This avoids the full xlsx-coordinate resolver while still giving the
-#   user a fully functional UI to drive real campaigns. A proper resolver
-#   that reads data_reading.jl can replace `_row_to_leaf_target` later.
+# Bridge from CampaignSpec to ScenarioSpec:
+#   The UI stores workbook Sheet/Cell coordinates in `row.sheet`/`row.cell`
+#   (matching SSDashboard's Parameter Space schema). Before workers launch,
+#   those coordinates are resolved to ModelParams leaf fields + indices using
+#   the same workbook layout rules as data_reading.jl. Direct ModelParams
+#   field/indices rows remain accepted for backward compatibility.
 # =============================================================================
+
+function _scenario_supported_direct_fields_text()
+    return join(string.(registered_mutation_fields()), ", ")
+end
+
+const UI_CAMPAIGN_PHASE_DEFS = (
+    (id = "workers",  label = "Making workers"),
+    (id = "assign",   label = "Assigning tasks"),
+    (id = "generate", label = "Generating"),
+    (id = "solve",    label = "Solve"),
+    (id = "write",    label = "Export"),
+)
+
+function _campaign_phase_skeleton()
+    return [Dict{String,Any}(
+        "id" => d.id,
+        "label" => d.label,
+        "status" => "pending",
+        "detail" => "",
+        "seconds" => nothing,
+    ) for d in UI_CAMPAIGN_PHASE_DEFS]
+end
+
+function _campaign_phase_index(id::AbstractString)
+    for (i, d) in pairs(UI_CAMPAIGN_PHASE_DEFS)
+        d.id == id && return i
+    end
+    return 0
+end
+
+function _campaign_set_phase!(snap::Dict{String,Any}, id::AbstractString, status::AbstractString;
+                              detail = nothing, seconds = nothing,
+                              advance::Bool = true)
+    phases = get!(snap, "phases", _campaign_phase_skeleton())
+    idx = _campaign_phase_index(id)
+    for p in phases
+        pidx = _campaign_phase_index(String(get(p, "id", "")))
+        if status == "active" && advance && idx > 0 && pidx > 0 && pidx < idx &&
+           get(p, "status", "pending") in ("pending", "active")
+            p["status"] = "done"
+        elseif status == "active" && get(p, "status", "") == "active" &&
+               get(p, "id", "") != id
+            p["status"] = "done"
+        end
+    end
+    phase = nothing
+    for p in phases
+        if get(p, "id", "") == id
+            phase = p
+            break
+        end
+    end
+    if phase === nothing
+        phase = Dict{String,Any}("id" => String(id), "label" => String(id),
+                                 "status" => "pending", "detail" => "",
+                                 "seconds" => nothing)
+        push!(phases, phase)
+    end
+    phase["status"] = String(status)
+    detail !== nothing && (phase["detail"] = String(detail))
+    seconds !== nothing && (phase["seconds"] = round(Float64(seconds), digits = 3))
+    phase["updated_at"] = time()
+    return phase
+end
+
+function _campaign_reset_after_phase!(snap::Dict{String,Any}, id::AbstractString)
+    phases = get!(snap, "phases", _campaign_phase_skeleton())
+    idx = _campaign_phase_index(id)
+    idx <= 0 && return nothing
+    for p in phases
+        pidx = _campaign_phase_index(String(get(p, "id", "")))
+        if pidx > idx
+            p["status"] = "pending"
+            p["detail"] = ""
+            p["seconds"] = nothing
+            p["updated_at"] = time()
+        end
+    end
+    return nothing
+end
+
+function _campaign_int_or_nothing(x)
+    x === nothing && return nothing
+    try
+        return Int(x)
+    catch
+        return nothing
+    end
+end
+
+function _campaign_worker_slot(workers::AbstractVector, worker_pid, fallback::Integer)
+    isempty(workers) && return 0
+    pid = _campaign_int_or_nothing(worker_pid)
+    if pid !== nothing && pid > 0
+        for (i, w) in pairs(workers)
+            _campaign_int_or_nothing(get(w, "pid", nothing)) == pid && return i
+        end
+    end
+    return clamp(Int(fallback), 1, length(workers))
+end
+
+function _campaign_set_worker_pid!(worker::Dict{String,Any}, worker_pid)
+    pid = _campaign_int_or_nothing(worker_pid)
+    pid !== nothing && pid > 0 && (worker["pid"] = pid)
+    return nothing
+end
+
+function _campaign_planned_worker_counts(total::Integer, n_workers::Integer)
+    nw = max(1, Int(n_workers))
+    counts = zeros(Int, nw)
+    for vid in 1:max(0, Int(total))
+        counts[((vid - 1) % nw) + 1] += 1
+    end
+    return counts
+end
+
+function _campaign_set_worker_task_totals!(snap::Dict{String,Any}, total::Integer,
+                                           n_workers::Integer)
+    counts = _campaign_planned_worker_counts(total, n_workers)
+    workers = get(snap, "workers", Any[])
+    for (i, w) in pairs(workers)
+        planned = i <= length(counts) ? counts[i] : 0
+        finished = Int(get(w, "completed", 0)) + Int(get(w, "failed", 0))
+        running = get(w, "status", "") == "running" ? 1 : 0
+        w["assigned"] = max(planned, finished + running)
+        haskey(w, "started") || (w["started"] = finished + running)
+    end
+    return nothing
+end
+
+function _campaign_fail_active_phase!(snap::Dict{String,Any}, msg::AbstractString)
+    phases = get!(snap, "phases", _campaign_phase_skeleton())
+    failed_any = false
+    for p in phases
+        if get(p, "status", "") == "active"
+            p["status"] = "failed"
+            p["detail"] = String(msg)
+            p["updated_at"] = time()
+            failed_any = true
+        end
+    end
+    failed_any || _campaign_set_phase!(snap, "solve", "failed"; detail = msg)
+    return nothing
+end
 
 """
     _parse_indices_cell(s::AbstractString) -> Tuple
@@ -3213,21 +3360,324 @@ function _parse_indices_cell(s::AbstractString)
     return Tuple(out)
 end
 
+    function _scenario_input_path(body)::String
+        input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
+        return isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
+    end
+
+    function _parse_excel_cell_ref(cell::AbstractString)
+        txt = strip(cell)
+        m = match(r"^\$?([A-Za-z]{1,3})\$?([0-9]+)$", txt)
+        m === nothing && throw(ArgumentError("Cell `$(cell)` is not an Excel A1 coordinate like AE5."))
+        col = uppercase(String(m.captures[1]))
+        row = parse(Int, m.captures[2])
+        row > 0 || throw(ArgumentError("Cell `$(cell)` has an invalid row number."))
+        return (; col, row, col_index = _col_index(col), a1 = string(col, row))
+    end
+
+    function _row_sheet_cell(row::ParameterRow)
+        sheet = String(strip(row.sheet))
+        cell = String(strip(row.cell))
+        m = match(r"^(?:'([^']+)'|([^!]+))!(.+)$", cell)
+        if m !== nothing
+            sheet_from_cell = m.captures[1] === nothing ? String(m.captures[2]) : String(m.captures[1])
+            sheet = isempty(sheet) ? String(strip(sheet_from_cell)) : sheet
+            cell = String(strip(String(m.captures[3])))
+        end
+        isempty(sheet) && throw(ArgumentError("Sheet is empty."))
+        isempty(cell) && throw(ArgumentError("Cell is empty."))
+        return (; sheet, cell)
+    end
+
+    _coord_candidate(field::Symbol, indices::Tuple, source::String, value) =
+        (field = field, indices = indices, source = source, value = value)
+
+    function _sheet_value(sh, row::Int, col::Int)
+        try
+            return sh[row, col]
+        catch
+            return nothing
+        end
+    end
+
+    function _sheet_symbol(sh, row::Int, col::Int, label::AbstractString)
+        raw = _str(_sheet_value(sh, row, col))
+        isempty(strip(raw)) && throw(ArgumentError("No $(label) key found at $(_col_letter(col))$(row)."))
+        return Symbol(strip(raw))
+    end
+
+    function _sheet_period(sh, row::Int, col::Int)
+        raw = _sheet_value(sh, row, col)
+        raw === nothing || ismissing(raw) && throw(ArgumentError("No period header found at $(_col_letter(col))$(row)."))
+        if raw isa Number
+            return Int(round(Float64(raw)))
+        end
+        txt = strip(_str(raw))
+        n = tryparse(Int, txt)
+        n === nothing && throw(ArgumentError("Header $(_col_letter(col))$(row) is `$(txt)`, not a period year."))
+        return n
+    end
+
+    function _field_for_shared_node_target(row::ParameterRow, candidates)
+        length(candidates) == 1 && return first(candidates)
+        hint = lowercase(string(row.parameter, " ", row.subparameter, " ", row.notes))
+        if occursin("feedstock", hint) || occursin("feed stock", hint) || occursin(" fs", hint)
+            for c in candidates
+                c.field == :emissionTargetFS && return c
+            end
+        elseif occursin("bunker", hint)
+            for c in candidates
+                c.field == :emissionTargetBunker && return c
+            end
+        end
+        fields = join(string.(getfield.(candidates, :field)), ", ")
+        throw(ArgumentError("Coordinate maps to multiple model parameters ($(fields)). " *
+                            "Use Parameter/Sub-parameter/Notes text containing `Bunker` or `Feedstock` to choose one."))
+    end
+
+    function _coordinate_candidates(sheet::AbstractString, sh, ref, row::ParameterRow)
+        sheet_key = lowercase(strip(sheet))
+        r, c = ref.row, ref.col_index
+        value = _sheet_value(sh, r, c)
+        src = string(sheet, "!", ref.a1)
+
+        if sheet_key == "nodeparameters"
+            r >= 5 || throw(ArgumentError("$(src) is in the NodeParameters header area; choose a data row (5 or later)."))
+            node = _sheet_symbol(sh, r, _col_index("A"), "node")
+            if _col_index("B") <= c <= _col_index("H")
+                ps = _sheet_period(sh, 3, c)
+                return [_coord_candidate(:emissionTargetAir, (node, ps), src, value)]
+            elseif c == _col_index("I")
+                return [_coord_candidate(:CO2_cumulative_budget, (node,), src, value)]
+            elseif c == _col_index("J")
+                return [_coord_candidate(:cumulative_CO2storage, (node,), src, value)]
+            elseif _col_index("R") <= c <= _col_index("X")
+                ps = _sheet_period(sh, 3, c)
+                return [_coord_candidate(:emissionTargetAll, (node, ps), src, value)]
+            elseif _col_index("Y") <= c <= _col_index("AE")
+                ps = _sheet_period(sh, 3, c)
+                return [_coord_candidate(:emissionTargetBunker, (node, ps), src, value)]
+            elseif _col_index("AF") <= c <= _col_index("AL")
+                ps = _sheet_period(sh, 3, c)
+                return [_coord_candidate(:emissionTargetFS, (node, ps), src, value)]
+            end
+        elseif sheet_key == "technologies"
+            r >= 7 || throw(ArgumentError("$(src) is in the Technologies header area; choose a technology row (7 or later)."))
+            tech = _sheet_symbol(sh, r, _col_index("A"), "technology")
+            ranges = (
+                (:inv_cost,       "I",  "O",  4),
+                (:fom_cost,       "Q",  "W",  4),
+                (:vom_cost,       "X",  "AD", 4),
+                (:decom_planned,  "BO", "BT", 5),
+                (:techStock_min,  "BU", "CA", 5),
+                (:techStock_max,  "CB", "CH", 5),
+                (:techUse_min,    "CI", "CO", 5),
+                (:techUse_max,    "CP", "CV", 5),
+                (:no_new_invest,  "CW", "DC", 5),
+                (:no_eco_decom,   "DD", "DJ", 5),
+            )
+            for (field, first_col, last_col, header_row) in ranges
+                if _col_index(first_col) <= c <= _col_index(last_col)
+                    ps = _sheet_period(sh, header_row, c)
+                    return [_coord_candidate(field, (tech, ps), src, value)]
+                end
+            end
+            singles = Dict(
+                _col_index("P")  => :Salvage_value,
+                _col_index("AE") => :WACC,
+                _col_index("AF") => :construction_time,
+                _col_index("AG") => :economic_lifetime,
+                _col_index("AH") => :technical_lifetime,
+                _col_index("AI") => :cap2act,
+                _col_index("AL") => :ramping,
+                _col_index("AO") => :CHP_eta,
+                _col_index("AQ") => :CHP_dev_use,
+                _col_index("AR") => :CHP_dev_PtoH,
+                _col_index("AS") => :shed_capacity_percentage,
+                _col_index("AT") => :shed_volume,
+                _col_index("AV") => :phs_capacity,
+                _col_index("AW") => :reservoir_capacity,
+                _col_index("AX") => :phs_Losses,
+                _col_index("BA") => :flex_capacity_pct,
+                _col_index("BB") => :flex_storage,
+                _col_index("BD") => :flex_losses_legacy,
+                _col_index("BE") => :flex_nnLoad,
+                _col_index("BF") => :avg_journey,
+                _col_index("BG") => :avg_speed,
+                _col_index("BI") => :bufferUP_capacity,
+                _col_index("BJ") => :bufferDW_capacity,
+                _col_index("BL") => :buffer_storage,
+                _col_index("BM") => :techChange_max,
+                _col_index("BN") => :techStock_exist,
+            )
+            if haskey(singles, c)
+                return [_coord_candidate(singles[c], (tech,), src, value)]
+            end
+        elseif sheet_key == "infrastructure"
+            r >= 6 || throw(ArgumentError("$(src) is in the Infrastructure header area; choose an infrastructure row (6 or later)."))
+            tech = _sheet_symbol(sh, r, _col_index("A"), "infrastructure technology")
+            ranges = (
+                (:inv_cost,      "H",  "N",  4),
+                (:fom_cost,      "P",  "V",  4),
+                (:decom_planned, "AF", "AK", 3),
+                (:techStock_min, "AL", "AR", 3),
+                (:techStock_max, "AS", "AY", 3),
+            )
+            for (field, first_col, last_col, header_row) in ranges
+                if _col_index(first_col) <= c <= _col_index(last_col)
+                    ps = _sheet_period(sh, header_row, c)
+                    return [_coord_candidate(field, (tech, ps), src, value)]
+                end
+            end
+            singles = Dict(
+                _col_index("O")  => :Salvage_value,
+                _col_index("W")  => :WACC,
+                _col_index("X")  => :economic_lifetime,
+                _col_index("Y")  => :technical_lifetime,
+                _col_index("Z")  => :cap2act,
+                _col_index("AD") => :techChange_max,
+                _col_index("AE") => :techStock_exist,
+            )
+            if haskey(singles, c)
+                return [_coord_candidate(singles[c], (tech,), src, value)]
+            end
+        elseif sheet_key == "parameters"
+            scalar_cells = Dict(
+                "B5" => :XC_TransmissionLoss_global,
+                "B6" => :baseload_treshold,
+                "B7" => :shedding_inLoad,
+                "B12" => :social_discount_rate,
+                "B13" => :base_year,
+                "B46" => :ActiveConstraintSet,
+            )
+            if haskey(scalar_cells, ref.a1)
+                return [_coord_candidate(scalar_cells[ref.a1], Tuple{}, src, value)]
+            end
+        end
+
+        throw(ArgumentError("No model-parameter mapping is registered for $(src)."))
+    end
+
+    function _resolve_excel_coordinate(row::ParameterRow, input_path::AbstractString)
+        isfile(input_path) || throw(ArgumentError("Input workbook not found: $(input_path)"))
+        sc = _row_sheet_cell(row)
+        ref = _parse_excel_cell_ref(sc.cell)
+        candidates = XLSX.openxlsx(input_path, mode = "r") do xf
+            sh = try
+                xf[sc.sheet]
+            catch
+                throw(ArgumentError("Workbook has no sheet named `$(sc.sheet)`."))
+            end
+            _coordinate_candidates(sc.sheet, sh, ref, row)
+        end
+        return _field_for_shared_node_target(row, candidates)
+    end
+
+    function _resolve_parameter_row(row::ParameterRow, input_path::AbstractString)
+        sc = _row_sheet_cell(row)
+        field = Symbol(sc.sheet)
+        if hasproperty(ModelParams(), field)
+            indices = _parse_indices_cell(sc.cell)
+            return (field = field, indices = indices,
+                    source = string("ModelParams.", field, "[", sc.cell, "]"), value = nothing)
+        end
+        return _resolve_excel_coordinate(row, input_path)
+    end
+
+    function _format_indices(indices::Tuple)
+        isempty(indices) && return "()"
+        return string("(", join(string.(indices), ", "), length(indices) == 1 ? "," : "", ")")
+    end
+
+    function _mutation_effect_text(field::Symbol, indices::Tuple, value::Float64)
+        muts = build_mutations(ModelData(), field, indices, value)
+        isempty(muts) && return "no live model edits"
+        targets = String[]
+        for m in muts
+            if m.kind === :rhs
+                push!(targets, string("RHS ", m.constraint_name))
+            elseif m.kind === :coef
+                push!(targets, string("coef ", m.constraint_name, " / ", m.var_name))
+            elseif m.kind === :obj
+                push!(targets, string("objective ", m.var_name))
+            end
+        end
+        return join(targets, "; ")
+    end
+
+function _scenario_leaf_validation(spec::CampaignSpec, input_path::AbstractString)
+    errors = String[]
+    warnings = String[]
+    supported = Set(registered_mutation_fields())
+    supported_text = _scenario_supported_direct_fields_text()
+    empty_params = ModelParams()
+    for (i, row) in pairs(spec.rows)
+        prefix = "Row $i ('$(row.parameter)' / '$(row.subparameter)'):"
+        if row.min === nothing || row.max === nothing
+            push!(errors, "$prefix Live-run mode requires Min and Max on every row. " *
+                          "Shared SSDashboard-style rows with inherited bounds are not supported by the live runner yet.")
+        end
+        resolved = try
+            _resolve_parameter_row(row, input_path)
+        catch err
+            push!(errors, "$prefix $(sprint(showerror, err))")
+            continue
+        end
+        field = resolved.field
+        if !hasproperty(empty_params, field)
+            push!(errors, "$prefix $(resolved.source) resolved to `$(field)`, which is not a ModelParams field.")
+            continue
+        end
+        if !(field in supported)
+            push!(errors, "$prefix $(resolved.source) resolved to ModelParams.$(field)$(_format_indices(resolved.indices)), " *
+                          "but no live scenario mutation builder is registered for `$(field)`. " *
+                          "Currently runnable fields: $(supported_text).")
+            continue
+        end
+        try
+            effect = _mutation_effect_text(field, resolved.indices, row.min === nothing ? 0.0 : row.min)
+            push!(warnings, "$prefix $(resolved.source) -> ModelParams.$(field)$(_format_indices(resolved.indices)); affects $(effect).")
+        catch err
+            msg = sprint(showerror, err)
+            if occursin("expects", msg) || occursin("No mutation builder", msg)
+                push!(errors, "$prefix $msg")
+            else
+                rethrow()
+            end
+        end
+    end
+    return (; errors, warnings)
+end
+
+function _validate_scenario_direct_run_spec(spec::CampaignSpec, input_path::AbstractString = normpath(joinpath(_repo_root(), "data/default_data.xlsx")))
+    v = validate_spec(spec)
+    errors = String.(v.errors)
+    warnings = String.(v.warnings)
+    if isempty(errors)
+        leaf = _scenario_leaf_validation(spec, input_path)
+        append!(errors, leaf.errors)
+        append!(warnings, leaf.warnings)
+    end
+    return (; valid = isempty(errors), errors, warnings)
+end
+
 """
     _row_to_leaf_target(row::ParameterRow) -> LeafTarget
 
-Convert a UI parameter row to a `LeafTarget`. Uses `row.sheet` as the
-Julia field name and `row.cell` as the indices tuple. Skips rows with no
-bounds (returns `nothing`) so callers can filter them out.
+Convert a UI parameter row to a `LeafTarget`, resolving workbook Sheet/Cell
+coordinates to the internal ModelParams field/index first. Direct ModelParams
+field/indices rows are also accepted for backward compatibility. The
+validation path must reject rows without per-row bounds before this function
+is called.
 """
-function _row_to_leaf_target(row)
-    row.min === nothing && return nothing
-    row.max === nothing && return nothing
-    field = Symbol(strip(row.sheet))
-    indices = _parse_indices_cell(row.cell)
+function _row_to_leaf_target(row, input_path::AbstractString = normpath(joinpath(_repo_root(), "data/default_data.xlsx")))
+    if row.min === nothing || row.max === nothing
+        throw(ArgumentError("Live-run rows require Min and Max on every row."))
+    end
+    resolved = _resolve_parameter_row(row, input_path)
     label = isempty(row.subparameter) || row.subparameter == row.parameter ?
         row.parameter : "$(row.parameter)/$(row.subparameter)"
-    return LeafTarget(field, indices;
+    return LeafTarget(resolved.field, resolved.indices;
                       type = row.type,
                       min = row.min,
                       max = row.max,
@@ -3255,6 +3705,7 @@ function _campaign_session_skeleton(id::String, spec, n_workers::Int,
         "status" => "idle",
         "variant_id" => nothing,
         "assigned" => 0,
+        "started" => 0,
         "completed" => 0,
         "failed" => 0,
         "progress" => 0.0,
@@ -3281,8 +3732,13 @@ function _campaign_session_skeleton(id::String, spec, n_workers::Int,
             "status" => "queued",
             "state" => "queued",
             "stage" => "Queued",
+            "avg_task_seconds" => nothing,
+            "task_seconds_count" => 0,
+            "collect_save_seconds" => nothing,
         ),
         "workers" => workers,
+        "phases" => _campaign_phase_skeleton(),
+        "result_points" => Vector{Dict{String,Any}}(),
         "failures" => Vector{Dict{String,Any}}(),  # most-recent first, capped
         "done" => false,
         "error" => nothing,
@@ -3301,7 +3757,8 @@ surface error messages without distinguishing HTTP status codes.
 function _scenario_run(body)
     try
         spec = spec_from_dict(body)
-        v = validate_spec(spec)
+        input_path = _scenario_input_path(body)
+        v = _validate_scenario_direct_run_spec(spec, input_path)
         v.valid || return Dict{String,Any}(
             "ok" => false,
             "errors" => v.errors,
@@ -3312,8 +3769,7 @@ function _scenario_run(body)
         targets = LeafTarget[]
         seen = Set{Tuple{Symbol,Tuple}}()
         for r in spec.rows
-            lt = _row_to_leaf_target(r)
-            lt === nothing && continue
+            lt = _row_to_leaf_target(r, input_path)
             key = (lt.field, lt.indices)
             key in seen && continue
             push!(seen, key)
@@ -3322,8 +3778,8 @@ function _scenario_run(body)
         isempty(targets) && return Dict{String,Any}(
             "ok" => false,
             "errors" => ["No usable parameter targets after bridging. " *
-                         "Each row's Sheet must be a Julia field name (e.g. emissionTargetAir) " *
-                         "and Cell must be an indices tuple (e.g. (NL, 2050))."],
+                         "Each row's Sheet/Cell must resolve to a registered live ModelParams mutation target " *
+                         "(for example NodeParameters!AE5 -> emissionTargetBunker[NL,2050])."],
             "warnings" => v.warnings,
         )
 
@@ -3337,7 +3793,6 @@ function _scenario_run(body)
 
         # Workbook + solver settings
         input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
-        input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
         isfile(input_path) || return Dict{String,Any}(
             "ok" => false,
             "errors" => ["Input workbook not found: $input_value"],
@@ -3440,6 +3895,7 @@ function _run_campaign_task!(id::String, cancel::Ref{Bool})
             snap["campaign"]["stage"] = "Failed: $msg"
             snap["done"] = true
             snap["error"] = msg
+            _campaign_fail_active_phase!(snap, msg)
         end
     end
     return nothing
@@ -3477,6 +3933,8 @@ function _prepare_campaign_state!(id::String)
         snap["campaign"]["status"] = "reading"
         snap["campaign"]["state"] = "preparing"
         snap["campaign"]["stage"] = "Reading workbook"
+        _campaign_set_phase!(snap, "generate", "active";
+                             detail = "Reading workbook", advance = false)
     end
     md = _read_ui_data_cached(state[:input_path])
     periods = state[:periods]
@@ -3491,18 +3949,24 @@ function _prepare_campaign_state!(id::String)
         snap["campaign"]["status"] = "preparing"
         snap["campaign"]["state"] = "preparing"
         snap["campaign"]["stage"] = "Deriving sets and parameters"
+        _campaign_set_phase!(snap, "generate", "active";
+                             detail = "Deriving sets and parameters", advance = false)
     end
     derive_sets!(md)
     compute_derived_params!(md)
     if state[:mode] == :ts
         _campaign_update!(id) do snap
             snap["campaign"]["stage"] = "Clustering representative days"
+            _campaign_set_phase!(snap, "generate", "active";
+                                 detail = "Clustering representative days", advance = false)
         end
         build_temporal_clusters!(md)
     end
 
     _campaign_update!(id) do snap
         snap["campaign"]["stage"] = "Sampling scenario space"
+        _campaign_set_phase!(snap, "generate", "active";
+                             detail = "Sampling scenario space", advance = false)
     end
     spec = state[:scenario_spec]
     samples = sample_scenario_space(spec)
@@ -3511,6 +3975,10 @@ function _prepare_campaign_state!(id::String)
     state[:base_md]     = md
     state[:samples]     = samples
     state[:all_changes] = all_changes
+    _campaign_update!(id) do snap
+        _campaign_set_phase!(snap, "generate", "done";
+                             detail = string(length(all_changes), " variants generated"))
+    end
     return nothing
 end
 
@@ -3539,6 +4007,8 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
             snap["campaign"]["status"] = "completed"
             snap["campaign"]["state"] = "completed"
             snap["campaign"]["stage"] = "All variants completed"
+            _campaign_set_phase!(snap, "solve", "done"; detail = "No variants pending")
+            _campaign_set_phase!(snap, "write", "skipped"; detail = "Export not enabled")
             snap["done"] = true
         end
         return nothing
@@ -3552,9 +4022,23 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
     _campaign_update!(id) do snap
         snap["campaign"]["status"] = "running"
         snap["campaign"]["state"] = "running"
-        snap["campaign"]["stage"] = string("Solving variants (",
-                                           length(pending), " pending of ",
-                                           total, ")")
+        _campaign_set_worker_task_totals!(snap, total, nw)
+        if state[:n_workers] <= 1
+            snap["campaign"]["stage"] = string("Solving variants (",
+                                               length(pending), " pending of ",
+                                               total, ")")
+            _campaign_set_phase!(snap, "workers", "done"; detail = "Using UI process")
+            _campaign_set_phase!(snap, "assign", "done"; detail = string(length(pending), " variants queued"))
+            _campaign_set_phase!(snap, "solve", "active";
+                                 detail = string("0/", length(pending), " variants solved"))
+        else
+            snap["campaign"]["stage"] = string("Making workers (",
+                                               state[:n_workers], " requested)")
+            _campaign_set_phase!(snap, "workers", "active";
+                                 detail = string("Starting ", state[:n_workers], " workers"),
+                                 advance = false)
+            _campaign_reset_after_phase!(snap, "workers")
+        end
         for w in snap["workers"]
             if w["status"] == "idle"
                 # leave counters intact; just mark as queued so the UI
@@ -3570,13 +4054,23 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
     on_progress = function (info)
         cancel[] && return
         real_vid = pending[info.variant_id]
-        wid = assign_worker(real_vid)
+        fallback_wid = assign_worker(real_vid)
+        worker_pid = get(info, :worker_pid, nothing)
+        if info.stage == "done"
+            res = get(info, :result, nothing)
+            res !== nothing && (worker_pid = res.worker_pid)
+        end
         _campaign_update!(id) do snap
+            wid = _campaign_worker_slot(snap["workers"], worker_pid, fallback_wid)
+            wid == 0 && return
             w = snap["workers"][wid]
+            _campaign_set_worker_pid!(w, worker_pid)
             if info.stage == "start"
                 w["status"] = "running"
                 w["variant_id"] = real_vid
-                w["assigned"] += 1
+                w["started"] = Int(get(w, "started", 0)) + 1
+                w["assigned"] = max(Int(get(w, "assigned", 0)),
+                                    Int(get(w, "completed", 0)) + Int(get(w, "failed", 0)) + 1)
                 w["started_at"] = time()
                 w["progress"] = 0.0
             elseif info.stage == "done"
@@ -3584,6 +4078,36 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                 term = res === nothing ? "UNKNOWN" : String(res.term_status)
                 failed = res === nothing ? false :
                          !(uppercase(term) in ("OPTIMAL", "LOCALLY_SOLVED"))
+                if res !== nothing
+                    obj = isfinite(res.objective) ? res.objective : nothing
+                    co2p = isfinite(res.co2_price) ? res.co2_price : nothing
+                    task_seconds = res.build_seconds + res.apply_seconds + res.solve_seconds
+                    if !(isfinite(task_seconds) && task_seconds > 0)
+                        started_at = get(w, "started_at", nothing)
+                        if started_at isa Number
+                            task_seconds = max(0.0, time() - Float64(started_at))
+                        end
+                    end
+                    if isfinite(task_seconds) && task_seconds > 0
+                        prev_sum = Float64(get(snap["campaign"], "task_seconds_sum", 0.0))
+                        prev_count = Int(get(snap["campaign"], "task_seconds_count", 0))
+                        next_sum = prev_sum + task_seconds
+                        next_count = prev_count + 1
+                        snap["campaign"]["task_seconds_sum"] = next_sum
+                        snap["campaign"]["task_seconds_count"] = next_count
+                        snap["campaign"]["avg_task_seconds"] = next_sum / next_count
+                        snap["campaign"]["collect_save_seconds"] = max(20.0,
+                            2.0 * Float64(max(1, state[:n_workers]::Int)) +
+                            0.05 * Float64(total))
+                    end
+                    push!(snap["result_points"], Dict{String,Any}(
+                        "variant_id" => real_vid,
+                        "worker_id" => wid,
+                        "system_cost" => obj,
+                        "co2_price" => co2p,
+                        "term_status" => term,
+                    ))
+                end
                 w["status"] = failed ? "failed" : "done"
                 w["variant_id"] = real_vid
                 if failed
@@ -3612,6 +4136,9 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                     w["completed"] += 1
                     snap["campaign"]["completed"] += 1
                 end
+                solved = snap["campaign"]["completed"] + snap["campaign"]["failed"]
+                _campaign_set_phase!(snap, "solve", "active";
+                                     detail = string(solved, "/", total, " variants solved"))
                 w["progress"] = 1.0
             end
         end
@@ -3624,6 +4151,50 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
     on_result = function (_r)
         # Reserved for streaming per-variant detail (results table /
         # DuckDB write). on_progress already drives the dashboard.
+        return nothing
+    end
+
+    on_phase = function (info)
+        phase = Symbol(get(info, :phase, :unknown))
+        seconds = get(info, :seconds, nothing)
+        pids = get(info, :pids, Int[])
+        n_pids = length(pids)
+        _campaign_update!(id) do snap
+            if phase == :addprocs
+                snap["campaign"]["stage"] = string("Making workers (", n_pids, " started)")
+                for (slot, pid) in enumerate(pids)
+                    if slot <= length(snap["workers"])
+                        snap["workers"][slot]["pid"] = Int(pid)
+                    end
+                end
+                _campaign_set_phase!(snap, "workers", "active";
+                                     detail = string("Started ", n_pids, " workers"),
+                                     seconds = seconds, advance = false)
+                _campaign_reset_after_phase!(snap, "workers")
+            elseif phase == :workers_loaded
+                snap["campaign"]["stage"] = "Assigning tasks"
+                _campaign_set_phase!(snap, "workers", "done";
+                                     detail = string(n_pids, " workers loaded IESAOpt"),
+                                     seconds = seconds)
+                _campaign_set_phase!(snap, "assign", "active";
+                                     detail = string(length(pending), " variants waiting"))
+                _campaign_reset_after_phase!(snap, "assign")
+            elseif phase == :ship_base_data
+                snap["campaign"]["stage"] = string("Solving variants (",
+                                                   length(pending), " pending of ",
+                                                   total, ")")
+                _campaign_set_phase!(snap, "assign", "done";
+                                     detail = string("Base data shipped to ", n_pids, " workers"),
+                                     seconds = seconds)
+                _campaign_set_phase!(snap, "generate", "done";
+                                     detail = string(length(pending), " variant inputs generated"))
+                _campaign_set_phase!(snap, "solve", "active";
+                                     detail = string("0/", length(pending), " variants solved"))
+            elseif phase == :rmprocs_failed
+                err = get(info, :error, "Worker cleanup failed")
+                _campaign_set_phase!(snap, "solve", "failed"; detail = String(err))
+            end
+        end
         return nothing
     end
 
@@ -3643,7 +4214,8 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                      mode = state[:mode],
                      cancel = cancel,
                      on_progress = on_progress,
-                     on_result = on_result)
+                     on_result = on_result,
+                     on_phase = on_phase)
     finally
         sampler_done[] = true
         try; wait(sampler); catch; end
@@ -3663,6 +4235,9 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                                                snap["campaign"]["completed"], "/",
                                                snap["campaign"]["total"],
                                                " variants — press Resume to continue")
+            _campaign_set_phase!(snap, "solve", "active";
+                                 detail = string("Paused at ", snap["campaign"]["completed"] + snap["campaign"]["failed"], "/",
+                                                 snap["campaign"]["total"], " variants"))
             prev = get(snap["campaign"], "runtime_sec", 0.0)
             snap["campaign"]["runtime_sec"] = round(prev + leg_seconds, digits = 3)
             for w in snap["workers"]
@@ -3679,6 +4254,9 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                                                snap["campaign"]["completed"], "/",
                                                snap["campaign"]["total"],
                                                " variants")
+            _campaign_set_phase!(snap, "solve", "skipped";
+                                 detail = string("Stopped at ", snap["campaign"]["completed"] + snap["campaign"]["failed"], "/",
+                                                 snap["campaign"]["total"], " variants"))
             prev = get(snap["campaign"], "runtime_sec", 0.0)
             snap["campaign"]["runtime_sec"] = round(prev + leg_seconds, digits = 3)
             snap["done"] = true
@@ -3694,6 +4272,10 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
             snap["campaign"]["status"] = "completed"
             snap["campaign"]["state"] = "completed"
             snap["campaign"]["stage"] = "All variants completed"
+            _campaign_set_phase!(snap, "solve", "done";
+                                 detail = string(snap["campaign"]["completed"] + snap["campaign"]["failed"], "/",
+                                                 snap["campaign"]["total"], " variants solved"))
+            _campaign_set_phase!(snap, "write", "skipped"; detail = "Export not enabled")
             prev = get(snap["campaign"], "runtime_sec", 0.0)
             snap["campaign"]["runtime_sec"] = round(prev + leg_seconds, digits = 3)
             snap["done"] = true
@@ -4003,8 +4585,35 @@ function _scenario_result(id::AbstractString)
             "done" => snap["done"],
             "campaign" => snap["campaign"],
             "workers" => snap["workers"],
+            "scatter" => get(snap, "result_points", Vector{Dict{String,Any}}()),
             "error" => snap["error"],
         )
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+end
+
+function _scenario_campaigns()
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        rows = Dict{String,Any}[]
+        for (id, snap) in UI_CAMPAIGNS
+            c = get(snap, "campaign", Dict{String,Any}())
+            push!(rows, Dict{String,Any}(
+                "id" => id,
+                "name" => String(get(c, "name", id)),
+                "state" => String(get(c, "state", get(c, "status", ""))),
+                "stage" => String(get(c, "stage", "")),
+                "total" => Int(get(c, "total", 0)),
+                "completed" => Int(get(c, "completed", 0)),
+                "failed" => Int(get(c, "failed", 0)),
+                "started_at" => Float64(get(c, "started_at", 0.0)),
+                "done" => Bool(get(snap, "done", false)),
+                "result_count" => length(get(snap, "result_points", Any[])),
+            ))
+        end
+        sort!(rows; by = r -> Float64(get(r, "started_at", 0.0)), rev = true)
+        return Dict{String,Any}("ok" => true, "campaigns" => rows)
     finally
         unlock(UI_CAMPAIGNS_LOCK)
     end
