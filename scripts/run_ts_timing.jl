@@ -99,14 +99,13 @@ function main()
     end
     @info "clustering done" seconds = cluster_s n_repDays = length(md.sets.repDays) hours_cluster = length(md.sets.hours_cluster)
 
-    attrs = IESAOpt.default_gurobi_attributes()
+    attrs = IESAOpt.default_gurobi_attributes(; threads = THREADS, rep_days = REP_DAYS)
     attrs["Method"] = 2
     attrs["Crossover"] = -1
     delete!(attrs, "BarHomogeneous")
     delete!(attrs, "BarConvTol")
     delete!(attrs, "FeasibilityTol")
     delete!(attrs, "OptimalityTol")
-    attrs["Threads"] = THREADS
 
     optimizer = IESAOpt.gurobi_optimizer(; attrs = attrs)
     model = Model(optimizer)
