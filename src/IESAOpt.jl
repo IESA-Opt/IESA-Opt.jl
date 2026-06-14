@@ -87,6 +87,23 @@ include("solve.jl")
 include("violations.jl")
 # include("postprocess.jl")
 include("writers.jl")
+
+# ---------------------------------------------------------------------------
+# Scenario-space exploration
+# Phase 1: spec parsing + sampling, no model touch
+include("scenario/spec.jl")
+include("scenario/sampling.jl")
+# Phase 2: in-place LP mutation (constraint-ref manifest + per-variant apply)
+include("scenario/manifest.jl")
+include("scenario/variant.jl")
+# Phase 3: campaign runner (serial + Distributed.jl worker pool)
+include("scenario/runner.jl")
+# Phase 4: high-level orchestrator + result persistence
+include("scenario/orchestrator.jl")
+include("scenario/persistence.jl")
+# Phase 5: analysis helpers (objective_table, sensitivity_scan, pareto_front)
+include("scenario/analysis.jl")
+
 include("ui_server.jl")
 # include("sweeps.jl")
 
@@ -124,6 +141,41 @@ export add_cyclic_closures!
 export write_parquet_results, write_duckdb_results
 export serve_ui!
 # Phase 7+: export sweep_ts_postfix
+
+# Scenario-space exploration (Phase 1)
+export ParameterRow, CampaignSpec, SampleMatrix
+export parse_sampling_method, parse_param_type
+export unique_parameters, parameter_bounds, parameter_steps
+export validate_spec, spec_from_dict, spec_to_dict
+export sample_campaign, implied_sample_size
+# Scenario-space exploration (Phase 2: in-place LP mutation)
+export Mutation, LeafChange
+export register_mutation!, is_mutation_registered, registered_mutation_fields
+export build_mutations, apply_mutation!, apply_mutations!
+export apply_leaf_change!, apply_leaf_changes!, apply_variant!
+# Scenario-space exploration (Phase 3: campaign runner)
+export VariantResult, run_campaign
+# Scenario-space exploration (Phase 3.5: per-variant clustering)
+export register_clustering_affecting!, unregister_clustering_affecting!
+export is_clustering_affecting, clustering_affecting_fields, variant_affects_clustering
+# Scenario-space exploration (Phase 4: orchestrator + persistence)
+export LeafTarget, ScenarioSpec, ScenarioResult
+export sample_scenario_space, samples_to_changes, run_scenario_space
+export save_scenario_results, load_scenario_results
+# Scenario-space exploration (Phase 5: analysis helpers)
+export objective_table, sensitivity_scan, pareto_front
+
+# ---------------------------------------------------------------------------
+# Module init — populate the scenario-space mutation registry with the
+# default leaf-parameter -> constraint-name builders. Idempotent.
+function __init__()
+    try
+        _register_default_mutations!()
+    catch err
+        @warn "IESAOpt: failed to register default scenario-space mutations" err
+    end
+    return nothing
+end
 
 # ---------------------------------------------------------------------------
 # PrecompileTools workload

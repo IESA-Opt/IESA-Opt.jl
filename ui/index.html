@@ -22,11 +22,20 @@
     </div>
   </header>
 
+  <nav class="sections" aria-label="Workspaces">
+    <button class="section-button active" data-section="main" type="button">Single run</button>
+    <button class="section-button" data-section="scenario" type="button">Scenario Space</button>
+    <button class="section-button" data-section="mga" type="button" disabled title="Coming soon">Coming soon</button>
+  </nav>
+
   <nav class="tabs" aria-label="Main views">
-    <button class="tab-button active" data-tab="run" type="button">Run</button>
-    <button class="tab-button" data-tab="progress" type="button">Progress</button>
-    <button class="tab-button" data-tab="results" type="button">Results</button>
-    <button class="tab-button" data-tab="about" type="button">About</button>
+    <button class="tab-button active" data-section="main" data-tab="run" type="button">Setup</button>
+    <button class="tab-button" data-section="main" data-tab="progress" type="button">Progress</button>
+    <button class="tab-button" data-section="main" data-tab="results" type="button">Results</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-setup" type="button">Parameter Space</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-progress" type="button">Progress</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-results" type="button">Results</button>
+    <button class="tab-button" data-section="main" data-tab="about" type="button">About</button>
   </nav>
 
   <main>
@@ -50,7 +59,7 @@
             <label class="field"><span>Solver</span><select id="solver"></select></label>
             <div id="solverDetails" class="subtle detail-text"></div>
             <div class="field"><span>Solve method</span><div id="solveMethod" class="segmented vertical"></div></div>
-            <label class="field"><span>CPU cores</span><div class="range-pair"><input id="threads" type="range" min="0" max="64" value="0"><input id="threadsNumber" type="number" min="0" max="64" value="0"></div></label>
+            <label class="field"><span>CPU threads</span><div class="range-pair"><input id="threads" type="range" min="0" max="64" value="0"><input id="threadsNumber" type="number" min="0" max="64" value="0"></div></label>
           </section>
         </aside>
 
@@ -69,7 +78,7 @@
             <section class="panel compact-panel">
               <h2>Solve Mode</h2>
               <label class="toggle-field"><span>Time slicing</span><input id="timeSlicingToggle" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span></label>
-              <label id="representativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="representativeDays" type="range" min="1" max="100" value="30"><input id="representativeDaysNumber" type="number" min="1" max="100" value="30"></div></label>
+              <label id="representativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="representativeDays" type="range" min="1" max="100" value="15"><input id="representativeDaysNumber" type="number" min="1" max="100" value="15"></div></label>
               <label class="field"><span>Time slices</span><input id="totalSlices" type="text" value="720" readonly></label>
             </section>
 
@@ -160,6 +169,205 @@
       </section>
     </section>
 
+    <section id="tab-scenario-setup" class="tab-panel">
+      <form id="scForm" class="run-layout">
+        <aside class="run-sidebar">
+          <section class="panel run-card">
+            <p class="eyebrow">Scenario campaign</p>
+            <h2 id="scTitle">Ready to validate</h2>
+            <button id="scRunCampaignBtn" class="primary-button" type="submit">Run campaign</button>
+            <p id="scHint" class="subtle">Validate the parameter space, then preview the sample to inspect variants.</p>
+            <dl class="summary-list">
+              <div><dt>Campaign</dt><dd id="scSelectedCampaignLabel">my_campaign</dd></div>
+              <div><dt>Method</dt><dd id="scSelectedMethod">Latin hypercube</dd></div>
+              <div><dt>Variants</dt><dd id="scSelectedVariants">100</dd></div>
+            </dl>
+          </section>
+
+          <section class="panel compact-panel">
+            <h2>Solver Settings</h2>
+            <label class="field"><span>Solver</span><select id="scSolver"></select></label>
+            <div id="scSolverDetails" class="subtle detail-text"></div>
+            <div class="field"><span>Solve method</span><div id="scSolveMethod" class="segmented vertical"></div></div>
+            <label class="field"><span>Total CPU threads</span><div class="range-pair"><input id="scThreads" type="range" min="0" max="64" value="0"><input id="scThreadsNumber" type="number" min="0" max="64" value="0"></div></label>
+            <div class="field threads-per-worker-field"><span>Threads per worker <span class="subtle">= floor(threads &divide; workers)</span></span><div id="scThreadsPerWorker" class="threads-per-worker-value">auto</div></div>
+          </section>
+        </aside>
+
+        <div class="run-main">
+          <section class="panel compact-panel">
+            <div class="panel-title"><h2>Base scenario</h2><span class="subtle" id="scScenarioSummary">Default workbook</span></div>
+            <div class="form-grid two">
+              <label class="field"><span>Scenario database</span><select id="scInputWorkbook"></select></label>
+              <div class="field"><span>Or pick a file</span><div class="browse-row"><button id="scBrowseInputButton" class="secondary-button" type="button">Browse&hellip;</button><button id="scClearCustomInputButton" class="secondary-button hidden" type="button">Clear</button></div></div>
+              <div id="scCustomInputDisplay" class="field span-2 hidden"><span>Selected file</span><div id="scCustomInputDisplayPath" class="custom-input-path"></div></div>
+              <div class="field span-2"><span>Years selection</span><div id="scPeriods" class="choice-row dense"></div></div>
+            </div>
+          </section>
+
+          <section class="panel compact-panel">
+            <h2>Campaign Settings</h2>
+            <div class="form-grid three">
+              <label class="field"><span>Campaign name</span><input id="scCampaignName" type="text" placeholder="my_campaign" value="my_campaign"></label>
+              <label class="field"><span>Sampling method</span><select id="scMethod"><option value="lhs">Latin hypercube</option><option value="morris">Morris</option><option value="sobol">Sobol</option><option value="factorial">Factorial</option></select></label>
+              <label class="field"><span>Number of variants</span><input id="scNVariants" type="number" min="1" step="1" value="100"></label>
+              <label class="field"><span>Random seed</span><input id="scSeed" type="number" min="0" step="1" value="12345"></label>
+              <label class="field"><span>Parallel workers</span><div class="range-pair"><input id="scWorkers" type="range" min="1" max="32" value="4"><input id="scWorkersNumber" type="number" min="1" max="32" value="4"></div></label>
+              <div class="field"><span>Implied evaluations</span><div id="scImplied" class="custom-input-path">&mdash;</div></div>
+              <div class="field span-2"><span>Status</span><div id="scStatus" class="custom-input-path">Not validated yet.</div></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">
+              <h2>Parameter Space</h2>
+              <div class="panel-toolbar">
+                <button id="scAddRow" type="button" class="secondary-button">+ Add row</button>
+                <button id="scDuplicateRow" type="button" class="secondary-button">Duplicate</button>
+                <button id="scRemoveRow" type="button" class="danger-button">Remove selected</button>
+                <button id="scSaveParameterSpace" type="button" class="secondary-button">Save parameter space</button>
+                <button id="scLoadParameterSpace" type="button" class="secondary-button">Load parameter space</button>
+                <input id="scLoadParameterSpaceFile" type="file" accept=".csv,text/csv" class="hidden">
+                <button id="scValidateBtn" type="button" class="secondary-button">Validate</button>
+                <button id="scPreviewBtn" type="button" class="primary-button" style="width:auto;">Preview sample</button>
+              </div>
+            </div>
+            <div class="table-wrap" style="max-height:none;overflow:visible;">
+              <table id="scTable" class="sc-table">
+                <thead id="scTableHead"></thead>
+                <tbody id="scTableBody"></tbody>
+              </table>
+            </div>
+            <div id="scMessages" class="sc-messages"></div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title">
+              <h2>Sample preview</h2>
+              <span id="scPreviewStatus" class="subtle">Click <em>Preview sample</em> to generate the first 20 variants.</span>
+            </div>
+            <div id="scPreviewWrap" class="table-wrap" style="max-height:480px;"></div>
+          </section>
+
+          <div class="main-grid">
+            <section class="panel compact-panel">
+              <h2>Solve Mode</h2>
+              <label class="toggle-field"><span>Time slicing</span><input id="scTimeSlicingToggle" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span></label>
+              <label id="scRepresentativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="scRepresentativeDays" type="range" min="1" max="100" value="15"><input id="scRepresentativeDaysNumber" type="number" min="1" max="100" value="15"></div></label>
+              <label class="field"><span>Time slices</span><input id="scTotalSlices" type="text" value="720" readonly></label>
+            </section>
+
+            <section class="panel compact-panel">
+              <h2>Temporal Resolution</h2>
+              <div id="scHoursPerDayField" class="field hidden"><span>Hours in a day</span><div id="scHoursPerDay" class="choice-row compact"></div></div>
+              <label id="scClusteringApproachField" class="field"><span>Clustering approach</span><select id="scClusteringApproach"></select></label>
+              <label id="scExtremeDaysField" class="field"><span>Extreme days</span><input id="scExtremeDays" type="number" min="0" max="30" value="5"></label>
+            </section>
+          </div>
+
+          <section class="panel compact-panel">
+            <details open>
+              <summary>Reporting and advanced settings</summary>
+              <div class="form-grid three advanced-grid">
+                <label class="field checkbox"><input id="scHourlyReports" type="checkbox" checked><span>Hourly reports</span></label>
+                <label class="field checkbox"><input id="scShowViolations" type="checkbox"><span>Show violations</span></label>
+                <label class="field checkbox"><input id="scExtremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
+                <label class="field checkbox"><input id="scBoundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
+                <label class="field"><span>Constraint group</span><select id="scConstraintGroup"></select></label>
+                <label class="field"><span>Output naming</span><select id="scOutputMode"><option value="automatic">Automatic</option><option value="custom">Custom prefix</option></select></label>
+                <label id="scOutputNameWrap" class="field hidden"><span>Custom prefix</span><input id="scOutputName" type="text" placeholder="my_campaign"></label>
+              </div>
+            </details>
+          </section>
+        </div>
+      </form>
+    </section>
+
+    <section id="tab-scenario-progress" class="tab-panel">
+      <section class="panel campaign-overview">
+        <div class="panel-title">
+          <div>
+            <h2 id="campaignTitle">Campaign progress</h2>
+            <p class="subtle"><span id="campaignSubtitle">No campaign running.</span> &mdash; <span id="campaignEta" class="subtle">Finish: &mdash;</span></p>
+          </div>
+          <div class="campaign-actions">
+            <span id="campaignStatusPill" class="status-pill muted">Idle</span>
+            <button id="campaignPauseBtn" class="secondary-button hidden" type="button" title="Pause after current variants finish">Pause</button>
+            <button id="campaignResumeBtn" class="secondary-button hidden" type="button" title="Resume from where it was paused">Resume</button>
+            <button id="campaignStopBtn" class="secondary-button hidden" type="button" title="Stop completely (cannot resume)">Stop</button>
+            <button id="campaignDemoStart" class="secondary-button" type="button">Start demo</button>
+            <button id="campaignDemoStop" class="secondary-button hidden" type="button">Stop demo</button>
+          </div>
+        </div>
+        <div class="campaign-stats">
+          <div class="campaign-stat"><span class="stat-label">Total</span><span id="campaignTotal" class="stat-value">0</span></div>
+          <div class="campaign-stat done"><span class="stat-label">Done</span><span id="campaignDone" class="stat-value">0</span></div>
+          <div class="campaign-stat running"><span class="stat-label">Running</span><span id="campaignRunning" class="stat-value">0</span></div>
+          <div class="campaign-stat failed"><span class="stat-label">Failed</span><span id="campaignFailed" class="stat-value">0</span></div>
+          <div class="campaign-stat queued"><span class="stat-label">Queued</span><span id="campaignQueued" class="stat-value">0</span></div>
+          <div class="campaign-stat workers"><span class="stat-label">Workers</span><span id="campaignWorkers" class="stat-value">0</span></div>
+        </div>
+        <div class="campaign-bar-wrap">
+          <div class="campaign-bar"><div id="campaignBarFill" class="campaign-bar-fill" style="width:0%"></div><div id="campaignBarFailed" class="campaign-bar-failed" style="width:0%"></div></div>
+          <div class="campaign-bar-meta"><span id="campaignPct">0%</span><span id="campaignElapsed">Elapsed: &mdash;</span></div>
+        </div>
+      </section>
+
+      <section class="panel campaign-phases-panel">
+        <div class="panel-title">
+          <h2>Campaign phases</h2>
+          <p id="campaignPhaseSummary" class="subtle">Waiting for a campaign.</p>
+        </div>
+        <div id="campaignPhaseGrid" class="campaign-phase-grid"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <h2>Workers</h2>
+          <div class="panel-toolbar"><span class="subtle worker-legend"><span class="worker-legend-dot status-running"></span>running <span class="worker-legend-dot status-done"></span>optimal <span class="worker-legend-dot status-failed"></span>failed <span class="worker-legend-dot status-idle"></span>idle</span></div>
+        </div>
+        <div id="workerGrid" class="worker-grid empty-state">No workers active. Start a campaign or click <em>Start demo</em> to preview the layout.</div>
+      </section>
+
+      <section id="campaignErrorPanel" class="panel hidden">
+        <div class="panel-title">
+          <h2>Campaign error</h2>
+          <p class="subtle">The campaign task itself raised an exception &mdash; this is the same backtrace logged on the Julia REPL.</p>
+        </div>
+        <pre id="campaignErrorMsg" class="campaign-error-msg"></pre>
+      </section>
+
+      <section id="campaignFailuresPanel" class="panel hidden">
+        <div class="panel-title">
+          <h2>Recent failures <span id="campaignFailuresCount" class="subtle"></span></h2>
+          <p class="subtle">Per-variant errors, most-recent first. Click any message to copy it.</p>
+        </div>
+        <div id="campaignFailuresList" class="failures-list"></div>
+      </section>
+    </section>
+
+    <section id="tab-scenario-results" class="tab-panel">
+      <div class="scenario-results-layout">
+        <aside class="panel scenario-results-sidebar">
+          <div class="panel-title">
+            <div>
+              <h2>Campaigns</h2>
+              <p id="scenarioCampaignListSummary" class="subtle">No campaigns loaded.</p>
+            </div>
+            <button id="scenarioRefreshCampaigns" type="button" class="secondary-button">Refresh</button>
+          </div>
+          <div id="scenarioCampaignList" class="scenario-campaign-list empty-state">No Scenario Space campaigns yet.</div>
+        </aside>
+        <section class="panel scenario-results-main-panel">
+          <div class="panel-title">
+            <h2>Campaign results</h2>
+            <p id="scenarioResultsSummary" class="subtle">Select a campaign to view results.</p>
+          </div>
+          <div id="scenarioCostCo2Scatter" class="bar-chart empty-state">No campaign selected.</div>
+        </section>
+      </div>
+    </section>
+
     <section id="tab-about" class="tab-panel">
       <section class="about-page panel">
         <img src="/assets/iesa-opt-logo.png" alt="IESA-Opt" class="about-logo">
@@ -172,14 +380,20 @@
         </div>
 
         <h3>Using the dashboard</h3>
-        <p>The dashboard has four tabs along the top: <strong>Run</strong>, <strong>Progress</strong>, <strong>Results</strong>, and <strong>About</strong>. Each tab is described below together with every option it exposes.</p>
+        <p>The dashboard is organised into <strong>sections</strong> along the very top &mdash; each section is its own workspace with its own set of tabs underneath:</p>
+        <ul class="about-list">
+          <li><strong>Single run</strong> &mdash; the default workspace. Tabs: <em>Setup</em>, <em>Progress</em>, <em>Results</em>, <em>About</em>. Used to launch one optimisation, watch it solve, and inspect the resulting output folder.</li>
+          <li><strong>Scenario Space</strong> &mdash; the campaign workspace. Tabs: <em>Parameter Space</em> (define the parameter space + sample variants), <em>Progress</em> (live campaign progress, Phase 3 hookup pending), <em>Results</em> (aggregated cross-variant analytics, Phase 4/5 hookup pending).</li>
+          <li><strong>MGA</strong> &mdash; coming soon. Will host modelling-to-generate-alternatives explorations.</li>
+        </ul>
+        <p>The tabs below the section bar are filtered automatically: only the tabs that belong to the active section are shown. Each tab is described below together with every option it exposes.</p>
 
-        <h3>Run tab</h3>
+        <h3>Setup tab</h3>
         <p>This is the launchpad for a new optimisation. The left side fixes the solver; the right side fixes the scenario, temporal resolution, and reporting flags. Press <strong>Run model</strong> to start; the page will switch to <strong>Progress</strong> automatically.</p>
         <ul class="about-list">
           <li><strong>Solver</strong> &mdash; chooses the optimisation backend (HiGHS, Gurobi, etc.). The detail line shows the solver version detected on the system.</li>
           <li><strong>Solve method</strong> &mdash; algorithm hint passed to the solver (for example <em>simplex</em>, <em>barrier</em>, <em>auto</em>). Available options depend on the selected solver.</li>
-          <li><strong>CPU cores</strong> &mdash; threads given to the solver; <em>0</em> lets the solver pick.</li>
+          <li><strong>CPU threads</strong> &mdash; threads given to the solver; <em>0</em> lets the solver pick.</li>
           <li><strong>Scenario database</strong> &mdash; picks one of the input workbooks bundled in the <code>data/</code> folder.</li>
           <li><strong>Browse&hellip;</strong> &mdash; selects an Excel/Parquet file from anywhere on disk; <strong>Clear</strong> reverts to the dropdown selection.</li>
           <li><strong>Years selection</strong> &mdash; chooses which model years (periods) to solve. Multiple years may be selected to run a transition path.</li>
@@ -239,5 +453,6 @@
   </main>
   <script src="/vendor/plotly.min.js"></script>
   <script src="/app.js"></script>
+  <script src="/app.scenario.js"></script>
 </body>
 </html>

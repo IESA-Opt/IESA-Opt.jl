@@ -12,7 +12,7 @@ IESAOpt
 
 ```@autodocs
 Modules = [IESAOpt]
-Order = [:type, :function]
+Order = [:type, :function, :constant, :macro]
 ```
 
 Back to the [documentation home](../index.md) or the [repository README](https://github.com/IESA-Opt/IESA-Opt.jl#readme).

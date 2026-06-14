@@ -33,6 +33,7 @@ makedocs(
             ],
             "Solver Settings" => "user-guide/solver-settings.md",
             "Outputs" => "user-guide/outputs.md",
+            "Scenario-Space Exploration" => "user-guide/scenario-space.md",
         ],
         "Scientific Foundation" => [
             "Model Scope" => "scientific-foundation/model-scope.md",
