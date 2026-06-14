@@ -96,6 +96,8 @@ include("scenario/sampling.jl")
 # Phase 2: in-place LP mutation (constraint-ref manifest + per-variant apply)
 include("scenario/manifest.jl")
 include("scenario/variant.jl")
+# Phase 3: campaign runner (serial + Distributed.jl worker pool)
+include("scenario/runner.jl")
 
 include("ui_server.jl")
 # include("sweeps.jl")
@@ -146,6 +148,8 @@ export Mutation, LeafChange
 export register_mutation!, is_mutation_registered, registered_mutation_fields
 export build_mutations, apply_mutation!, apply_mutations!
 export apply_leaf_change!, apply_leaf_changes!, apply_variant!
+# Scenario-space exploration (Phase 3: campaign runner)
+export VariantResult, run_campaign
 
 # ---------------------------------------------------------------------------
 # Module init — populate the scenario-space mutation registry with the

@@ -23,3 +23,7 @@ end
     include("test_scenario_mutation.jl")
 end
 
+@testset "Scenario-space exploration (Phase 3: campaign runner)" begin
+    include("test_scenario_runner.jl")
+end
+
