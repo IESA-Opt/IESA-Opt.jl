@@ -101,6 +101,22 @@ end
 Build the LP for `md` with constraint names preserved so the manifest can
 look them up. Caller must have already run `derive_sets!`, `compute_derived_params!`,
 and (for `mode === :ts`) `build_temporal_clusters!`.
+
+!!! note "Clustering is shared across all variants in a campaign"
+    `build_temporal_clusters!` is run ONCE on `base_md` before the campaign
+    starts; every variant solves against the same representative days.
+    This is correct for variants that only perturb **scalar** parameters
+    (prices, capacities, emission targets…). It is **incorrect** for
+    variants that perturb hourly profile inputs (`hourly_avail`, demand
+    profiles, weather), because the cluster assignment is computed from the
+    base profile and will no longer be representative of the perturbed one.
+
+    TODO (planned for a future phase): when any leaf in a variant's
+    `LeafChange` list belongs to a profile-defining field, re-run
+    `build_temporal_clusters!` on the variant's mutated `md`. To stay fast,
+    cache the cluster output keyed by a hash of the profile-defining subset
+    of params so N variants that share only K << N unique profile sets pay
+    K clustering costs, not N. See HANDOFF.md → "Known limitations".
 """
 function _build_campaign_model(md::ModelData; solver::Symbol, threads::Int,
                                mode::Symbol,

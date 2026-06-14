@@ -222,6 +222,57 @@ round-trip code, three rules:
 Always set the first two when iterating on tests; never set them in
 production.
 
+## Known limitations / TODOs (not blockers for benchmarking)
+
+These are recorded so the design discussion can resume on the other PC.
+None of them affects the scaling-validation work you're being asked to do
+— the benchmark sweep perturbs only **scalar** parameters (`price_co2`,
+`emissionTargetBunker`) and so is safe under the current implementation.
+
+### A. Per-variant clustering when hourly profiles change
+
+`build_temporal_clusters!(base_md)` is currently called **once** before the
+campaign and every variant solves against the same representative days.
+That is correct for variants that only perturb scalars (prices, caps,
+emission targets…). It is **wrong** for variants that perturb hourly
+profile inputs (`hourly_avail`, demand profiles, weather), because the
+cluster assignment is computed from the base profile and stops being
+representative of the perturbed one.
+
+Planned fix (Phase 3.5 or Phase 6):
+
+1. Tag each leaf in the mutation registry with an `affects_clustering::Bool`
+   flag (default `false`; `true` for `hourly_avail`, `dem_profile`, etc.).
+2. In the campaign runner, before each variant: if any of its `LeafChange`s
+   has `affects_clustering == true`, re-run `build_temporal_clusters!` on
+   the variant's mutated `md` AND rebuild the LP (because cluster days
+   change → time index changes → `apply_variant!` can no longer warm-start).
+3. **Optimisation**: hash the profile-defining subset of params for each
+   variant. Variants with the same hash share the same clustering output,
+   so N variants that draw from only K << N unique profile sets pay K
+   clustering costs instead of N. Cache the clustered `md` (or just the
+   cluster days + weights + medoids) keyed on that hash.
+
+This was deliberately deferred so the runner could land first; opening it
+up requires touching `manifest.jl` (add the flag), `runner.jl` (the
+per-variant branch), and probably a small `cluster_cache.jl` helper.
+
+### B. Worker-count heuristic in `run_campaign`
+
+Currently the caller picks `n_workers` explicitly. After the scaling
+sweep on the other PC produces real numbers, we should add a heuristic
+default — something like
+`n_workers = clamp(n_variants ÷ 4, 0, Sys.CPU_THREADS ÷ 2)` — and
+document it in the runner docstring.
+
+### C. CSV→Julia type round-trip for index columns
+
+`load_scenario_results(..., format=:csv)` currently re-attaches
+`leaf_values` from `samples.csv` but does not validate that the column
+ordering matches `spec.targets` ordering. Add an assertion or persist
+column→target_id mapping in `spec.json`. Low priority — same writer/reader
+in the same Julia version always round-trips correctly.
+
 ## Files this branch touches (uncommitted as of writing)
 
 ```
