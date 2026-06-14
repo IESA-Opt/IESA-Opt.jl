@@ -224,7 +224,7 @@
             <h2>Campaign Settings</h2>
             <div class="form-grid three">
               <label class="field"><span>Campaign name</span><input id="scCampaignName" type="text" placeholder="my_campaign" value="my_campaign"></label>
-              <label class="field"><span>GSA method</span><select id="scGsaMethod"><option value="rank">Rank correlation</option><option value="morris">Morris elementary effects</option><option value="sobol">Sobol variance indices</option></select></label>
+              <label class="field"><span>GSA method</span><select id="scGsaMethod"><option value="rank">Rank correlation</option><option value="moment_delta">Moment-independent delta</option><option value="morris">Morris elementary effects</option><option value="sobol">Sobol variance indices</option></select></label>
               <label class="field"><span>Sampling method</span><select id="scMethod"><option value="lhs">Latin hypercube</option><option value="morris">Morris</option><option value="sobol">Sobol</option><option value="factorial">Factorial</option></select></label>
               <div class="field"><span>GSA sampling rule</span><div id="scGsaMethodHint" class="custom-input-path">Rank correlation uses Latin hypercube sampling.</div></div>
               <label class="field"><span>Number of variants</span><input id="scNVariants" type="number" min="1" step="1" value="100"></label>

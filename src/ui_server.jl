@@ -4269,6 +4269,7 @@ end
 
 function _scenario_gsa_method(body)
     raw = lowercase(strip(String(_config_get(body, "gsaMethod", _config_get(body, "gsa_method", "rank")))))
+    raw in ("moment_delta", "moment-delta", "moment independent", "moment-independent", "borgonovo", "delta", "borgonovo_delta", "borgonovo-delta") && return "moment_delta"
     raw in ("morris", "elementary", "elementary-effects", "elementary_effects") && return "morris"
     raw in ("sobol", "variance", "variance-based", "variance_based") && return "sobol"
     return "rank"
@@ -4277,7 +4278,7 @@ end
 function _scenario_sampler_for_gsa(method::AbstractString, fallback::Symbol)
     method == "morris" && return :morris
     method == "sobol" && return :sobol
-    method == "rank" && return :lhs
+    method in ("rank", "moment_delta") && return :lhs
     return fallback
 end
 

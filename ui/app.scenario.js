@@ -97,6 +97,7 @@
 
   const GSA_METHODS = {
     rank: { label: "Rank correlation", sampler: "lhs", hint: "Rank correlation uses Latin hypercube sampling and reports Spearman rho." },
+    moment_delta: { label: "Moment-independent delta", sampler: "lhs", hint: "Moment-independent GSA uses Latin hypercube sampling and reports Borgonovo-style delta indices." },
     morris: { label: "Morris elementary effects", sampler: "morris", hint: "Morris GSA uses Morris sampling and reports mu, mu*, and sigma elementary-effect metrics." },
     sobol: { label: "Sobol variance indices", sampler: "sobol", hint: "Sobol GSA uses Sobol sampling and reports first-order variance-index estimates." },
   };
@@ -1476,9 +1477,53 @@
       .slice(0, 18);
   }
 
+  function cdfAt(sortedValues, x) {
+    let lo = 0;
+    let hi = sortedValues.length;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (sortedValues[mid] <= x) lo = mid + 1;
+      else hi = mid;
+    }
+    return sortedValues.length ? lo / sortedValues.length : NaN;
+  }
+
+  function borgonovoDelta(rows, label, output) {
+    const pairs = rows.map((r) => [Number(r.parameters[label]), Number(r[output])]).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    if (pairs.length < 10) return NaN;
+    pairs.sort((a, b) => a[0] - b[0]);
+    const global = pairs.map((p) => p[1]).sort((a, b) => a - b);
+    const gridCount = Math.min(25, Math.max(8, Math.floor(Math.sqrt(global.length))));
+    const grid = Array.from({ length: gridCount }, (_, i) => quantile(global, (i + 0.5) / gridCount)).filter(Number.isFinite);
+    const bins = Math.max(3, Math.min(8, Math.floor(Math.sqrt(pairs.length))));
+    let delta = 0;
+    let used = 0;
+    for (let b = 0; b < bins; b += 1) {
+      const start = Math.floor(b * pairs.length / bins);
+      const stop = Math.floor((b + 1) * pairs.length / bins);
+      const conditional = pairs.slice(start, stop).map((p) => p[1]).sort((a, b2) => a - b2);
+      if (conditional.length < 2) continue;
+      const distance = mean(grid.map((x) => Math.abs(cdfAt(conditional, x) - cdfAt(global, x))));
+      delta += (conditional.length / pairs.length) * distance;
+      used += conditional.length;
+    }
+    return used ? Math.max(0, Math.min(1, delta)) : NaN;
+  }
+
+  function computeMomentDeltaRows(rows, labels) {
+    return labels.map((label) => {
+      const costDelta = borgonovoDelta(rows, label, "system_cost");
+      const co2Delta = borgonovoDelta(rows, label, "co2_price");
+      return { label, method: "moment_delta", costDelta, co2Delta, influence: Math.max(costDelta || 0, co2Delta || 0) };
+    }).filter((r) => Number.isFinite(r.costDelta) || Number.isFinite(r.co2Delta))
+      .sort((a, b) => b.influence - a.influence)
+      .slice(0, 18);
+  }
+
   function computeGsaRows(rows, labels, method) {
     if (method === "morris") return computeMorrisRows(rows, labels);
     if (method === "sobol") return computeVarianceRows(rows, labels);
+    if (method === "moment_delta") return computeMomentDeltaRows(rows, labels);
     return computeRankGsaRows(rows, labels);
   }
 
@@ -1511,7 +1556,9 @@
       ? `Morris elementary-effect metrics from ${n} completed variants.`
       : method === "sobol"
         ? `Sobol-style first-order variance indices from ${n} completed variants.`
-        : `Rank-correlation sensitivity from ${n} completed variants.`;
+        : method === "moment_delta"
+          ? `Moment-independent Borgonovo-style delta indices from ${n} completed variants.`
+          : `Rank-correlation sensitivity from ${n} completed variants.`;
     if (summary) summary.textContent = rows.length ? summaryText : `No ${methodInfo.label} rows found.`;
     const table = $("scenarioGsaTable");
     if (table) {
@@ -1524,6 +1571,8 @@
           table.innerHTML = `<table><thead><tr><th>Parameter</th><th>Effects</th><th>Cost mu*</th><th>Cost sigma</th><th>CO2 mu*</th><th>CO2 sigma</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.n}</td><td>${Number.isFinite(r.costMuStar) ? r.costMuStar.toPrecision(4) : ""}</td><td>${Number.isFinite(r.costSigma) ? r.costSigma.toPrecision(4) : ""}</td><td>${Number.isFinite(r.co2MuStar) ? r.co2MuStar.toPrecision(4) : ""}</td><td>${Number.isFinite(r.co2Sigma) ? r.co2Sigma.toPrecision(4) : ""}</td></tr>`).join("")}</tbody></table>`;
         } else if (method === "sobol") {
           table.innerHTML = `<table><thead><tr><th>Parameter</th><th>System cost S1</th><th>CO2 price S1</th><th>Influence</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${Number.isFinite(r.costS1) ? r.costS1.toFixed(3) : ""}</td><td>${Number.isFinite(r.co2S1) ? r.co2S1.toFixed(3) : ""}</td><td>${r.influence.toFixed(3)}</td></tr>`).join("")}</tbody></table>`;
+        } else if (method === "moment_delta") {
+          table.innerHTML = `<table><thead><tr><th>Parameter</th><th>System cost delta</th><th>CO2 price delta</th><th>Influence</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${Number.isFinite(r.costDelta) ? r.costDelta.toFixed(3) : ""}</td><td>${Number.isFinite(r.co2Delta) ? r.co2Delta.toFixed(3) : ""}</td><td>${r.influence.toFixed(3)}</td></tr>`).join("")}</tbody></table>`;
         } else {
           table.innerHTML = `<table><thead><tr><th>Parameter</th><th>System cost rho</th><th>CO2 price rho</th><th>Influence</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${Number.isFinite(r.cost) ? r.cost.toFixed(3) : ""}</td><td>${Number.isFinite(r.co2) ? r.co2.toFixed(3) : ""}</td><td>${r.influence.toFixed(3)}</td></tr>`).join("")}</tbody></table>`;
         }
@@ -1540,12 +1589,16 @@
       ? [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.costMuStar || 0).reverse(), name: "System cost mu*", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2MuStar || 0).reverse(), name: "CO2 price mu*", marker: { color: "#8a5a2b" } }]
       : method === "sobol"
         ? [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.costS1 || 0).reverse(), name: "System cost S1", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2S1 || 0).reverse(), name: "CO2 price S1", marker: { color: "#8a5a2b" } }]
-        : [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.cost || 0).reverse(), name: "System cost rho", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2 || 0).reverse(), name: "CO2 price rho", marker: { color: "#8a5a2b" } }];
+        : method === "moment_delta"
+          ? [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.costDelta || 0).reverse(), name: "System cost delta", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2Delta || 0).reverse(), name: "CO2 price delta", marker: { color: "#8a5a2b" } }]
+          : [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.cost || 0).reverse(), name: "System cost rho", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2 || 0).reverse(), name: "CO2 price rho", marker: { color: "#8a5a2b" } }];
     const xaxis = method === "morris"
       ? { title: "Morris mu*", gridcolor: "#dbe4ec", zerolinecolor: "#455a64" }
       : method === "sobol"
         ? { title: "First-order variance index", range: [0, 1], gridcolor: "#dbe4ec", zerolinecolor: "#455a64" }
-        : { title: "Spearman rho", range: [-1, 1], gridcolor: "#dbe4ec", zerolinecolor: "#455a64" };
+        : method === "moment_delta"
+          ? { title: "Borgonovo delta", range: [0, 1], gridcolor: "#dbe4ec", zerolinecolor: "#455a64" }
+          : { title: "Spearman rho", range: [-1, 1], gridcolor: "#dbe4ec", zerolinecolor: "#455a64" };
     window.Plotly.react(chart, traces, { barmode: "group", margin: { l: 160, r: 16, t: 16, b: 42 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", xaxis, yaxis: { automargin: true } }, { responsive: true, displaylogo: false });
   }
 

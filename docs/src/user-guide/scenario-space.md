@@ -13,6 +13,7 @@ sets the sampling method required by that analysis method:
 | GSA method | Campaign sampler | Metrics shown in Analysis |
 |---|---|---|
 | Rank correlation | Latin hypercube | Spearman rho for system cost and CO2 price |
+| Moment-independent delta | Latin hypercube | Borgonovo-style delta indices for system cost and CO2 price |
 | Morris elementary effects | Morris | `mu*` and `sigma` elementary-effect metrics |
 | Sobol variance indices | Sobol | First-order variance-index estimates for system cost and CO2 price |
 
@@ -25,9 +26,10 @@ diagnostics:
     compact regions of the sampled parameter space that repeatedly produce low
     system cost.
 - **Global sensitivity analysis.** The UI calculates method-specific GSA
-    metrics from the campaign design: rank correlations for LHS campaigns,
-    Morris elementary effects for Morris campaigns, and Sobol-style first-order
-    variance indices for Sobol campaigns.
+    metrics from the campaign design: rank correlations and moment-independent
+    Borgonovo-style delta indices for LHS campaigns, Morris elementary effects
+    for Morris campaigns, and Sobol-style first-order variance indices for Sobol
+    campaigns.
 
 For analysis to work, run a new campaign after the Analysis feature is
 available so each result row includes both objective outputs and sampled
