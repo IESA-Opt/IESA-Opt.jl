@@ -76,6 +76,11 @@ async function init() {
     safeRun("populateOptions", populateOptions);
     safeRun("populateSolvers", populateSolvers);
     safeRun("updateRunSummary", updateRunSummary);
+    safeRun("scenarioPopulateForm", () => {
+      if (window.IESAScenario && typeof window.IESAScenario.populateForm === "function") {
+        window.IESAScenario.populateForm(state.options, state.solvers);
+      }
+    });
     $("connectionStatus").textContent = "Local UI connected";
   } catch (error) {
     console.error("init: failed to load options/solvers", error);

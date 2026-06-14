@@ -25,7 +25,7 @@
   <nav class="sections" aria-label="Workspaces">
     <button class="section-button active" data-section="main" type="button">Single run</button>
     <button class="section-button" data-section="scenario" type="button">Scenario Space</button>
-    <button class="section-button" data-section="mga" type="button" disabled title="Coming soon">MGA (coming soon)</button>
+    <button class="section-button" data-section="mga" type="button" disabled title="Coming soon">Coming soon</button>
   </nav>
 
   <nav class="tabs" aria-label="Main views">
@@ -170,22 +170,82 @@
     </section>
 
     <section id="tab-scenario-setup" class="tab-panel">
-      <section class="panel">
-        <div class="panel-title">
-          <div>
-            <h2>Scenario Space Exploration</h2>
-            <p class="subtle">Define a parameter space, sample variants, and run a campaign. Phase&nbsp;1 only validates the spec and previews the sample &mdash; the campaign runner lands in Phase&nbsp;3.</p>
+      <form id="scForm" class="run-layout">
+        <aside class="run-sidebar">
+          <section class="panel run-card">
+            <p class="eyebrow">Scenario campaign</p>
+            <h2 id="scTitle">Ready to validate</h2>
+            <button id="scRunCampaignBtn" class="primary-button" type="submit" disabled title="Phase 3 hookup pending">Run campaign</button>
+            <p id="scHint" class="subtle">Validate the parameter space, then preview the sample to inspect variants.</p>
+            <dl class="summary-list">
+              <div><dt>Campaign</dt><dd id="scSelectedCampaignLabel">my_campaign</dd></div>
+              <div><dt>Method</dt><dd id="scSelectedMethod">Latin hypercube</dd></div>
+              <div><dt>Variants</dt><dd id="scSelectedVariants">100</dd></div>
+            </dl>
+          </section>
+
+          <section class="panel compact-panel">
+            <h2>Campaign Settings</h2>
+            <label class="field"><span>Campaign name</span><input id="scCampaignName" type="text" placeholder="my_campaign" value="my_campaign"></label>
+            <label class="field"><span>Sampling method</span><select id="scMethod"><option value="lhs">Latin hypercube</option><option value="morris">Morris</option><option value="sobol">Sobol</option><option value="factorial">Factorial</option></select></label>
+            <label class="field"><span>Number of variants</span><input id="scNVariants" type="number" min="1" step="1" value="100"></label>
+            <label class="field"><span>Random seed</span><input id="scSeed" type="number" min="0" step="1" value="12345"></label>
+            <div class="field"><span>Implied evaluations</span><div id="scImplied" class="custom-input-path">&mdash;</div></div>
+            <div class="field"><span>Status</span><div id="scStatus" class="custom-input-path">Not validated yet.</div></div>
+          </section>
+
+          <section class="panel compact-panel">
+            <h2>Solver Settings</h2>
+            <label class="field"><span>Solver</span><select id="scSolver"></select></label>
+            <div id="scSolverDetails" class="subtle detail-text"></div>
+            <div class="field"><span>Solve method</span><div id="scSolveMethod" class="segmented vertical"></div></div>
+            <label class="field"><span>CPU cores per worker</span><div class="range-pair"><input id="scThreads" type="range" min="0" max="64" value="0"><input id="scThreadsNumber" type="number" min="0" max="64" value="0"></div></label>
+          </section>
+        </aside>
+
+        <div class="run-main">
+          <section class="panel compact-panel">
+            <div class="panel-title"><h2>Base scenario</h2><span class="subtle" id="scScenarioSummary">Default workbook</span></div>
+            <div class="form-grid two">
+              <label class="field"><span>Scenario database</span><select id="scInputWorkbook"></select></label>
+              <div class="field"><span>Or pick a file</span><div class="browse-row"><button id="scBrowseInputButton" class="secondary-button" type="button">Browse&hellip;</button><button id="scClearCustomInputButton" class="secondary-button hidden" type="button">Clear</button></div></div>
+              <div id="scCustomInputDisplay" class="field span-2 hidden"><span>Selected file</span><div id="scCustomInputDisplayPath" class="custom-input-path"></div></div>
+              <div class="field span-2"><span>Years selection</span><div id="scPeriods" class="choice-row dense"></div></div>
+            </div>
+          </section>
+
+          <div class="main-grid">
+            <section class="panel compact-panel">
+              <h2>Solve Mode</h2>
+              <label class="toggle-field"><span>Time slicing</span><input id="scTimeSlicingToggle" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span></label>
+              <label id="scRepresentativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="scRepresentativeDays" type="range" min="1" max="100" value="30"><input id="scRepresentativeDaysNumber" type="number" min="1" max="100" value="30"></div></label>
+              <label class="field"><span>Time slices</span><input id="scTotalSlices" type="text" value="720" readonly></label>
+            </section>
+
+            <section class="panel compact-panel">
+              <h2>Temporal Resolution</h2>
+              <div id="scHoursPerDayField" class="field hidden"><span>Hours in a day</span><div id="scHoursPerDay" class="choice-row compact"></div></div>
+              <label id="scClusteringApproachField" class="field"><span>Clustering approach</span><select id="scClusteringApproach"></select></label>
+              <label id="scExtremeDaysField" class="field"><span>Extreme days</span><input id="scExtremeDays" type="number" min="0" max="30" value="5"></label>
+            </section>
           </div>
+
+          <section class="panel compact-panel">
+            <details open>
+              <summary>Reporting and advanced settings</summary>
+              <div class="form-grid three advanced-grid">
+                <label class="field checkbox"><input id="scHourlyReports" type="checkbox" checked><span>Hourly reports</span></label>
+                <label class="field checkbox"><input id="scShowViolations" type="checkbox"><span>Show violations</span></label>
+                <label class="field checkbox"><input id="scExtremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
+                <label class="field checkbox"><input id="scBoundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
+                <label class="field"><span>Constraint group</span><select id="scConstraintGroup"></select></label>
+                <label class="field"><span>Output naming</span><select id="scOutputMode"><option value="automatic">Automatic</option><option value="custom">Custom prefix</option></select></label>
+                <label id="scOutputNameWrap" class="field hidden"><span>Custom prefix</span><input id="scOutputName" type="text" placeholder="my_campaign"></label>
+              </div>
+            </details>
+          </section>
         </div>
-        <div class="form-grid three">
-          <label class="field"><span>Campaign name</span><input id="scCampaignName" type="text" placeholder="my_campaign" value="my_campaign"></label>
-          <label class="field"><span>Sampling method</span><select id="scMethod"><option value="lhs">Latin hypercube</option><option value="morris">Morris</option><option value="sobol">Sobol</option><option value="factorial">Factorial</option></select></label>
-          <label class="field"><span>Number of variants</span><input id="scNVariants" type="number" min="1" step="1" value="100"></label>
-          <label class="field"><span>Random seed</span><input id="scSeed" type="number" min="0" step="1" value="12345"></label>
-          <div class="field"><span>Implied evaluations</span><div id="scImplied" class="custom-input-path">&mdash;</div></div>
-          <div class="field"><span>Status</span><div id="scStatus" class="custom-input-path">Not validated yet.</div></div>
-        </div>
-      </section>
+      </form>
 
       <section class="panel">
         <div class="panel-title">
@@ -194,26 +254,14 @@
             <button id="scAddRow" type="button" class="secondary-button">+ Add row</button>
             <button id="scDuplicateRow" type="button" class="secondary-button">Duplicate</button>
             <button id="scRemoveRow" type="button" class="danger-button">Remove selected</button>
+            <span class="sc-col-add-wrap"><button id="scAddColumnBtn" type="button" class="secondary-button" title="Add a hidden column back">+ Column</button><div id="scAddColumnMenu" class="sc-col-menu hidden"></div></span>
             <button id="scValidateBtn" type="button" class="secondary-button">Validate</button>
             <button id="scPreviewBtn" type="button" class="primary-button" style="width:auto;">Preview sample</button>
           </div>
         </div>
         <div class="table-wrap" style="max-height:none;overflow:visible;">
           <table id="scTable" class="sc-table">
-            <thead>
-              <tr>
-                <th style="width:32px"></th>
-                <th>Parameter</th>
-                <th>Sub-parameter</th>
-                <th>Sheet</th>
-                <th>Cell</th>
-                <th>Type</th>
-                <th>Min</th>
-                <th>Max</th>
-                <th>Step</th>
-                <th>Notes</th>
-              </tr>
-            </thead>
+            <thead id="scTableHead"></thead>
             <tbody id="scTableBody"></tbody>
           </table>
         </div>
@@ -230,12 +278,38 @@
     </section>
 
     <section id="tab-scenario-progress" class="tab-panel">
+      <section class="panel campaign-overview">
+        <div class="panel-title">
+          <div>
+            <h2 id="campaignTitle">Campaign progress</h2>
+            <p class="subtle"><span id="campaignSubtitle">No campaign running.</span> &mdash; <span id="campaignEta" class="subtle">ETA: &mdash;</span></p>
+          </div>
+          <div class="campaign-actions">
+            <span id="campaignStatusPill" class="status-pill muted">Idle</span>
+            <button id="campaignDemoStart" class="secondary-button" type="button">Start demo</button>
+            <button id="campaignDemoStop" class="secondary-button hidden" type="button">Stop demo</button>
+          </div>
+        </div>
+        <div class="campaign-stats">
+          <div class="campaign-stat"><span class="stat-label">Total</span><span id="campaignTotal" class="stat-value">0</span></div>
+          <div class="campaign-stat done"><span class="stat-label">Done</span><span id="campaignDone" class="stat-value">0</span></div>
+          <div class="campaign-stat running"><span class="stat-label">Running</span><span id="campaignRunning" class="stat-value">0</span></div>
+          <div class="campaign-stat failed"><span class="stat-label">Failed</span><span id="campaignFailed" class="stat-value">0</span></div>
+          <div class="campaign-stat queued"><span class="stat-label">Queued</span><span id="campaignQueued" class="stat-value">0</span></div>
+          <div class="campaign-stat workers"><span class="stat-label">Workers</span><span id="campaignWorkers" class="stat-value">0</span></div>
+        </div>
+        <div class="campaign-bar-wrap">
+          <div class="campaign-bar"><div id="campaignBarFill" class="campaign-bar-fill" style="width:0%"></div><div id="campaignBarFailed" class="campaign-bar-failed" style="width:0%"></div></div>
+          <div class="campaign-bar-meta"><span id="campaignPct">0%</span><span id="campaignElapsed">Elapsed: &mdash;</span></div>
+        </div>
+      </section>
+
       <section class="panel">
         <div class="panel-title">
-          <h2>Campaign progress</h2>
-          <p class="subtle">Live progress for the running campaign &mdash; UI hookup lands with the Phase&nbsp;3 runner integration.</p>
+          <h2>Workers</h2>
+          <div class="panel-toolbar"><span class="subtle worker-legend"><span class="worker-legend-dot status-running"></span>running <span class="worker-legend-dot status-done"></span>optimal <span class="worker-legend-dot status-failed"></span>failed <span class="worker-legend-dot status-idle"></span>idle</span></div>
         </div>
-        <p class="subtle">No campaign running. Configure a campaign on the <strong>Setup</strong> tab and launch it to see per-variant progress here.</p>
+        <div id="workerGrid" class="worker-grid empty-state">No workers active. Start a campaign or click <em>Start demo</em> to preview the layout.</div>
       </section>
     </section>
 
