@@ -54,7 +54,8 @@ end
 
 Default HiGHS attributes for license-free CI / development. HiGHS interior
 point uses different attribute names than Gurobi; this mapping picks the
-closest equivalents.
+closest equivalents. The IPM tolerances are the settings used for the IESA
+LPs where HiGHS needs a looser crossover start tolerance than Gurobi.
 """
 function default_highs_attributes(; threads::Int = 0)::Dict{String,Any}
     Dict{String,Any}(
@@ -62,9 +63,10 @@ function default_highs_attributes(; threads::Int = 0)::Dict{String,Any}
         "parallel"             => "on",
         "threads"              => threads,
         "presolve"             => "on",
-        "primal_feasibility_tolerance"   => 1e-7,
-        "dual_feasibility_tolerance"     => 1e-7,
-        "ipm_optimality_tolerance"       => 1e-8,
+        "primal_feasibility_tolerance"   => 1e-6,
+        "dual_feasibility_tolerance"     => 1e-6,
+        "ipm_optimality_tolerance"       => 1e-4,
+        "start_crossover_tolerance"      => 1e-4,
         "output_flag"          => true,
         "log_to_console"       => true,
         "run_crossover"        => "off",            # skip crossover, accept IPM endpoint

@@ -54,6 +54,18 @@ attrs = IESAOpt.default_highs_attributes(; threads = 4)
 model = Model(IESAOpt.highs_optimizer(; attrs = attrs))
 ```
 
+The HiGHS preset uses IPM with crossover off by default. When the UI or a
+script selects `barrier_crossover`, IESA-Opt requests HiGHS IPM crossover and
+sets the validated crossover tolerances used for the large LPs. Post-crossover
+simplex cleanup can be disabled for benchmark-style timing runs by setting
+`simplex_iteration_limit = 0`; those runs can time barrier+crossover, but they
+may not expose a full JuMP solution for result-table writing.
+
+When running from the UI, the selected solver and solve method are mapped to
+that solver's own controls: Gurobi, HiGHS, CPLEX, and XPRESS each receive their
+own barrier, barrier+crossover, concurrent, primal-simplex, or dual-simplex
+attributes where the solver supports them.
+
 ## Persistent Run Settings
 
 Run-specific choices such as workbook path, output folder, representative-day count, and thread count can be placed in a local wrapper script under `local/`. That folder is ignored by Git, so users can keep machine-specific settings without changing repository files.

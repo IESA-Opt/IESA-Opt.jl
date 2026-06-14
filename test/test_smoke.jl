@@ -31,6 +31,40 @@ end
     @test h["solver"]              == "ipm"
     @test h["run_crossover"]       == "off"
     @test h["parallel"]            == "on"
+    @test h["primal_feasibility_tolerance"] == 1e-6
+    @test h["dual_feasibility_tolerance"] == 1e-6
+    @test h["ipm_optimality_tolerance"] == 1e-4
+    @test h["start_crossover_tolerance"] == 1e-4
+end
+
+@testset "UI solve method mappings" begin
+    g = IESAOpt.default_gurobi_attributes()
+    IESAOpt._apply_gurobi_method!(g, "barrier_crossover")
+    @test g["Method"] == 2
+    @test g["Crossover"] == -1
+    @test !haskey(g, "BarHomogeneous")
+
+    h = IESAOpt.default_highs_attributes(; threads = 6)
+    IESAOpt._apply_highs_method!(h, "barrier_crossover")
+    @test h["solver"] == "ipm"
+    @test h["run_crossover"] == "on"
+    @test h["simplex_iteration_limit"] == 0
+    @test h["threads"] == 6
+
+    c = IESAOpt._cplex_attributes("barrier", 6)
+    @test c["CPX_PARAM_LPMETHOD"] == 4
+    @test c["CPX_PARAM_BARCROSSALG"] == 0
+    @test c["CPX_PARAM_THREADS"] == 6
+    c = IESAOpt._cplex_attributes("barrier_crossover", 6)
+    @test c["CPX_PARAM_LPMETHOD"] == 4
+    @test c["CPX_PARAM_BARCROSSALG"] == -1
+
+    x = IESAOpt._xpress_attributes("barrier", 6)
+    @test x["DEFAULTALG"] == 3
+    @test x["CROSSOVER"] == 0
+    @test x["THREADS"] == 6
+    x = IESAOpt._xpress_attributes("dual_simplex", 6)
+    @test x["DEFAULTALG"] == 2
 end
 
 @testset "Temporal helpers compute when hours_orig populated" begin

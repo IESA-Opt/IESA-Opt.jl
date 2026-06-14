@@ -1528,17 +1528,28 @@ function _apply_highs_method!(attrs::Dict{String,Any}, method::AbstractString)
     if m == "barrier"
         attrs["solver"] = "ipm"
         attrs["run_crossover"] = "off"
+        attrs["simplex_iteration_limit"] = Int(typemax(Int32))
     elseif m == "barrier_crossover"
         attrs["solver"] = "ipm"
         attrs["run_crossover"] = "on"
+        attrs["primal_feasibility_tolerance"] = 1e-6
+        attrs["dual_feasibility_tolerance"] = 1e-6
+        attrs["ipm_optimality_tolerance"] = 1e-4
+        attrs["start_crossover_tolerance"] = 1e-4
+        attrs["max_dual_simplex_cleanup_level"] = 0
+        attrs["max_dual_simplex_phase1_cleanup_level"] = 0
+        attrs["simplex_iteration_limit"] = 0
     elseif m == "concurrent"
         attrs["solver"] = "choose"
+        attrs["simplex_iteration_limit"] = Int(typemax(Int32))
     elseif m == "primal_simplex"
         attrs["solver"] = "simplex"
         attrs["simplex_strategy"] = 4
+        attrs["simplex_iteration_limit"] = Int(typemax(Int32))
     elseif m == "dual_simplex"
         attrs["solver"] = "simplex"
         attrs["simplex_strategy"] = 1
+        attrs["simplex_iteration_limit"] = Int(typemax(Int32))
     end
     return attrs
 end
@@ -1547,14 +1558,21 @@ function _cplex_attributes(method::AbstractString, threads::Int)
     attrs = Dict{String,Any}()
     threads > 0 && (attrs["CPX_PARAM_THREADS"] = threads)
     m = lowercase(String(method))
-    if m == "barrier" || m == "barrier_crossover"
+    if m == "barrier"
         attrs["CPX_PARAM_LPMETHOD"] = 4
+        attrs["CPX_PARAM_BARCROSSALG"] = 0
+    elseif m == "barrier_crossover"
+        attrs["CPX_PARAM_LPMETHOD"] = 4
+        attrs["CPX_PARAM_BARCROSSALG"] = -1
     elseif m == "concurrent"
         attrs["CPX_PARAM_LPMETHOD"] = 6
+        attrs["CPX_PARAM_BARCROSSALG"] = -1
     elseif m == "primal_simplex"
         attrs["CPX_PARAM_LPMETHOD"] = 1
+        attrs["CPX_PARAM_BARCROSSALG"] = -1
     elseif m == "dual_simplex"
         attrs["CPX_PARAM_LPMETHOD"] = 2
+        attrs["CPX_PARAM_BARCROSSALG"] = -1
     end
     return attrs
 end
@@ -1562,6 +1580,18 @@ end
 function _xpress_attributes(method::AbstractString, threads::Int)
     attrs = Dict{String,Any}()
     threads > 0 && (attrs["THREADS"] = threads)
+    m = lowercase(String(method))
+    if m == "barrier"
+        attrs["DEFAULTALG"] = 3
+        attrs["CROSSOVER"] = 0
+    elseif m == "barrier_crossover"
+        attrs["DEFAULTALG"] = 3
+        attrs["CROSSOVER"] = 1
+    elseif m == "primal_simplex"
+        attrs["DEFAULTALG"] = 1
+    elseif m == "dual_simplex"
+        attrs["DEFAULTALG"] = 2
+    end
     return attrs
 end
 
