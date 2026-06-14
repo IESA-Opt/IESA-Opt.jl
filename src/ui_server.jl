@@ -4200,7 +4200,7 @@ when validation fails — the UI is responsible for displaying messages.
 """
 function _scenario_validate(body)
     try
-        spec = spec_from_dict(body)
+        spec = _scenario_spec_with_gsa_method(spec_from_dict(body), body)
         v = _validate_scenario_direct_run_spec(spec, _scenario_input_path(body))
         return Dict{String,Any}(
             "valid" => v.valid,
@@ -4232,7 +4232,7 @@ function _scenario_preview(body)
     preview_rows = Int(_config_get(body, "previewRows", 20))
     preview_rows = clamp(preview_rows, 1, 200)
     try
-        spec = spec_from_dict(body)
+        spec = _scenario_spec_with_gsa_method(spec_from_dict(body), body)
         v = _validate_scenario_direct_run_spec(spec, _scenario_input_path(body))
         v.valid || return Dict{String,Any}(
             "ok" => false,
@@ -4265,6 +4265,33 @@ function _scenario_preview(body)
             "warnings" => String[],
         )
     end
+end
+
+function _scenario_gsa_method(body)
+    raw = lowercase(strip(String(_config_get(body, "gsaMethod", _config_get(body, "gsa_method", "rank")))))
+    raw in ("morris", "elementary", "elementary-effects", "elementary_effects") && return "morris"
+    raw in ("sobol", "variance", "variance-based", "variance_based") && return "sobol"
+    return "rank"
+end
+
+function _scenario_sampler_for_gsa(method::AbstractString, fallback::Symbol)
+    method == "morris" && return :morris
+    method == "sobol" && return :sobol
+    method == "rank" && return :lhs
+    return fallback
+end
+
+function _scenario_spec_with_gsa_method(spec::CampaignSpec, body)
+    gsa_method = _scenario_gsa_method(body)
+    sampler = _scenario_sampler_for_gsa(gsa_method, spec.method)
+    sampler == spec.method && return spec
+    return CampaignSpec(
+        name = spec.name,
+        method = sampler,
+        n_variants = spec.n_variants,
+        seed = spec.seed,
+        rows = spec.rows,
+    )
 end
 
 # =============================================================================
@@ -4802,7 +4829,7 @@ frontend uses to drive button visibility. Possible values:
 """
 function _campaign_session_skeleton(id::String, spec, n_workers::Int,
                                     threads_per_worker::Int, solver::Symbol,
-                                    mode::Symbol)
+                                    mode::Symbol; gsa_method::AbstractString = "rank")
     workers = [Dict{String,Any}(
         "id" => i,
         "status" => "idle",
@@ -4824,6 +4851,7 @@ function _campaign_session_skeleton(id::String, spec, n_workers::Int,
             "id" => id,
             "name" => spec.name,
             "method" => String(spec.method),
+            "gsa_method" => String(gsa_method),
             "total" => spec.n_variants,
             "n_workers" => max(1, n_workers),
             "threads_per_worker" => threads_per_worker,
@@ -4860,7 +4888,8 @@ surface error messages without distinguishing HTTP status codes.
 """
 function _scenario_run(body)
     try
-        spec = spec_from_dict(body)
+        gsa_method = _scenario_gsa_method(body)
+        spec = _scenario_spec_with_gsa_method(spec_from_dict(body), body)
         input_path = _scenario_input_path(body)
         v = _validate_scenario_direct_run_spec(spec, input_path)
         v.valid || return Dict{String,Any}(
@@ -4913,7 +4942,8 @@ function _scenario_run(body)
         # Allocate id and snapshot
         id = "camp_" * Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
         snapshot = _campaign_session_skeleton(id, scenario_spec, n_workers,
-                                              threads_per_worker, solver_sym, mode_sym)
+                                              threads_per_worker, solver_sym, mode_sym;
+                                              gsa_method = gsa_method)
         cancel_ref = Ref(false)
         state = Dict{Symbol,Any}(
             :input_path         => input_path,

@@ -6,18 +6,28 @@ campaign. Each variant solves a slightly different LP; the runner returns a
 table of objectives + leaf values + solver diagnostics that you can save to
 DuckDB or CSV and post-process with the bundled analysis helpers.
 
-The local UI adds an **Analysis** sheet to Scenario Space campaigns. It reads
-completed campaign results and provides two first-pass diagnostics:
+The local UI adds an **Analysis** sheet to Scenario Space campaigns. In the
+setup page, choose a **GSA method** before launching the campaign. The UI then
+sets the sampling method required by that analysis method:
+
+| GSA method | Campaign sampler | Metrics shown in Analysis |
+|---|---|---|
+| Rank correlation | Latin hypercube | Spearman rho for system cost and CO2 price |
+| Morris elementary effects | Morris | `mu*` and `sigma` elementary-effect metrics |
+| Sobol variance indices | Sobol | First-order variance-index estimates for system cost and CO2 price |
+
+The Analysis sheet reads completed campaign results and provides two
+diagnostics:
 
 - **Scenario Discovery (PRIM-style).** The UI treats the lowest-cost quartile
     as the outcome of interest, then reports parameter boxes with density,
     coverage, mass, and mean system cost. These boxes are intended to identify
     compact regions of the sampled parameter space that repeatedly produce low
     system cost.
-- **Global sensitivity analysis.** The UI ranks sampled inputs by Spearman
-    rank correlation against system cost and CO2 price. This is sampling-method
-    agnostic and works with LHS, Sobol, Morris, and factorial campaigns; later
-    method-specific indices can be linked to the sampler metadata.
+- **Global sensitivity analysis.** The UI calculates method-specific GSA
+    metrics from the campaign design: rank correlations for LHS campaigns,
+    Morris elementary effects for Morris campaigns, and Sobol-style first-order
+    variance indices for Sobol campaigns.
 
 For analysis to work, run a new campaign after the Analysis feature is
 available so each result row includes both objective outputs and sampled
