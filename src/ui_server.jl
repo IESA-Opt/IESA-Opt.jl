@@ -4,6 +4,7 @@
 
 using HTTP
 using JSON3
+import Distributed
 
 const UI_JOBS = Dict{String,Dict{String,Any}}()
 const UI_TASKS = Dict{String,Task}()
@@ -15,6 +16,14 @@ const UI_JOBS_LOCK = ReentrantLock()
 const UI_CAMPAIGNS = Dict{String,Dict{String,Any}}()
 const UI_CAMPAIGN_TASKS = Dict{String,Task}()
 const UI_CAMPAIGN_CANCEL = Dict{String,Ref{Bool}}()
+# Per-campaign mutable state needed for pause/resume. Holds the heavy
+# objects (loaded ModelData, the pre-sampled per-variant change lists,
+# settings) so a resume call can re-launch run_campaign on only the
+# variants that have not yet completed without redoing
+# read+derive+cluster+sample. Kept out of UI_CAMPAIGNS because the
+# values are not JSON-serialisable and would slow down every status
+# poll's deepcopy.
+const UI_CAMPAIGN_STATE = Dict{String,Dict{Symbol,Any}}()
 const UI_CAMPAIGNS_LOCK = ReentrantLock()
 const COMMERCIAL_SOLVER_IDS = ("gurobi", "cplex", "xpress")
 const UI_MAX_LOG_LINES = 5000
@@ -189,6 +198,10 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         parts = _url_parts(path)
         if length(parts) == 4 && parts[3] == "stop"
             return _json_response(_scenario_stop!(parts[4]))
+        elseif length(parts) == 4 && parts[3] == "pause"
+            return _json_response(_scenario_pause!(parts[4]))
+        elseif length(parts) == 4 && parts[3] == "resume"
+            return _json_response(_scenario_resume!(parts[4]))
         end
     elseif method == "GET" && startswith(path, "/api/jobs/")
         parts = _url_parts(path)
@@ -304,7 +317,7 @@ function _ui_options()
             "periods" => [2050],
             "mode" => "timeslice",
             "hoursPerDay" => 24,
-            "representativeDays" => 30,
+            "representativeDays" => 15,
             "solver" => _preferred_default_solver_id(),
             "solveMethod" => "barrier_crossover",
             "threads" => 0,
@@ -1096,7 +1109,7 @@ function _normalize_run_config(raw_config)
         out_name = _sanitize_run_name(output_name)
     else
         stamp = Dates.format(now(), "yymmdd_HHMMSS")
-        rep_days = _as_int(_config_get(raw_config, "representativeDays", 30), 30)
+        rep_days = _as_int(_config_get(raw_config, "representativeDays", 15), 15)
         hours_per_day = _as_int(_config_get(raw_config, "hoursPerDay", 24), 24)
         mode_tag = mode == "timeslice" ? "$(rep_days)rd" : "$(hours_per_day)h"
         periods_tag = isempty(periods) ? "" : join(string.(periods), "-")
@@ -1110,7 +1123,7 @@ function _normalize_run_config(raw_config)
         "periods" => periods,
         "mode" => mode,
         "hoursPerDay" => _as_int(_config_get(raw_config, "hoursPerDay", 24), 24),
-        "representativeDays" => _as_int(_config_get(raw_config, "representativeDays", 30), 30),
+        "representativeDays" => _as_int(_config_get(raw_config, "representativeDays", 15), 15),
         "solver" => lowercase(String(_config_get(raw_config, "solver", "highs"))),
         "solveMethod" => lowercase(String(_config_get(raw_config, "solveMethod", "barrier_crossover"))),
         "threads" => _as_int(_config_get(raw_config, "threads", 0), 0),
@@ -3228,6 +3241,11 @@ end
 Build the JSON-serialisable snapshot dict that the browser polls.
 `workers` is a fixed-length vector with one entry per worker slot;
 `campaign` carries the meta-fields the dashboard renders.
+
+The `state` field on `campaign` is the canonical lifecycle indicator the
+frontend uses to drive button visibility. Possible values:
+  "queued" | "preparing" | "running" | "pausing" | "paused" |
+  "resuming" | "cancelling" | "cancelled" | "completed" | "failed"
 """
 function _campaign_session_skeleton(id::String, spec, n_workers::Int,
                                     threads_per_worker::Int, solver::Symbol,
@@ -3241,6 +3259,11 @@ function _campaign_session_skeleton(id::String, spec, n_workers::Int,
         "failed" => 0,
         "progress" => 0.0,
         "started_at" => nothing,
+        "pid" => nothing,
+        "rss_bytes" => 0,
+        "last_error" => nothing,
+        "last_term" => nothing,
+        "last_failed_variant" => nothing,
     ) for i in 1:max(1, n_workers)]
     return Dict{String,Any}(
         "campaign" => Dict{String,Any}(
@@ -3256,8 +3279,11 @@ function _campaign_session_skeleton(id::String, spec, n_workers::Int,
             "completed" => 0,
             "failed" => 0,
             "status" => "queued",
+            "state" => "queued",
+            "stage" => "Queued",
         ),
         "workers" => workers,
+        "failures" => Vector{Dict{String,Any}}(),  # most-recent first, capped
         "done" => false,
         "error" => nothing,
     )
@@ -3330,20 +3356,33 @@ function _scenario_run(body)
         snapshot = _campaign_session_skeleton(id, scenario_spec, n_workers,
                                               threads_per_worker, solver_sym, mode_sym)
         cancel_ref = Ref(false)
+        state = Dict{Symbol,Any}(
+            :input_path         => input_path,
+            :periods            => periods,
+            :scenario_spec      => scenario_spec,
+            :n_workers          => n_workers,
+            :threads_per_worker => threads_per_worker,
+            :solver             => solver_sym,
+            :mode               => mode_sym,
+            # Filled in by _prepare_campaign_state! on the first run; reused
+            # by every subsequent /resume so we never re-read the workbook.
+            :base_md            => nothing,
+            :all_changes        => nothing,
+            :completed          => Set{Int}(),
+            :prepared           => false,
+        )
         lock(UI_CAMPAIGNS_LOCK)
         try
             UI_CAMPAIGNS[id] = snapshot
             UI_CAMPAIGN_CANCEL[id] = cancel_ref
+            UI_CAMPAIGN_STATE[id] = state
         finally
             unlock(UI_CAMPAIGNS_LOCK)
         end
 
         # Launch background task. All updates go through helpers that take
         # the lock; renderProgress on the browser side reads via /status.
-        task = Base.Threads.@spawn _run_campaign_task!(id, input_path, periods,
-                                                      scenario_spec, n_workers,
-                                                      threads_per_worker, solver_sym,
-                                                      mode_sym, cancel_ref)
+        task = Base.Threads.@spawn _run_campaign_task!(id, cancel_ref)
         lock(UI_CAMPAIGNS_LOCK)
         try
             UI_CAMPAIGN_TASKS[id] = task
@@ -3367,105 +3406,281 @@ function _scenario_run(body)
 end
 
 """
-    _run_campaign_task!(id, input_path, periods, scenario_spec, n_workers,
-                        threads_per_worker, solver, mode, cancel)
+    _run_campaign_task!(id, cancel)
 
-Background task that loads ModelData, primes derivations/clustering as
-required by `mode`, and calls `run_scenario_space` with callbacks that
-update the JSON snapshot. Catches all errors and records them on the
-snapshot so the UI can surface them.
+Background task body. On the first call it primes ModelData + samples the
+spec (heavy work, done once and cached in `UI_CAMPAIGN_STATE[id]`); then
+it executes the variants that have not yet completed. On every later call
+(triggered by `/api/scenario/resume/<id>`) it skips the prep and just
+executes the still-pending variants.
+
+`cancel[]` is honoured between variants by the orchestrator. Setting it
+mid-run causes `run_campaign` to drain its in-flight variants and return;
+this task then either parks in the "paused" state (waiting for /resume)
+or terminates in "cancelled" (terminal stop). Which one is decided by
+the value of `state[:terminal_stop]` at return time.
 """
-function _run_campaign_task!(id::String, input_path::String, periods::Vector{Int},
-                             scenario_spec, n_workers::Int, threads_per_worker::Int,
-                             solver::Symbol, mode::Symbol, cancel::Ref{Bool})
+function _run_campaign_task!(id::String, cancel::Ref{Bool})
     try
-        _campaign_update!(id) do snap
-            snap["campaign"]["status"] = "reading"
-            snap["campaign"]["stage"] = "Reading workbook"
+        state = _campaign_state(id)
+        state === nothing && return nothing
+
+        if !state[:prepared]
+            _prepare_campaign_state!(id)
+            state[:prepared] = true
         end
-        md = _read_ui_data_cached(input_path)
-        if !isempty(periods)
-            selected = [p for p in periods if p in md.sets.periods]
-            if !isempty(selected)
-                md.sets.periods_solve = selected
+
+        _execute_pending_variants!(id, cancel)
+    catch err
+        msg = sprint(showerror, err)
+        @error "Campaign task failed" id error=msg exception=(err, catch_backtrace())
+        _campaign_update!(id) do snap
+            snap["campaign"]["status"] = "failed"
+            snap["campaign"]["state"] = "failed"
+            snap["campaign"]["stage"] = "Failed: $msg"
+            snap["done"] = true
+            snap["error"] = msg
+        end
+    end
+    return nothing
+end
+
+"""
+    _campaign_state(id) -> Dict{Symbol,Any} or nothing
+
+Fetch the mutable per-campaign state dict (held outside UI_CAMPAIGNS
+because its values aren't JSON-serialisable). Returns `nothing` if the
+campaign has been forgotten.
+"""
+function _campaign_state(id::AbstractString)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        return get(UI_CAMPAIGN_STATE, String(id), nothing)
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+end
+
+"""
+    _prepare_campaign_state!(id)
+
+One-time setup: read the workbook (cached), derive sets/params, cluster
+representative days if needed, then sample the scenario space and
+generate the per-variant change lists. Results are stored in
+`UI_CAMPAIGN_STATE[id]` so /resume can re-use them without re-reading.
+"""
+function _prepare_campaign_state!(id::String)
+    state = _campaign_state(id)
+    state === nothing && return nothing
+
+    _campaign_update!(id) do snap
+        snap["campaign"]["status"] = "reading"
+        snap["campaign"]["state"] = "preparing"
+        snap["campaign"]["stage"] = "Reading workbook"
+    end
+    md = _read_ui_data_cached(state[:input_path])
+    periods = state[:periods]
+    if !isempty(periods)
+        selected = [p for p in periods if p in md.sets.periods]
+        if !isempty(selected)
+            md.sets.periods_solve = selected
+        end
+    end
+
+    _campaign_update!(id) do snap
+        snap["campaign"]["status"] = "preparing"
+        snap["campaign"]["state"] = "preparing"
+        snap["campaign"]["stage"] = "Deriving sets and parameters"
+    end
+    derive_sets!(md)
+    compute_derived_params!(md)
+    if state[:mode] == :ts
+        _campaign_update!(id) do snap
+            snap["campaign"]["stage"] = "Clustering representative days"
+        end
+        build_temporal_clusters!(md)
+    end
+
+    _campaign_update!(id) do snap
+        snap["campaign"]["stage"] = "Sampling scenario space"
+    end
+    spec = state[:scenario_spec]
+    samples = sample_scenario_space(spec)
+    all_changes = samples_to_changes(spec, samples)
+
+    state[:base_md]     = md
+    state[:samples]     = samples
+    state[:all_changes] = all_changes
+    return nothing
+end
+
+"""
+    _execute_pending_variants!(id, cancel)
+
+Compute the set of variants that have not yet completed and dispatch
+them via `run_campaign`. On normal return (all done) the snapshot is
+flipped to "completed". On a cooperative cancel that was triggered by
+/api/scenario/pause/<id>, the snapshot lands in "paused" and the cached
+state is left intact so /resume can pick up where we left off. On a
+cancel triggered by /api/scenario/stop/<id> the snapshot lands in
+"cancelled" (terminal).
+"""
+function _execute_pending_variants!(id::String, cancel::Ref{Bool})
+    state = _campaign_state(id)
+    state === nothing && return nothing
+
+    all_changes = state[:all_changes]::AbstractVector
+    total = length(all_changes)
+    completed = state[:completed]::Set{Int}
+    pending = sort!(collect(setdiff(1:total, completed)))
+
+    if isempty(pending)
+        _campaign_update!(id) do snap
+            snap["campaign"]["status"] = "completed"
+            snap["campaign"]["state"] = "completed"
+            snap["campaign"]["stage"] = "All variants completed"
+            snap["done"] = true
+        end
+        return nothing
+    end
+
+    nw = max(1, state[:n_workers]::Int)
+    # Round-robin worker assignment uses the original variant_id so the
+    # dashboard's worker grid stays stable across pause/resume cycles.
+    assign_worker = vid -> ((vid - 1) % nw) + 1
+
+    _campaign_update!(id) do snap
+        snap["campaign"]["status"] = "running"
+        snap["campaign"]["state"] = "running"
+        snap["campaign"]["stage"] = string("Solving variants (",
+                                           length(pending), " pending of ",
+                                           total, ")")
+        for w in snap["workers"]
+            if w["status"] == "idle"
+                # leave counters intact; just mark as queued so the UI
+                # shows it as picked up by the running campaign
+                w["progress"] = 0.0
             end
         end
+    end
 
+    # The runner numbers variants 1..length(subset_changes); we translate
+    # back to the original 1..total index for the snapshot.
+    subset_changes = all_changes[pending]
+    on_progress = function (info)
+        cancel[] && return
+        real_vid = pending[info.variant_id]
+        wid = assign_worker(real_vid)
         _campaign_update!(id) do snap
-            snap["campaign"]["status"] = "preparing"
-            snap["campaign"]["stage"] = "Deriving sets and parameters"
-        end
-        derive_sets!(md)
-        compute_derived_params!(md)
-        if mode == :ts
-            _campaign_update!(id) do snap
-                snap["campaign"]["stage"] = "Clustering representative days"
+            w = snap["workers"][wid]
+            if info.stage == "start"
+                w["status"] = "running"
+                w["variant_id"] = real_vid
+                w["assigned"] += 1
+                w["started_at"] = time()
+                w["progress"] = 0.0
+            elseif info.stage == "done"
+                res = get(info, :result, nothing)
+                term = res === nothing ? "UNKNOWN" : String(res.term_status)
+                failed = res === nothing ? false :
+                         !(uppercase(term) in ("OPTIMAL", "LOCALLY_SOLVED"))
+                w["status"] = failed ? "failed" : "done"
+                w["variant_id"] = real_vid
+                if failed
+                    w["failed"] += 1
+                    snap["campaign"]["failed"] += 1
+                    # Record diagnostic details on the worker card AND in a
+                    # campaign-wide failures list so the UI can show them.
+                    err_text = (res === nothing || res.error === nothing) ?
+                               "No error message (term=$term)" :
+                               String(res.error)
+                    w["last_error"] = err_text
+                    w["last_term"] = term
+                    w["last_failed_variant"] = real_vid
+                    failures = snap["failures"]::Vector{Dict{String,Any}}
+                    pushfirst!(failures, Dict{String,Any}(
+                        "variant_id" => real_vid,
+                        "worker_id" => wid,
+                        "worker_pid" => (res === nothing ? nothing : res.worker_pid),
+                        "term_status" => term,
+                        "error" => err_text,
+                        "at" => time(),
+                    ))
+                    # Cap to 50 most recent failures to keep snapshot small.
+                    length(failures) > 50 && resize!(failures, 50)
+                else
+                    w["completed"] += 1
+                    snap["campaign"]["completed"] += 1
+                end
+                w["progress"] = 1.0
             end
-            build_temporal_clusters!(md)
         end
+        if info.stage == "done"
+            # Variant is durably done — record it so /resume skips it.
+            push!(completed, real_vid)
+        end
+    end
 
+    on_result = function (_r)
+        # Reserved for streaming per-variant detail (results table /
+        # DuckDB write). on_progress already drives the dashboard.
+        return nothing
+    end
+
+    md = state[:base_md]
+    t0 = time()
+    # Start a background RAM sampler that polls peak RSS on each Distributed
+    # worker (or the master, for the in-process serial path) every 2 s and
+    # writes the result into the snapshot. The sampler stops itself when
+    # `sampler_done[]` is set; we set it right after run_campaign returns.
+    sampler_done = Ref(false)
+    sampler = Base.Threads.@spawn _campaign_rss_sampler!(id, sampler_done)
+    try
+        run_campaign(md, subset_changes;
+                     n_workers = state[:n_workers],
+                     threads_per_worker = state[:threads_per_worker],
+                     solver = state[:solver],
+                     mode = state[:mode],
+                     cancel = cancel,
+                     on_progress = on_progress,
+                     on_result = on_result)
+    finally
+        sampler_done[] = true
+        try; wait(sampler); catch; end
+    end
+    leg_seconds = round(time() - t0, digits = 3)
+
+    # Decide why we returned. If cancel was raised, /pause vs /stop is
+    # signalled by the snapshot's current state field which the handler
+    # set before flipping the Ref.
+    snap_state_after = _campaign_snapshot_field(id, "state")
+    cancelled = cancel[]
+    if cancelled && snap_state_after == "pausing"
         _campaign_update!(id) do snap
-            snap["campaign"]["status"] = "running"
-            snap["campaign"]["stage"] = "Solving variants"
-        end
-
-        # round-robin worker assignment so each variant has a worker slot
-        # the UI can colour. Distributed dispatch order is not strictly
-        # round-robin, but using `(variant_id - 1) % n_workers + 1` keeps
-        # the dashboard busy-looking even on small n.
-        nw = max(1, n_workers)
-        assign_worker = vid -> ((vid - 1) % nw) + 1
-
-        on_progress = function (info)
-            cancel[] && return
-            wid = assign_worker(info.variant_id)
-            _campaign_update!(id) do snap
-                w = snap["workers"][wid]
-                if info.stage == "start"
-                    w["status"] = "running"
-                    w["variant_id"] = info.variant_id
-                    w["assigned"] += 1
-                    w["started_at"] = time()
-                    w["progress"] = 0.0
-                elseif info.stage == "done"
-                    res = get(info, :result, nothing)
-                    failed = res === nothing ? false :
-                             !(uppercase(res.term_status) in ("OPTIMAL", "LOCALLY_SOLVED"))
-                    w["status"] = failed ? "failed" : "done"
-                    w["variant_id"] = info.variant_id
-                    if failed
-                        w["failed"] += 1
-                        snap["campaign"]["failed"] += 1
-                    else
-                        w["completed"] += 1
-                        snap["campaign"]["completed"] += 1
-                    end
-                    w["progress"] = 1.0
+            snap["campaign"]["status"] = "paused"
+            snap["campaign"]["state"] = "paused"
+            snap["campaign"]["stage"] = string("Paused after ",
+                                               snap["campaign"]["completed"], "/",
+                                               snap["campaign"]["total"],
+                                               " variants — press Resume to continue")
+            prev = get(snap["campaign"], "runtime_sec", 0.0)
+            snap["campaign"]["runtime_sec"] = round(prev + leg_seconds, digits = 3)
+            for w in snap["workers"]
+                if w["status"] == "running"
+                    w["status"] = "idle"
                 end
             end
         end
-
-        on_result = function (r)
-            # Reserved for streaming per-variant detail (results table /
-            # DuckDB write). on_progress already drives the dashboard.
-            return nothing
-        end
-
-        result = run_scenario_space(md, scenario_spec;
-                                    n_workers = n_workers,
-                                    threads_per_worker = threads_per_worker,
-                                    solver = solver,
-                                    mode = mode,
-                                    cancel = cancel,
-                                    on_progress = on_progress,
-                                    on_result = on_result)
-
+    elseif cancelled
         _campaign_update!(id) do snap
-            snap["campaign"]["status"] = cancel[] ? "cancelled" : "completed"
-            snap["campaign"]["stage"] = cancel[] ?
-                "Cancelled after $(snap["campaign"]["completed"])/$(snap["campaign"]["total"]) variants" :
-                "All variants completed"
-            snap["campaign"]["runtime_sec"] = round(result.runtime_seconds, digits = 3)
+            snap["campaign"]["status"] = "cancelled"
+            snap["campaign"]["state"] = "cancelled"
+            snap["campaign"]["stage"] = string("Stopped after ",
+                                               snap["campaign"]["completed"], "/",
+                                               snap["campaign"]["total"],
+                                               " variants")
+            prev = get(snap["campaign"], "runtime_sec", 0.0)
+            snap["campaign"]["runtime_sec"] = round(prev + leg_seconds, digits = 3)
             snap["done"] = true
             for w in snap["workers"]
                 if w["status"] == "running"
@@ -3473,14 +3688,129 @@ function _run_campaign_task!(id::String, input_path::String, periods::Vector{Int
                 end
             end
         end
-    catch err
-        msg = sprint(showerror, err)
-        @error "Campaign task failed" id error=msg exception=(err, catch_backtrace())
+        _forget_campaign_state!(id)
+    else
         _campaign_update!(id) do snap
-            snap["campaign"]["status"] = "failed"
-            snap["campaign"]["stage"] = "Failed: $msg"
+            snap["campaign"]["status"] = "completed"
+            snap["campaign"]["state"] = "completed"
+            snap["campaign"]["stage"] = "All variants completed"
+            prev = get(snap["campaign"], "runtime_sec", 0.0)
+            snap["campaign"]["runtime_sec"] = round(prev + leg_seconds, digits = 3)
             snap["done"] = true
-            snap["error"] = msg
+            for w in snap["workers"]
+                if w["status"] == "running"
+                    w["status"] = "idle"
+                end
+            end
+        end
+        _forget_campaign_state!(id)
+    end
+    return nothing
+end
+
+"""
+    _campaign_snapshot_field(id, key) -> String or nothing
+
+Read a single string field from `campaign` in the live snapshot under
+the lock. Returns `nothing` if the campaign or the key is missing.
+"""
+function _campaign_snapshot_field(id::AbstractString, key::AbstractString)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        snap = get(UI_CAMPAIGNS, String(id), nothing)
+        snap === nothing && return nothing
+        val = get(snap["campaign"], key, nothing)
+        return val === nothing ? nothing : String(val)
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+end
+
+"""
+    _forget_campaign_state!(id)
+
+Drop the heavy mutable state for a terminally-finished campaign. The
+JSON snapshot in UI_CAMPAIGNS is kept so the browser can still poll
+/status and /result.
+"""
+function _forget_campaign_state!(id::AbstractString)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        delete!(UI_CAMPAIGN_STATE, String(id))
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+    return nothing
+end
+
+"""
+    _campaign_rss_sampler!(id, done_ref)
+
+Background loop that polls peak RSS on each Distributed worker (or the
+master, for the in-process serial path) every ~2 s and writes the
+result into the snapshot. Reported value is `Sys.maxrss()` — peak
+resident set size in bytes, which never decreases for the lifetime of
+the process but is exactly what you want for monitoring solver memory
+pressure. Exits when `done_ref[]` becomes true.
+
+Worker pids are bound to UI slots in the order returned by
+`Distributed.workers()`; that order is stable for the lifetime of a
+single `run_campaign` call, so each UI card shows RAM for the same
+process throughout the leg.
+"""
+function _campaign_rss_sampler!(id::AbstractString, done_ref::Ref{Bool})
+    sid = String(id)
+    sample_period = 2.0
+    while !done_ref[]
+        try
+            pids = try
+                Int[Int(p) for p in Distributed.workers()]
+            catch
+                Int[]
+            end
+            samples = Tuple{Int,Int}[]  # (ui_slot, rss_bytes)
+            if isempty(pids) || (length(pids) == 1 && pids[1] == 1)
+                # Serial / in-process path: just sample the master.
+                rss = try Int(Sys.maxrss()) catch; 0 end
+                push!(samples, (1, rss))
+            else
+                for (i, pid) in enumerate(pids)
+                    rss = 0
+                    try
+                        rss = Int(Distributed.remotecall_fetch(Sys.maxrss, pid))
+                    catch
+                        # Worker may have been removed between workers() and
+                        # the remotecall; skip silently.
+                    end
+                    push!(samples, (i, rss))
+                end
+            end
+            if !isempty(samples)
+                _campaign_update!(sid) do snap
+                    wlist = snap["workers"]
+                    nw = length(wlist)
+                    for (slot, rss) in samples
+                        if 1 <= slot <= nw
+                            w = wlist[slot]
+                            w["rss_bytes"] = rss
+                            if slot <= length(pids)
+                                w["pid"] = pids[slot]
+                            elseif length(pids) == 0
+                                w["pid"] = Int(getpid())
+                            end
+                        end
+                    end
+                end
+            end
+        catch err
+            @debug "rss sampler error" id=sid err
+        end
+        # Sleep in short slices so we honour done_ref quickly when the
+        # campaign returns or is cancelled.
+        slept = 0.0
+        while slept < sample_period && !done_ref[]
+            sleep(0.25)
+            slept += 0.25
         end
     end
     return nothing
@@ -3529,9 +3859,11 @@ end
 """
     _scenario_stop!(id) -> Dict
 
-Flip the cancel Ref for `id`. The orchestrator stops dispatching new
-variants but lets currently-running ones finish. Returns `{ok: true}`
-on success, or an error dict if the id is unknown.
+Terminal cancel for a campaign. Flips the cancel Ref so the runner
+drains its in-flight variants and returns; the snapshot lands in
+"cancelled" and the cached state is discarded so /resume is not
+allowed afterwards. Returns `{ok: true}` on success, or an error dict
+if the id is unknown.
 """
 function _scenario_stop!(id::AbstractString)
     lock(UI_CAMPAIGNS_LOCK)
@@ -3541,16 +3873,115 @@ function _scenario_stop!(id::AbstractString)
             "ok" => false,
             "error" => "Unknown campaign id: $id",
         )
-        cref[] = true
         snap = get(UI_CAMPAIGNS, String(id), nothing)
         if snap !== nothing
+            cur = String(get(snap["campaign"], "state", "queued"))
+            if cur in ("completed", "cancelled", "failed")
+                return Dict{String,Any}(
+                    "ok" => false,
+                    "error" => "Campaign $id already finished ($cur).",
+                )
+            end
             snap["campaign"]["status"] = "cancelling"
-            snap["campaign"]["stage"] = "Cancel requested — finishing in-flight variants"
+            snap["campaign"]["state"] = "cancelling"
+            snap["campaign"]["stage"] = "Stop requested — finishing in-flight variants"
         end
+        cref[] = true
     finally
         unlock(UI_CAMPAIGNS_LOCK)
     end
     return Dict{String,Any}("ok" => true, "campaign_id" => id)
+end
+
+"""
+    _scenario_pause!(id) -> Dict
+
+Cooperative pause. Sets the snapshot state to "pausing" then flips the
+cancel Ref; the runner finishes its in-flight variants and returns. The
+task body sees state=="pausing" and parks in "paused" instead of
+"cancelled", keeping the cached `UI_CAMPAIGN_STATE[id]` alive so /resume
+can pick up where we left off.
+"""
+function _scenario_pause!(id::AbstractString)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        cref = get(UI_CAMPAIGN_CANCEL, String(id), nothing)
+        cref === nothing && return Dict{String,Any}(
+            "ok" => false,
+            "error" => "Unknown campaign id: $id",
+        )
+        snap = get(UI_CAMPAIGNS, String(id), nothing)
+        if snap !== nothing
+            cur = String(get(snap["campaign"], "state", "queued"))
+            if cur != "running"
+                return Dict{String,Any}(
+                    "ok" => false,
+                    "error" => "Cannot pause campaign in state '$cur' (only 'running' is pauseable).",
+                )
+            end
+            # IMPORTANT: set state to "pausing" BEFORE flipping the Ref
+            # so the task body sees the right state when it returns.
+            snap["campaign"]["status"] = "pausing"
+            snap["campaign"]["state"] = "pausing"
+            snap["campaign"]["stage"] = "Pause requested — finishing in-flight variants"
+        end
+        cref[] = true
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+    return Dict{String,Any}("ok" => true, "campaign_id" => id)
+end
+
+"""
+    _scenario_resume!(id) -> Dict
+
+Spin up a fresh background task that calls `_run_campaign_task!` again
+with a new cancel Ref. The task body's gate `state[:prepared]` ensures
+we skip the prep work and go straight to executing whatever variants
+have not yet completed. Returns an error dict if the campaign is not in
+"paused" state.
+"""
+function _scenario_resume!(id::AbstractString)
+    sid = String(id)
+    new_cancel = Ref(false)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        snap = get(UI_CAMPAIGNS, sid, nothing)
+        snap === nothing && return Dict{String,Any}(
+            "ok" => false,
+            "error" => "Unknown campaign id: $id",
+        )
+        cur = String(get(snap["campaign"], "state", "queued"))
+        if cur != "paused"
+            return Dict{String,Any}(
+                "ok" => false,
+                "error" => "Cannot resume campaign in state '$cur' (only 'paused' is resumable).",
+            )
+        end
+        state = get(UI_CAMPAIGN_STATE, sid, nothing)
+        if state === nothing
+            return Dict{String,Any}(
+                "ok" => false,
+                "error" => "Campaign state for $id has been forgotten and cannot be resumed.",
+            )
+        end
+        snap["campaign"]["status"] = "resuming"
+        snap["campaign"]["state"] = "resuming"
+        snap["campaign"]["stage"] = "Resuming campaign"
+        # Replace the cancel Ref so the new task gets a fresh one.
+        UI_CAMPAIGN_CANCEL[sid] = new_cancel
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+
+    task = Base.Threads.@spawn _run_campaign_task!(sid, new_cancel)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        UI_CAMPAIGN_TASKS[sid] = task
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+    return Dict{String,Any}("ok" => true, "campaign_id" => sid)
 end
 
 """

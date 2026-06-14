@@ -78,7 +78,7 @@
             <section class="panel compact-panel">
               <h2>Solve Mode</h2>
               <label class="toggle-field"><span>Time slicing</span><input id="timeSlicingToggle" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span></label>
-              <label id="representativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="representativeDays" type="range" min="1" max="100" value="30"><input id="representativeDaysNumber" type="number" min="1" max="100" value="30"></div></label>
+              <label id="representativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="representativeDays" type="range" min="1" max="100" value="15"><input id="representativeDaysNumber" type="number" min="1" max="100" value="15"></div></label>
               <label class="field"><span>Time slices</span><input id="totalSlices" type="text" value="720" readonly></label>
             </section>
 
@@ -190,7 +190,7 @@
             <div id="scSolverDetails" class="subtle detail-text"></div>
             <div class="field"><span>Solve method</span><div id="scSolveMethod" class="segmented vertical"></div></div>
             <label class="field"><span>Total CPU cores</span><div class="range-pair"><input id="scThreads" type="range" min="0" max="64" value="0"><input id="scThreadsNumber" type="number" min="0" max="64" value="0"></div></label>
-            <div class="field"><span>Threads per worker</span><div id="scThreadsPerWorker" class="custom-input-path">auto</div></div>
+            <div class="field threads-per-worker-field"><span>Threads per worker <span class="subtle">= floor(cores &divide; workers)</span></span><div id="scThreadsPerWorker" class="threads-per-worker-value">auto</div></div>
           </section>
         </aside>
 
@@ -251,7 +251,7 @@
             <section class="panel compact-panel">
               <h2>Solve Mode</h2>
               <label class="toggle-field"><span>Time slicing</span><input id="scTimeSlicingToggle" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span></label>
-              <label id="scRepresentativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="scRepresentativeDays" type="range" min="1" max="100" value="30"><input id="scRepresentativeDaysNumber" type="number" min="1" max="100" value="30"></div></label>
+              <label id="scRepresentativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="scRepresentativeDays" type="range" min="1" max="100" value="15"><input id="scRepresentativeDaysNumber" type="number" min="1" max="100" value="15"></div></label>
               <label class="field"><span>Time slices</span><input id="scTotalSlices" type="text" value="720" readonly></label>
             </section>
 
@@ -290,6 +290,9 @@
           </div>
           <div class="campaign-actions">
             <span id="campaignStatusPill" class="status-pill muted">Idle</span>
+            <button id="campaignPauseBtn" class="secondary-button hidden" type="button" title="Pause after current variants finish">Pause</button>
+            <button id="campaignResumeBtn" class="secondary-button hidden" type="button" title="Resume from where it was paused">Resume</button>
+            <button id="campaignStopBtn" class="secondary-button hidden" type="button" title="Stop completely (cannot resume)">Stop</button>
             <button id="campaignDemoStart" class="secondary-button" type="button">Start demo</button>
             <button id="campaignDemoStop" class="secondary-button hidden" type="button">Stop demo</button>
           </div>
@@ -314,6 +317,22 @@
           <div class="panel-toolbar"><span class="subtle worker-legend"><span class="worker-legend-dot status-running"></span>running <span class="worker-legend-dot status-done"></span>optimal <span class="worker-legend-dot status-failed"></span>failed <span class="worker-legend-dot status-idle"></span>idle</span></div>
         </div>
         <div id="workerGrid" class="worker-grid empty-state">No workers active. Start a campaign or click <em>Start demo</em> to preview the layout.</div>
+      </section>
+
+      <section id="campaignErrorPanel" class="panel hidden">
+        <div class="panel-title">
+          <h2>Campaign error</h2>
+          <p class="subtle">The campaign task itself raised an exception &mdash; this is the same backtrace logged on the Julia REPL.</p>
+        </div>
+        <pre id="campaignErrorMsg" class="campaign-error-msg"></pre>
+      </section>
+
+      <section id="campaignFailuresPanel" class="panel hidden">
+        <div class="panel-title">
+          <h2>Recent failures <span id="campaignFailuresCount" class="subtle"></span></h2>
+          <p class="subtle">Per-variant errors, most-recent first. Click any message to copy it.</p>
+        </div>
+        <div id="campaignFailuresList" class="failures-list"></div>
       </section>
     </section>
 

@@ -64,6 +64,7 @@
     startedAt: 0,
     campaign: { name: "", total: 0, started_at: 0 },
     workers: [],
+    failures: [],
   };
 
   // ===========================================================================
@@ -296,14 +297,14 @@
     const th = $("scThreads");
     const thn = $("scThreadsNumber");
     if (th && thn) {
-      th.addEventListener("input", () => { thn.value = th.value; updateThreadsPerWorker(); });
-      thn.addEventListener("input", () => { th.value = thn.value; updateThreadsPerWorker(); });
+      th.addEventListener("input", () => { thn.value = th.value; th.dataset.touched = "1"; thn.dataset.touched = "1"; updateThreadsPerWorker(); });
+      thn.addEventListener("input", () => { th.value = thn.value; th.dataset.touched = "1"; thn.dataset.touched = "1"; updateThreadsPerWorker(); });
     }
     const wk = $("scWorkers");
     const wkn = $("scWorkersNumber");
     if (wk && wkn) {
-      wk.addEventListener("input", () => { wkn.value = wk.value; updateThreadsPerWorker(); });
-      wkn.addEventListener("input", () => { wk.value = wkn.value; updateThreadsPerWorker(); });
+      wk.addEventListener("input", () => { wkn.value = wk.value; wk.dataset.touched = "1"; wkn.dataset.touched = "1"; updateThreadsPerWorker(); });
+      wkn.addEventListener("input", () => { wk.value = wkn.value; wk.dataset.touched = "1"; wkn.dataset.touched = "1"; updateThreadsPerWorker(); });
     }
     const periods = $("scPeriods");
     if (periods) periods.addEventListener("change", updateScenarioSummary);
@@ -333,9 +334,13 @@
     if ($("scThreadsNumber")) $("scThreadsNumber").max = cores;
     if ($("scWorkers")) $("scWorkers").max = cores;
     if ($("scWorkersNumber")) $("scWorkersNumber").max = cores;
-    // Sensible default for parallel workers: half the detected cores (min 1).
+    // Sensible defaults so the user immediately sees a real Threads-per-worker
+    // number instead of "auto": total cores = detected, workers = half.
     const detected = Number(navigator.hardwareConcurrency) || 0;
+    const defaultCores   = Math.max(1, Math.min(detected || 4, Number(cores)));
     const defaultWorkers = Math.max(1, Math.min(detected ? Math.floor(detected / 2) : 4, Number(cores)));
+    if ($("scThreads") && !$("scThreads").dataset.touched) $("scThreads").value = defaultCores;
+    if ($("scThreadsNumber") && !$("scThreadsNumber").dataset.touched) $("scThreadsNumber").value = defaultCores;
     if ($("scWorkers") && !$("scWorkers").dataset.touched) $("scWorkers").value = defaultWorkers;
     if ($("scWorkersNumber") && !$("scWorkersNumber").dataset.touched) $("scWorkersNumber").value = defaultWorkers;
 
@@ -477,15 +482,16 @@
     const totalCores = Number(($("scThreads") || {}).value || 0);
     const workers = Math.max(1, Number(($("scWorkers") || {}).value || 1));
     if (totalCores <= 0) {
-      out.textContent = `auto (${workers} workers)`;
+      out.innerHTML = `<strong>auto</strong> <span class="subtle">(solver picks; \u00f7 ${workers} workers)</span>`;
+      out.title = `Total CPU cores = 0 -> solver decides per worker.`;
       return;
     }
+    // floor(total / workers) is the threads-per-worker we send to the solver.
     const perWorker = Math.max(1, Math.floor(totalCores / workers));
     const allocated = perWorker * workers;
     const slack = totalCores - allocated;
-    out.textContent = slack > 0
-      ? `${perWorker} thread(s) \u00d7 ${workers} = ${allocated} (+${slack} unused)`
-      : `${perWorker} thread(s) \u00d7 ${workers} = ${allocated}`;
+    out.innerHTML = `<strong>${perWorker}</strong> <span class="subtle">= floor(${totalCores} \u00f7 ${workers})${slack > 0 ? `, ${slack} core(s) unused` : ""}</span>`;
+    out.title = `threads_per_worker = floor(total_cores / workers) = floor(${totalCores} / ${workers}) = ${perWorker}`;
   }
 
   function updateScenarioSummary() {
@@ -696,14 +702,23 @@
   function bindProgressControls() {
     const start = $("campaignDemoStart");
     const stop = $("campaignDemoStop");
+    const pauseBtn = $("campaignPauseBtn");
+    const resumeBtn = $("campaignResumeBtn");
+    const stopBtn = $("campaignStopBtn");
     if (start) start.addEventListener("click", startDemo);
     if (stop) stop.addEventListener("click", () => {
-      // Stop a live campaign if one is active; otherwise stop the demo.
-      if (progressState.activeCampaignId) {
-        stopLiveCampaign().catch((err) => console.warn("stop failed", err));
-      } else {
-        stopDemo();
-      }
+      // Stop demo only — live campaign has its own Stop button now.
+      stopDemo();
+    });
+    if (pauseBtn) pauseBtn.addEventListener("click", () => {
+      pauseLiveCampaign().catch((err) => console.warn("pause failed", err));
+    });
+    if (resumeBtn) resumeBtn.addEventListener("click", () => {
+      resumeLiveCampaign().catch((err) => console.warn("resume failed", err));
+    });
+    if (stopBtn) stopBtn.addEventListener("click", () => {
+      if (!confirm("Stop the campaign? Progress is kept but the run cannot be resumed.")) return;
+      stopLiveCampaign().catch((err) => console.warn("stop failed", err));
     });
   }
 
@@ -719,14 +734,39 @@
     }
     const body = buildRunBody();
     setStatus("Launching campaign\u2026", "");
-    const r = await fetch("/api/scenario/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const payload = await r.json();
-    if (!payload.ok) {
-      const msg = (payload.errors && payload.errors[0]) || "Run failed.";
+    let r, rawText;
+    try {
+      r = await fetch("/api/scenario/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      rawText = await r.text();
+    } catch (e) {
+      setStatus("Server unreachable: " + (e.message || e), "error");
+      return;
+    }
+    let payload;
+    try { payload = JSON.parse(rawText); } catch (_) { payload = null; }
+    if (!payload || payload.ok === false || payload.ok === undefined) {
+      // Surface whatever the server gave us: errors[] (validation), error (singular),
+      // or the raw body + HTTP status as a last resort.
+      let msg = null;
+      if (payload) {
+        if (Array.isArray(payload.errors) && payload.errors.length) msg = payload.errors[0];
+        else if (payload.error) msg = String(payload.error);
+      }
+      // A bare "Not found" with HTTP 404 is the classic stale-server symptom:
+      // the route exists in the source but the running Julia process loaded an
+      // older version of src/ui_server.jl. Spell that out for the user.
+      if (r && r.status === 404 && msg && /not found/i.test(msg)) {
+        msg = "Server responded 404 for POST /api/scenario/run. The route exists in the code, "
+            + "which means the Julia server is running stale code. Restart the Julia REPL "
+            + "(or re-run `IESAOpt.serve_ui()`) so the new routes are loaded.";
+      } else if (!msg) {
+        msg = `Run failed (HTTP ${r ? r.status : "?"}): ${rawText ? rawText.slice(0, 240) : "empty response"}`;
+      }
+      console.error("[scenario/run] failed", { status: r && r.status, body: rawText, payload });
       setStatus(msg, "error");
       return;
     }
@@ -741,7 +781,10 @@
 
   function buildRunBody() {
     const spec = collectSpec();
-    spec.inputWorkbook = ($("scInputWorkbook") || {}).value || "data/default_data.xlsx";
+    // Prefer a user-browsed file over the dropdown selection.
+    spec.inputWorkbook = state.customWorkbookPath
+      || (($("scInputWorkbook") || {}).value)
+      || "data/default_data.xlsx";
     spec.n_workers = Number(($("scWorkers") || {}).value) || 1;
     spec.threads_per_worker = computeThreadsPerWorker();
     spec.solver = ($("scSolver") || {}).value || "highs";
@@ -782,6 +825,9 @@
       name: snap.campaign.name || "",
       total: snap.campaign.total || 0,
       started_at: (snap.campaign.started_at || 0) * 1000,
+      state: String(snap.campaign.state || snap.campaign.status || ""),
+      stage: String(snap.campaign.stage || ""),
+      error: snap.error || null,
     };
     progressState.workers = (snap.workers || []).map((w) => ({
       id: w.id,
@@ -792,10 +838,62 @@
       failed: w.failed || 0,
       progress: (w.progress || 0) * 100,
       started_at: (w.started_at || 0) * 1000,
+      pid: w.pid || null,
+      rss_bytes: w.rss_bytes || 0,
+      last_error: w.last_error || null,
+      last_term: w.last_term || null,
+      last_failed_variant: w.last_failed_variant || null,
     }));
-    if ($("campaignDemoStart")) $("campaignDemoStart").classList.add("hidden");
-    if ($("campaignDemoStop")) $("campaignDemoStop").classList.remove("hidden");
+    progressState.failures = Array.isArray(snap.failures) ? snap.failures.slice(0, 50) : [];
+    applyLiveButtonVisibility(progressState.campaign.state, !!snap.done);
     renderProgress();
+  }
+
+  // Show/hide Pause / Resume / Stop / Start-demo / Stop-demo according
+  // to the live campaign's lifecycle state. Demo buttons are kept out
+  // of the way whenever a live campaign exists.
+  function applyLiveButtonVisibility(state, done) {
+    const pauseBtn  = $("campaignPauseBtn");
+    const resumeBtn = $("campaignResumeBtn");
+    const stopBtn   = $("campaignStopBtn");
+    const demoStart = $("campaignDemoStart");
+    const demoStop  = $("campaignDemoStop");
+
+    const show = (el) => el && el.classList.remove("hidden");
+    const hide = (el) => el && el.classList.add("hidden");
+    const setEnabled = (el, on) => { if (el) el.disabled = !on; };
+
+    // Default: hide everything; we re-enable per branch below.
+    hide(pauseBtn); hide(resumeBtn); hide(stopBtn);
+    setEnabled(pauseBtn, true); setEnabled(resumeBtn, true); setEnabled(stopBtn, true);
+
+    const isLive = !!state;
+    if (!isLive || done || state === "completed" || state === "cancelled" || state === "failed") {
+      // No live campaign or it terminated -> only demo buttons matter.
+      show(demoStart); hide(demoStop);
+      if (done) progressState.activeCampaignId = null;
+      return;
+    }
+
+    // Live campaign exists -> hide demo buttons.
+    hide(demoStart); hide(demoStop);
+
+    if (state === "running") {
+      show(pauseBtn); show(stopBtn);
+    } else if (state === "paused") {
+      show(resumeBtn); show(stopBtn);
+    } else if (state === "pausing") {
+      show(pauseBtn); setEnabled(pauseBtn, false);
+      show(stopBtn);
+    } else if (state === "resuming") {
+      show(resumeBtn); setEnabled(resumeBtn, false);
+      show(stopBtn);
+    } else if (state === "cancelling") {
+      show(stopBtn); setEnabled(stopBtn, false);
+    } else {
+      // preparing / queued / reading -> show Stop so the user can abort.
+      show(stopBtn);
+    }
   }
 
   function startPolling(id) {
@@ -812,8 +910,8 @@
         if (snap.done) {
           stopPolling();
           progressState.active = false;
-          if ($("campaignDemoStart")) $("campaignDemoStart").classList.remove("hidden");
-          if ($("campaignDemoStop")) $("campaignDemoStop").classList.add("hidden");
+          // applyLiveButtonVisibility (called from applySnapshot) already
+          // restored the demo buttons and cleared activeCampaignId.
           renderProgress();
         }
       } catch (err) {
@@ -833,9 +931,47 @@
     const id = progressState.activeCampaignId;
     if (!id) return;
     try {
-      await fetch("/api/scenario/stop/" + encodeURIComponent(id), { method: "POST" });
+      const r = await fetch("/api/scenario/stop/" + encodeURIComponent(id), { method: "POST" });
+      const payload = await r.json().catch(() => ({}));
+      if (payload && payload.ok === false && payload.error) {
+        setStatus(payload.error, "error");
+      }
     } catch (err) {
       console.warn("scenario/stop failed", err);
+    }
+  }
+
+  async function pauseLiveCampaign() {
+    const id = progressState.activeCampaignId;
+    if (!id) return;
+    try {
+      const r = await fetch("/api/scenario/pause/" + encodeURIComponent(id), { method: "POST" });
+      const payload = await r.json().catch(() => ({}));
+      if (payload && payload.ok === false && payload.error) {
+        setStatus(payload.error, "error");
+      }
+    } catch (err) {
+      console.warn("scenario/pause failed", err);
+    }
+  }
+
+  async function resumeLiveCampaign() {
+    const id = progressState.activeCampaignId;
+    if (!id) return;
+    try {
+      const r = await fetch("/api/scenario/resume/" + encodeURIComponent(id), { method: "POST" });
+      const payload = await r.json().catch(() => ({}));
+      if (payload && payload.ok === false && payload.error) {
+        setStatus(payload.error, "error");
+        return;
+      }
+      // The status poll may have stopped if a previous done-snapshot fired;
+      // make sure we start polling again now that the task is alive.
+      if (!progressState.pollTimer) {
+        startPolling(id);
+      }
+    } catch (err) {
+      console.warn("scenario/resume failed", err);
     }
   }
 
@@ -852,6 +988,7 @@
     progressState.startedAt = Date.now();
     progressState.campaign = { name: ($("scCampaignName") || {}).value || "demo_campaign", total, started_at: progressState.startedAt };
     progressState.workers = [];
+    progressState.failures = [];
     for (let i = 1; i <= nWorkers; i++) {
       progressState.workers.push({
         id: i,
@@ -864,6 +1001,8 @@
         started_at: progressState.startedAt,
         last_change: progressState.startedAt,
         next_finish_in: 800 + Math.random() * 2400, // ms
+        pid: 1000 + i,
+        rss_bytes: (350 + Math.random() * 200) * 1024 * 1024, // 350-550 MB fake
       });
     }
     $("campaignDemoStart").classList.add("hidden");
@@ -890,6 +1029,9 @@
     progressState.workers.forEach((w) => {
       if (w.status !== "running") return;
       anyRunning = true;
+      // Drift fake RAM by +/- 5 MB per tick so the demo card visibly updates.
+      const drift = (Math.random() - 0.4) * 5 * 1024 * 1024;
+      w.rss_bytes = Math.max(64 * 1024 * 1024, (w.rss_bytes || 0) + drift);
       // Advance progress fraction toward 100%
       const remaining = w.next_finish_in - (now - w.last_change);
       const total = w.next_finish_in;
@@ -899,7 +1041,32 @@
         const variantsRemaining = w.assigned - w.completed - w.failed;
         // 8% chance of failure
         const failed = Math.random() < 0.08;
-        if (failed) w.failed += 1; else w.completed += 1;
+        const finishedVid = w.variant_id;
+        if (failed) {
+          w.failed += 1;
+          // Demo-only fake error so the failures panel has content.
+          const fakeMsgs = [
+            "MOI.InvalidIndex: variable index 12345 not found in the model",
+            "JuMP.NoOptimizer(): no optimizer attached to the model",
+            "MethodError: no method matching applyVariant(::Nothing) — leaf change missing",
+            "HiGHS_run: model is infeasible (kHighsStatusError)",
+            "OutOfMemoryError: solve aborted by OS (peak RSS exceeded)",
+          ];
+          w.last_error = fakeMsgs[Math.floor(Math.random() * fakeMsgs.length)];
+          w.last_term = Math.random() < 0.5 ? "INFEASIBLE" : "ERROR";
+          w.last_failed_variant = finishedVid;
+          (progressState.failures = progressState.failures || []).unshift({
+            variant_id: finishedVid,
+            worker_id: w.id,
+            worker_pid: w.pid,
+            term_status: w.last_term,
+            error: w.last_error,
+            at: now / 1000,
+          });
+          if (progressState.failures.length > 50) progressState.failures.length = 50;
+        } else {
+          w.completed += 1;
+        }
         w.last_change = now;
         if (variantsRemaining > 1) {
           w.status = "running";
@@ -938,9 +1105,25 @@
 
     if ($("campaignTitle")) $("campaignTitle").textContent = c.name ? `Campaign: ${c.name}` : "Campaign progress";
     if ($("campaignSubtitle")) {
-      if (!progressState.active && total === 0) $("campaignSubtitle").textContent = "No campaign running.";
-      else if (!progressState.active) $("campaignSubtitle").textContent = `Stopped after ${done + failed} of ${total} variants.`;
-      else $("campaignSubtitle").textContent = `${done + failed} of ${total} variants resolved.`;
+      const st = c.state || "";
+      const stage = c.stage || "";
+      if (st === "paused") {
+        $("campaignSubtitle").textContent = stage || `Paused after ${done + failed} of ${total} variants. Press Resume to continue.`;
+      } else if (st === "cancelled") {
+        $("campaignSubtitle").textContent = stage || `Stopped after ${done + failed} of ${total} variants.`;
+      } else if (st === "failed") {
+        $("campaignSubtitle").textContent = stage || `Failed.`;
+      } else if (st === "completed") {
+        $("campaignSubtitle").textContent = `Completed all ${total} variants.`;
+      } else if (st === "pausing" || st === "resuming" || st === "cancelling" || st === "preparing") {
+        $("campaignSubtitle").textContent = stage || `${st}\u2026`;
+      } else if (!progressState.active && total === 0) {
+        $("campaignSubtitle").textContent = "No campaign running.";
+      } else if (!progressState.active) {
+        $("campaignSubtitle").textContent = `Stopped after ${done + failed} of ${total} variants.`;
+      } else {
+        $("campaignSubtitle").textContent = `${done + failed} of ${total} variants resolved.`;
+      }
     }
     if ($("campaignTotal"))   $("campaignTotal").textContent = total;
     if ($("campaignDone"))    $("campaignDone").textContent = done;
@@ -962,11 +1145,29 @@
     // Status pill
     const pill = $("campaignStatusPill");
     if (pill) {
-      pill.classList.remove("muted", "running", "completed", "failed");
-      if (!progressState.active && total === 0) { pill.classList.add("muted"); pill.textContent = "Idle"; }
-      else if (failed > 0 && done + failed === total) { pill.classList.add("failed"); pill.textContent = `Finished (${failed} failed)`; }
-      else if (done + failed === total && total > 0) { pill.classList.add("completed"); pill.textContent = "Completed"; }
-      else { pill.classList.add("running"); pill.textContent = "Running"; }
+      pill.classList.remove("muted", "running", "completed", "failed", "paused");
+      const st = (c && c.state) || "";
+      if (st === "paused") {
+        pill.classList.add("paused"); pill.textContent = "Paused";
+      } else if (st === "pausing") {
+        pill.classList.add("running"); pill.textContent = "Pausing\u2026";
+      } else if (st === "resuming") {
+        pill.classList.add("running"); pill.textContent = "Resuming\u2026";
+      } else if (st === "cancelling") {
+        pill.classList.add("running"); pill.textContent = "Stopping\u2026";
+      } else if (st === "cancelled") {
+        pill.classList.add("muted"); pill.textContent = "Stopped";
+      } else if (st === "failed") {
+        pill.classList.add("failed"); pill.textContent = "Failed";
+      } else if (!progressState.active && total === 0) {
+        pill.classList.add("muted"); pill.textContent = "Idle";
+      } else if (failed > 0 && done + failed === total) {
+        pill.classList.add("failed"); pill.textContent = `Finished (${failed} failed)`;
+      } else if (done + failed === total && total > 0) {
+        pill.classList.add("completed"); pill.textContent = "Completed";
+      } else {
+        pill.classList.add("running"); pill.textContent = "Running";
+      }
     }
 
     // Elapsed + ETA
@@ -999,6 +1200,62 @@
         workers.forEach((w) => grid.appendChild(renderWorkerCard(w)));
       }
     }
+
+    // Campaign-level error panel (the run_campaign task itself threw).
+    const errPanel = $("campaignErrorPanel");
+    const errMsg = $("campaignErrorMsg");
+    if (errPanel && errMsg) {
+      const ce = c.error;
+      if (ce && String(ce).trim()) {
+        errPanel.classList.remove("hidden");
+        errMsg.textContent = String(ce);
+      } else {
+        errPanel.classList.add("hidden");
+        errMsg.textContent = "";
+      }
+    }
+
+    // Recent per-variant failures panel.
+    const failPanel = $("campaignFailuresPanel");
+    const failList = $("campaignFailuresList");
+    const failCount = $("campaignFailuresCount");
+    const failures = progressState.failures || [];
+    if (failPanel && failList) {
+      if (failures.length === 0) {
+        failPanel.classList.add("hidden");
+        failList.innerHTML = "";
+        if (failCount) failCount.textContent = "";
+      } else {
+        failPanel.classList.remove("hidden");
+        if (failCount) failCount.textContent = `(${failures.length} shown)`;
+        failList.innerHTML = "";
+        failures.forEach((f) => failList.appendChild(renderFailureRow(f)));
+      }
+    }
+  }
+
+  function renderFailureRow(f) {
+    const row = document.createElement("div");
+    row.className = "failure-row";
+    const head = document.createElement("div");
+    head.className = "failure-head";
+    const left = document.createElement("span");
+    left.innerHTML = `<strong>Variant ${f.variant_id}</strong> &middot; Worker ${f.worker_id}${f.worker_pid ? ` &middot; PID ${f.worker_pid}` : ""}`;
+    const right = document.createElement("span");
+    right.className = "failure-term";
+    right.textContent = f.term_status || "ERROR";
+    head.appendChild(left);
+    head.appendChild(right);
+    row.appendChild(head);
+    const pre = document.createElement("pre");
+    pre.className = "failure-msg";
+    pre.textContent = f.error || "(no message)";
+    pre.title = "Click to copy";
+    pre.addEventListener("click", () => {
+      try { navigator.clipboard.writeText(f.error || ""); } catch (_) {}
+    });
+    row.appendChild(pre);
+    return row;
   }
 
   function renderWorkerCard(w) {
@@ -1009,7 +1266,7 @@
     head.className = "worker-card-header";
     const id = document.createElement("span");
     id.className = "worker-id";
-    id.textContent = "Worker " + w.id;
+    id.textContent = "Worker " + w.id + (w.pid ? ` \u00b7 PID ${w.pid}` : "");
     head.appendChild(id);
     const status = document.createElement("span");
     status.className = "worker-status status-" + (w.status || "idle");
@@ -1049,6 +1306,44 @@
     meta.appendChild(right);
     card.appendChild(meta);
 
+    // RAM (peak resident set) — separate row so it doesn't crowd the meta line.
+    const ram = document.createElement("div");
+    ram.className = "worker-ram";
+    if (w.rss_bytes && w.rss_bytes > 0) {
+      ram.innerHTML = `<span class="subtle">RAM (peak)</span> <strong>${fmtBytes(w.rss_bytes)}</strong>`;
+      ram.title = `Sys.maxrss() on this worker process — peak resident memory in bytes.`;
+    } else {
+      ram.innerHTML = `<span class="subtle">RAM (peak)</span> <span class="subtle">\u2014</span>`;
+    }
+    card.appendChild(ram);
+
+    // Failure detail — show the last error message + term status when this
+    // worker most recently failed a variant, so the user doesn't have to
+    // hunt through Julia logs to see why.
+    if (w.last_error || (w.status === "failed" && w.last_term)) {
+      const err = document.createElement("div");
+      err.className = "worker-error";
+      const header = document.createElement("div");
+      header.className = "worker-error-header";
+      const label = w.last_failed_variant != null
+        ? `Variant ${w.last_failed_variant} failed`
+        : "Last failure";
+      const term = w.last_term ? ` <span class="worker-error-term">${escapeHtml(w.last_term)}</span>` : "";
+      header.innerHTML = `<span>${label}</span>${term}`;
+      err.appendChild(header);
+      if (w.last_error) {
+        const pre = document.createElement("pre");
+        pre.className = "worker-error-msg";
+        pre.textContent = w.last_error;
+        pre.title = "Click to copy";
+        pre.addEventListener("click", () => {
+          try { navigator.clipboard.writeText(w.last_error); } catch (_) {}
+        });
+        err.appendChild(pre);
+      }
+      card.appendChild(err);
+    }
+
     return card;
   }
 
@@ -1060,6 +1355,23 @@
     if (h > 0) return `${h}h ${m}m`;
     if (m > 0) return `${m}m ${s}s`;
     return `${s}s`;
+  }
+
+  function fmtBytes(n) {
+    if (!n || n <= 0) return "0 B";
+    const units = ["B", "KB", "MB", "GB", "TB"];
+    let v = n, i = 0;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v >= 10 ? v.toFixed(0) : v.toFixed(1)} ${units[i]}`;
+  }
+
+  function escapeHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   // ===========================================================================
