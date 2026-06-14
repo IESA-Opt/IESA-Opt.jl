@@ -19,3 +19,7 @@ end
     include("test_scenario.jl")
 end
 
+@testset "Scenario-space exploration (Phase 2: in-place mutation)" begin
+    include("test_scenario_mutation.jl")
+end
+

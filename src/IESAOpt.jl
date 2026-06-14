@@ -89,9 +89,13 @@ include("violations.jl")
 include("writers.jl")
 
 # ---------------------------------------------------------------------------
-# Scenario-space exploration (Phase 1: spec parsing + sampling, no model touch)
+# Scenario-space exploration
+# Phase 1: spec parsing + sampling, no model touch
 include("scenario/spec.jl")
 include("scenario/sampling.jl")
+# Phase 2: in-place LP mutation (constraint-ref manifest + per-variant apply)
+include("scenario/manifest.jl")
+include("scenario/variant.jl")
 
 include("ui_server.jl")
 # include("sweeps.jl")
@@ -137,6 +141,23 @@ export parse_sampling_method, parse_param_type
 export unique_parameters, parameter_bounds, parameter_steps
 export validate_spec, spec_from_dict, spec_to_dict
 export sample_campaign, implied_sample_size
+# Scenario-space exploration (Phase 2: in-place LP mutation)
+export Mutation, LeafChange
+export register_mutation!, is_mutation_registered, registered_mutation_fields
+export build_mutations, apply_mutation!, apply_mutations!
+export apply_leaf_change!, apply_leaf_changes!, apply_variant!
+
+# ---------------------------------------------------------------------------
+# Module init — populate the scenario-space mutation registry with the
+# default leaf-parameter -> constraint-name builders. Idempotent.
+function __init__()
+    try
+        _register_default_mutations!()
+    catch err
+        @warn "IESAOpt: failed to register default scenario-space mutations" err
+    end
+    return nothing
+end
 
 # ---------------------------------------------------------------------------
 # PrecompileTools workload
