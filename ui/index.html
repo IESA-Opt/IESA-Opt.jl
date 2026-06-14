@@ -29,10 +29,10 @@
   </nav>
 
   <nav class="tabs" aria-label="Main views">
-    <button class="tab-button active" data-section="main" data-tab="run" type="button">Run</button>
+    <button class="tab-button active" data-section="main" data-tab="run" type="button">Setup</button>
     <button class="tab-button" data-section="main" data-tab="progress" type="button">Progress</button>
     <button class="tab-button" data-section="main" data-tab="results" type="button">Results</button>
-    <button class="tab-button" data-section="scenario" data-tab="scenario-setup" type="button">Setup</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-setup" type="button">Parameter Space</button>
     <button class="tab-button" data-section="scenario" data-tab="scenario-progress" type="button">Progress</button>
     <button class="tab-button" data-section="scenario" data-tab="scenario-results" type="button">Results</button>
     <button class="tab-button" data-section="main" data-tab="about" type="button">About</button>
@@ -337,13 +337,13 @@
         <h3>Using the dashboard</h3>
         <p>The dashboard is organised into <strong>sections</strong> along the very top &mdash; each section is its own workspace with its own set of tabs underneath:</p>
         <ul class="about-list">
-          <li><strong>Single run</strong> &mdash; the default workspace. Tabs: <em>Run</em>, <em>Progress</em>, <em>Results</em>, <em>About</em>. Used to launch one optimisation, watch it solve, and inspect the resulting output folder.</li>
-          <li><strong>Scenario Space</strong> &mdash; the campaign workspace. Tabs: <em>Setup</em> (define parameter space + sample variants), <em>Progress</em> (live campaign progress, Phase 3 hookup pending), <em>Results</em> (aggregated cross-variant analytics, Phase 4/5 hookup pending).</li>
+          <li><strong>Single run</strong> &mdash; the default workspace. Tabs: <em>Setup</em>, <em>Progress</em>, <em>Results</em>, <em>About</em>. Used to launch one optimisation, watch it solve, and inspect the resulting output folder.</li>
+          <li><strong>Scenario Space</strong> &mdash; the campaign workspace. Tabs: <em>Parameter Space</em> (define the parameter space + sample variants), <em>Progress</em> (live campaign progress, Phase 3 hookup pending), <em>Results</em> (aggregated cross-variant analytics, Phase 4/5 hookup pending).</li>
           <li><strong>MGA</strong> &mdash; coming soon. Will host modelling-to-generate-alternatives explorations.</li>
         </ul>
         <p>The tabs below the section bar are filtered automatically: only the tabs that belong to the active section are shown. Each tab is described below together with every option it exposes.</p>
 
-        <h3>Run tab</h3>
+        <h3>Setup tab</h3>
         <p>This is the launchpad for a new optimisation. The left side fixes the solver; the right side fixes the scenario, temporal resolution, and reporting flags. Press <strong>Run model</strong> to start; the page will switch to <strong>Progress</strong> automatically.</p>
         <ul class="about-list">
           <li><strong>Solver</strong> &mdash; chooses the optimisation backend (HiGHS, Gurobi, etc.). The detail line shows the solver version detected on the system.</li>
