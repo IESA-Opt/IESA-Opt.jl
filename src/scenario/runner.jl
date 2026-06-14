@@ -64,7 +64,7 @@ const _DEFAULT_HIGHS_ATTRS_CAMPAIGN = Dict{String,Any}(
 )
 
 """
-    _campaign_optimizer(solver::Symbol, threads::Int; attrs_override) -> JuMP-optimizer-factory
+    _campaign_optimizer(solver::Symbol, threads::Int; attrs_override, rep_days) -> JuMP-optimizer-factory
 
 Build a per-worker optimizer factory. `solver` is `:highs` (default,
 license-free) or `:gurobi` (requires Gurobi.jl + GUROBI_HOME). `threads` is
@@ -72,9 +72,12 @@ the per-instance thread cap; for parallel campaigns set this low (e.g. 1)
 so workers do not oversubscribe the CPU.  `attrs_override::AbstractDict`
 is merged on top of the campaign defaults so callers can override one or
 two solver tunings (e.g. `"Crossover" => -1` for Gurobi barrier+crossover).
+For Gurobi time-slice campaigns, `rep_days` applies the same representative-day
+tuned defaults used by single runs and the UI.
 """
 function _campaign_optimizer(solver::Symbol, threads::Int;
-                             attrs_override::AbstractDict = Dict{String,Any}())
+                             attrs_override::AbstractDict = Dict{String,Any}(),
+                             rep_days::Union{Nothing,Integer} = nothing)
     if solver === :highs
         attrs = copy(_DEFAULT_HIGHS_ATTRS_CAMPAIGN)
         # HiGHS uses "threads" if positive; ignored otherwise.
@@ -84,15 +87,22 @@ function _campaign_optimizer(solver::Symbol, threads::Int;
         end
         return highs_optimizer(; attrs = attrs)
     elseif solver === :gurobi
-        attrs = default_gurobi_attributes(; threads = max(0, threads))
-        attrs["OutputFlag"] = 0
-        for (k, v) in attrs_override
-            attrs[k] = v
-        end
+        attrs = _campaign_gurobi_attributes(threads, rep_days, attrs_override)
         return gurobi_optimizer(; attrs = attrs)
     else
         throw(ArgumentError("Unknown solver `$solver`; expected :highs or :gurobi."))
     end
+end
+
+function _campaign_gurobi_attributes(threads::Int,
+                                     rep_days::Union{Nothing,Integer},
+                                     attrs_override::AbstractDict = Dict{String,Any}())
+    attrs = default_gurobi_attributes(; threads = max(0, threads), rep_days = rep_days)
+    attrs["OutputFlag"] = 0
+    for (k, v) in attrs_override
+        attrs[k] = v
+    end
+    return attrs
 end
 
 """
@@ -118,7 +128,10 @@ and (for `mode === :ts`) `build_temporal_clusters!`.
 function _build_campaign_model(md::ModelData; solver::Symbol, threads::Int,
                                mode::Symbol,
                                attrs_override::AbstractDict = Dict{String,Any}())
-    m = Model(_campaign_optimizer(solver, threads; attrs_override = attrs_override))
+    rep_days = mode === :ts ? md.params.n_repDays : nothing
+    m = Model(_campaign_optimizer(solver, threads;
+        attrs_override = attrs_override,
+        rep_days = rep_days))
     # Scenario-space MUST keep names so constraint_by_name works.
     apply_lp_generation_speedups!(m; keep_names = true)
     if mode === :ts

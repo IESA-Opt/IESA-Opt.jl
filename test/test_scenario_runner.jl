@@ -126,3 +126,17 @@ end
 
     @test_throws ArgumentError IESAOpt._campaign_optimizer(:bogus, 1)
 end
+
+@testset "scenario Gurobi RD tuned attributes" begin
+    attrs = IESAOpt._campaign_gurobi_attributes(3, 40)
+    @test attrs["Threads"] == 3
+    @test attrs["OutputFlag"] == 0
+    @test attrs["AggFill"] == 100
+    @test attrs["Aggregate"] == 2
+    @test attrs["Presolve"] == 1
+    @test attrs["ScaleFlag"] == 0
+
+    attrs = IESAOpt._campaign_gurobi_attributes(3, 40, Dict("ScaleFlag" => 2, "Crossover" => -1))
+    @test attrs["ScaleFlag"] == 2
+    @test attrs["Crossover"] == -1
+end

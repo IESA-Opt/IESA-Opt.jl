@@ -189,6 +189,11 @@ variants = run_campaign(md, changes_per_variant;
 )
 ```
 
+When `solver = :gurobi` and `mode = :ts`, scenario-space uses the same
+representative-day tuned Gurobi defaults as single runs. Those defaults are
+selected from `md.params.n_repDays`; entries in `solver_attrs` still take
+precedence for experiments that need explicit solver settings.
+
 ### Serial vs Distributed
 
 | `n_workers` | Path | What happens |
