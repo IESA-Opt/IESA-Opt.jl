@@ -175,24 +175,13 @@
           <section class="panel run-card">
             <p class="eyebrow">Scenario campaign</p>
             <h2 id="scTitle">Ready to validate</h2>
-            <button id="scRunCampaignBtn" class="primary-button" type="submit" disabled title="Phase 3 hookup pending">Run campaign</button>
+            <button id="scRunCampaignBtn" class="primary-button" type="submit">Run campaign</button>
             <p id="scHint" class="subtle">Validate the parameter space, then preview the sample to inspect variants.</p>
             <dl class="summary-list">
               <div><dt>Campaign</dt><dd id="scSelectedCampaignLabel">my_campaign</dd></div>
               <div><dt>Method</dt><dd id="scSelectedMethod">Latin hypercube</dd></div>
               <div><dt>Variants</dt><dd id="scSelectedVariants">100</dd></div>
             </dl>
-          </section>
-
-          <section class="panel compact-panel">
-            <h2>Campaign Settings</h2>
-            <label class="field"><span>Campaign name</span><input id="scCampaignName" type="text" placeholder="my_campaign" value="my_campaign"></label>
-            <label class="field"><span>Sampling method</span><select id="scMethod"><option value="lhs">Latin hypercube</option><option value="morris">Morris</option><option value="sobol">Sobol</option><option value="factorial">Factorial</option></select></label>
-            <label class="field"><span>Number of variants</span><input id="scNVariants" type="number" min="1" step="1" value="100"></label>
-            <label class="field"><span>Random seed</span><input id="scSeed" type="number" min="0" step="1" value="12345"></label>
-            <label class="field"><span>Parallel workers</span><div class="range-pair"><input id="scWorkers" type="range" min="1" max="32" value="4"><input id="scWorkersNumber" type="number" min="1" max="32" value="4"></div></label>
-            <div class="field"><span>Implied evaluations</span><div id="scImplied" class="custom-input-path">&mdash;</div></div>
-            <div class="field"><span>Status</span><div id="scStatus" class="custom-input-path">Not validated yet.</div></div>
           </section>
 
           <section class="panel compact-panel">
@@ -213,6 +202,19 @@
               <div class="field"><span>Or pick a file</span><div class="browse-row"><button id="scBrowseInputButton" class="secondary-button" type="button">Browse&hellip;</button><button id="scClearCustomInputButton" class="secondary-button hidden" type="button">Clear</button></div></div>
               <div id="scCustomInputDisplay" class="field span-2 hidden"><span>Selected file</span><div id="scCustomInputDisplayPath" class="custom-input-path"></div></div>
               <div class="field span-2"><span>Years selection</span><div id="scPeriods" class="choice-row dense"></div></div>
+            </div>
+          </section>
+
+          <section class="panel compact-panel">
+            <h2>Campaign Settings</h2>
+            <div class="form-grid three">
+              <label class="field"><span>Campaign name</span><input id="scCampaignName" type="text" placeholder="my_campaign" value="my_campaign"></label>
+              <label class="field"><span>Sampling method</span><select id="scMethod"><option value="lhs">Latin hypercube</option><option value="morris">Morris</option><option value="sobol">Sobol</option><option value="factorial">Factorial</option></select></label>
+              <label class="field"><span>Number of variants</span><input id="scNVariants" type="number" min="1" step="1" value="100"></label>
+              <label class="field"><span>Random seed</span><input id="scSeed" type="number" min="0" step="1" value="12345"></label>
+              <label class="field"><span>Parallel workers</span><div class="range-pair"><input id="scWorkers" type="range" min="1" max="32" value="4"><input id="scWorkersNumber" type="number" min="1" max="32" value="4"></div></label>
+              <div class="field"><span>Implied evaluations</span><div id="scImplied" class="custom-input-path">&mdash;</div></div>
+              <div class="field span-2"><span>Status</span><div id="scStatus" class="custom-input-path">Not validated yet.</div></div>
             </div>
           </section>
 

@@ -59,6 +59,8 @@
   const progressState = {
     active: false,
     demoTimer: null,
+    pollTimer: null,
+    activeCampaignId: null,
     startedAt: 0,
     campaign: { name: "", total: 0, started_at: 0 },
     workers: [],
@@ -270,7 +272,12 @@
   // ===========================================================================
   function bindScenarioFormControls() {
     const form = $("scForm");
-    if (form) form.addEventListener("submit", (e) => { e.preventDefault(); });
+    if (form) form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      runCampaign().catch((err) => {
+        setStatus("Failed to launch campaign: " + (err && err.message ? err.message : err), "error");
+      });
+    });
     const browse = $("scBrowseInputButton");
     if (browse) browse.addEventListener("click", browseInputFile);
     const clear = $("scClearCustomInputButton");
@@ -690,7 +697,146 @@
     const start = $("campaignDemoStart");
     const stop = $("campaignDemoStop");
     if (start) start.addEventListener("click", startDemo);
-    if (stop) stop.addEventListener("click", stopDemo);
+    if (stop) stop.addEventListener("click", () => {
+      // Stop a live campaign if one is active; otherwise stop the demo.
+      if (progressState.activeCampaignId) {
+        stopLiveCampaign().catch((err) => console.warn("stop failed", err));
+      } else {
+        stopDemo();
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Real-campaign launch + polling (Phase 3.5)
+  // ---------------------------------------------------------------------------
+  async function runCampaign() {
+    // Always validate first so the user sees errors before we launch.
+    const v = await validateNow();
+    if (v && v.valid === false) {
+      setStatus("Fix the validation errors before running.", "error");
+      return;
+    }
+    const body = buildRunBody();
+    setStatus("Launching campaign\u2026", "");
+    const r = await fetch("/api/scenario/run", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const payload = await r.json();
+    if (!payload.ok) {
+      const msg = (payload.errors && payload.errors[0]) || "Run failed.";
+      setStatus(msg, "error");
+      return;
+    }
+    setStatus("Campaign queued: " + payload.campaign_id, "ok");
+    progressState.activeCampaignId = payload.campaign_id;
+    // Seed the dashboard from the initial snapshot.
+    applySnapshot(payload.snapshot);
+    // Switch the user to the Progress sub-tab so they can watch it run.
+    activateProgressTab();
+    startPolling(payload.campaign_id);
+  }
+
+  function buildRunBody() {
+    const spec = collectSpec();
+    spec.inputWorkbook = ($("scInputWorkbook") || {}).value || "data/default_data.xlsx";
+    spec.n_workers = Number(($("scWorkers") || {}).value) || 1;
+    spec.threads_per_worker = computeThreadsPerWorker();
+    spec.solver = ($("scSolver") || {}).value || "highs";
+    spec.mode = computeMode();
+    spec.periods = collectPeriods();
+    return spec;
+  }
+
+  function computeThreadsPerWorker() {
+    const totalCores = Number(($("scThreads") || {}).value) || 0;
+    const workers = Math.max(1, Number(($("scWorkers") || {}).value) || 1);
+    return totalCores > 0 ? Math.max(1, Math.floor(totalCores / workers)) : 1;
+  }
+
+  function computeMode() {
+    const ts = $("scTimeSlicingToggle");
+    if (ts && ts.checked === false) return "fh";
+    return "ts";
+  }
+
+  function collectPeriods() {
+    const wrap = $("scPeriods");
+    if (!wrap) return [];
+    return Array.from(wrap.querySelectorAll("input[type='checkbox']:checked"))
+      .map((cb) => Number(cb.value)).filter((n) => !isNaN(n));
+  }
+
+  function activateProgressTab() {
+    // Switch the user to the Progress sub-tab so they can watch live updates.
+    const tab = document.querySelector(".tab-button[data-tab='scenario-progress']");
+    if (tab) tab.click();
+  }
+
+  function applySnapshot(snap) {
+    if (!snap || !snap.campaign) return;
+    progressState.active = !snap.done;
+    progressState.campaign = {
+      name: snap.campaign.name || "",
+      total: snap.campaign.total || 0,
+      started_at: (snap.campaign.started_at || 0) * 1000,
+    };
+    progressState.workers = (snap.workers || []).map((w) => ({
+      id: w.id,
+      status: w.status,
+      variant_id: w.variant_id,
+      assigned: w.assigned || 0,
+      completed: w.completed || 0,
+      failed: w.failed || 0,
+      progress: (w.progress || 0) * 100,
+      started_at: (w.started_at || 0) * 1000,
+    }));
+    if ($("campaignDemoStart")) $("campaignDemoStart").classList.add("hidden");
+    if ($("campaignDemoStop")) $("campaignDemoStop").classList.remove("hidden");
+    renderProgress();
+  }
+
+  function startPolling(id) {
+    stopPolling();
+    progressState.pollTimer = setInterval(async () => {
+      try {
+        const r = await fetch("/api/scenario/status/" + encodeURIComponent(id));
+        const snap = await r.json();
+        if (!snap || snap.ok === false) {
+          stopPolling();
+          return;
+        }
+        applySnapshot(snap);
+        if (snap.done) {
+          stopPolling();
+          progressState.active = false;
+          if ($("campaignDemoStart")) $("campaignDemoStart").classList.remove("hidden");
+          if ($("campaignDemoStop")) $("campaignDemoStop").classList.add("hidden");
+          renderProgress();
+        }
+      } catch (err) {
+        console.warn("scenario/status poll failed", err);
+      }
+    }, 1000);
+  }
+
+  function stopPolling() {
+    if (progressState.pollTimer) {
+      clearInterval(progressState.pollTimer);
+      progressState.pollTimer = null;
+    }
+  }
+
+  async function stopLiveCampaign() {
+    const id = progressState.activeCampaignId;
+    if (!id) return;
+    try {
+      await fetch("/api/scenario/stop/" + encodeURIComponent(id), { method: "POST" });
+    } catch (err) {
+      console.warn("scenario/stop failed", err);
+    }
   }
 
   function startDemo() {

@@ -8,6 +8,14 @@ using JSON3
 const UI_JOBS = Dict{String,Dict{String,Any}}()
 const UI_TASKS = Dict{String,Task}()
 const UI_JOBS_LOCK = ReentrantLock()
+# Scenario-space campaigns are tracked separately from solve jobs because
+# they have a different lifecycle (one campaign supervises many variants
+# running on a Distributed worker pool). Each entry is a Dict snapshot
+# safe to serialise to JSON; the Task and cancel Ref live alongside it.
+const UI_CAMPAIGNS = Dict{String,Dict{String,Any}}()
+const UI_CAMPAIGN_TASKS = Dict{String,Task}()
+const UI_CAMPAIGN_CANCEL = Dict{String,Ref{Bool}}()
+const UI_CAMPAIGNS_LOCK = ReentrantLock()
 const COMMERCIAL_SOLVER_IDS = ("gurobi", "cplex", "xpress")
 const UI_MAX_LOG_LINES = 5000
 const UI_DATA_CACHE_LOCK = ReentrantLock()
@@ -168,6 +176,20 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         return _json_response(_scenario_validate(_json_body(req)))
     elseif method == "POST" && path == "/api/scenario/preview"
         return _json_response(_scenario_preview(_json_body(req)))
+    elseif method == "POST" && path == "/api/scenario/run"
+        return _json_response(_scenario_run(_json_body(req)); status = 202)
+    elseif method == "GET" && startswith(path, "/api/scenario/")
+        parts = _url_parts(path)
+        if length(parts) == 4 && parts[3] == "status"
+            return _json_response(_scenario_status(parts[4]))
+        elseif length(parts) == 4 && parts[3] == "result"
+            return _json_response(_scenario_result(parts[4]))
+        end
+    elseif method == "POST" && startswith(path, "/api/scenario/")
+        parts = _url_parts(path)
+        if length(parts) == 4 && parts[3] == "stop"
+            return _json_response(_scenario_stop!(parts[4]))
+        end
     elseif method == "GET" && startswith(path, "/api/jobs/")
         parts = _url_parts(path)
         if length(parts) == 3
@@ -3123,5 +3145,436 @@ function _scenario_preview(body)
             "errors" => [sprint(showerror, err)],
             "warnings" => String[],
         )
+    end
+end
+
+# =============================================================================
+# Scenario-space campaigns — Phase 3.5: end-to-end run from the UI
+#
+# The /api/scenario/run endpoint launches a campaign on a background task
+# that updates a JSON-friendly snapshot under UI_CAMPAIGNS_LOCK. The
+# browser polls /api/scenario/status/<id> every second to refresh the
+# progress dashboard. /api/scenario/stop/<id> flips a cancel Ref so the
+# orchestrator stops dispatching new variants. /api/scenario/result/<id>
+# returns the final summary once the task has completed.
+#
+# Bridge from CampaignSpec (sheet/cell) to ScenarioSpec (field/indices):
+#   For Phase 3.5 we map `row.sheet` → Julia field name (Symbol) and parse
+#   `row.cell` as the indices tuple (e.g. "(NL, 2050)" -> (:NL, 2050)).
+#   This avoids the full xlsx-coordinate resolver while still giving the
+#   user a fully functional UI to drive real campaigns. A proper resolver
+#   that reads data_reading.jl can replace `_row_to_leaf_target` later.
+# =============================================================================
+
+"""
+    _parse_indices_cell(s::AbstractString) -> Tuple
+
+Parse a UI "Cell" string into a Julia indices tuple.
+
+Accepts: `"NL"`, `"2050"`, `":NL"`, `"(NL, 2050)"`, `"(:NL, 2050)"`,
+`"NL,2050"`. Bare identifiers are converted to `Symbol`s, integer-looking
+tokens to `Int`, anything else to a `String`. Throws `ArgumentError` if
+the string is empty or unparseable.
+"""
+function _parse_indices_cell(s::AbstractString)
+    txt = strip(s)
+    isempty(txt) && throw(ArgumentError("Cell is empty — expected an index like NL or (NL, 2050)."))
+    # Strip outer parentheses if present
+    if startswith(txt, "(") && endswith(txt, ")")
+        txt = strip(txt[2:end-1])
+    end
+    parts = [strip(p) for p in split(txt, ",") if !isempty(strip(p))]
+    isempty(parts) && throw(ArgumentError("Cell has no usable tokens after parsing '$s'."))
+    out = Any[]
+    for p in parts
+        tok = strip(p)
+        startswith(tok, ":") && (tok = tok[2:end])
+        if tryparse(Int, tok) !== nothing
+            push!(out, parse(Int, tok))
+        elseif occursin(r"^[A-Za-z_][A-Za-z0-9_]*$", tok)
+            push!(out, Symbol(tok))
+        else
+            push!(out, String(tok))
+        end
+    end
+    return Tuple(out)
+end
+
+"""
+    _row_to_leaf_target(row::ParameterRow) -> LeafTarget
+
+Convert a UI parameter row to a `LeafTarget`. Uses `row.sheet` as the
+Julia field name and `row.cell` as the indices tuple. Skips rows with no
+bounds (returns `nothing`) so callers can filter them out.
+"""
+function _row_to_leaf_target(row)
+    row.min === nothing && return nothing
+    row.max === nothing && return nothing
+    field = Symbol(strip(row.sheet))
+    indices = _parse_indices_cell(row.cell)
+    label = isempty(row.subparameter) || row.subparameter == row.parameter ?
+        row.parameter : "$(row.parameter)/$(row.subparameter)"
+    return LeafTarget(field, indices;
+                      type = row.type,
+                      min = row.min,
+                      max = row.max,
+                      step = row.step,
+                      label = label)
+end
+
+"""
+    _campaign_session_skeleton(id, spec, n_workers, threads_per_worker, solver, mode) -> Dict
+
+Build the JSON-serialisable snapshot dict that the browser polls.
+`workers` is a fixed-length vector with one entry per worker slot;
+`campaign` carries the meta-fields the dashboard renders.
+"""
+function _campaign_session_skeleton(id::String, spec, n_workers::Int,
+                                    threads_per_worker::Int, solver::Symbol,
+                                    mode::Symbol)
+    workers = [Dict{String,Any}(
+        "id" => i,
+        "status" => "idle",
+        "variant_id" => nothing,
+        "assigned" => 0,
+        "completed" => 0,
+        "failed" => 0,
+        "progress" => 0.0,
+        "started_at" => nothing,
+    ) for i in 1:max(1, n_workers)]
+    return Dict{String,Any}(
+        "campaign" => Dict{String,Any}(
+            "id" => id,
+            "name" => spec.name,
+            "method" => String(spec.method),
+            "total" => spec.n_variants,
+            "n_workers" => max(1, n_workers),
+            "threads_per_worker" => threads_per_worker,
+            "solver" => String(solver),
+            "mode" => String(mode),
+            "started_at" => time(),
+            "completed" => 0,
+            "failed" => 0,
+            "status" => "queued",
+        ),
+        "workers" => workers,
+        "done" => false,
+        "error" => nothing,
+    )
+end
+
+"""
+    _scenario_run(body) -> Dict
+
+Launch a scenario-space campaign on a background task. Returns the
+campaign id and the initial snapshot. The browser then polls
+`/api/scenario/status/<id>` to drive the dashboard. Always returns 200
+with `ok=false` + `errors` when the spec fails validation, so the UI can
+surface error messages without distinguishing HTTP status codes.
+"""
+function _scenario_run(body)
+    try
+        spec = spec_from_dict(body)
+        v = validate_spec(spec)
+        v.valid || return Dict{String,Any}(
+            "ok" => false,
+            "errors" => v.errors,
+            "warnings" => v.warnings,
+        )
+
+        # Bridge CampaignSpec rows -> ScenarioSpec LeafTargets.
+        targets = LeafTarget[]
+        seen = Set{Tuple{Symbol,Tuple}}()
+        for r in spec.rows
+            lt = _row_to_leaf_target(r)
+            lt === nothing && continue
+            key = (lt.field, lt.indices)
+            key in seen && continue
+            push!(seen, key)
+            push!(targets, lt)
+        end
+        isempty(targets) && return Dict{String,Any}(
+            "ok" => false,
+            "errors" => ["No usable parameter targets after bridging. " *
+                         "Each row's Sheet must be a Julia field name (e.g. emissionTargetAir) " *
+                         "and Cell must be an indices tuple (e.g. (NL, 2050))."],
+            "warnings" => v.warnings,
+        )
+
+        scenario_spec = ScenarioSpec(
+            name = spec.name,
+            method = spec.method,
+            n_variants = spec.n_variants,
+            seed = spec.seed,
+            targets = targets,
+        )
+
+        # Workbook + solver settings
+        input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
+        input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
+        isfile(input_path) || return Dict{String,Any}(
+            "ok" => false,
+            "errors" => ["Input workbook not found: $input_value"],
+            "warnings" => String[],
+        )
+        n_workers = max(1, _as_int(_config_get(body, "n_workers", _config_get(body, "workers", 1)), 1))
+        threads_per_worker = max(1, _as_int(_config_get(body, "threads_per_worker", 1), 1))
+        solver_sym = Symbol(lowercase(String(_config_get(body, "solver", "highs"))))
+        mode_raw = lowercase(String(_config_get(body, "mode", "ts")))
+        mode_sym = mode_raw in ("fh", "full_hourly", "full-hourly") ? :fh :
+                   mode_raw in ("annual",) ? :annual : :ts
+        periods = _as_int_vector(_config_get(body, "periods", [2050]))
+
+        # Allocate id and snapshot
+        id = "camp_" * Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
+        snapshot = _campaign_session_skeleton(id, scenario_spec, n_workers,
+                                              threads_per_worker, solver_sym, mode_sym)
+        cancel_ref = Ref(false)
+        lock(UI_CAMPAIGNS_LOCK)
+        try
+            UI_CAMPAIGNS[id] = snapshot
+            UI_CAMPAIGN_CANCEL[id] = cancel_ref
+        finally
+            unlock(UI_CAMPAIGNS_LOCK)
+        end
+
+        # Launch background task. All updates go through helpers that take
+        # the lock; renderProgress on the browser side reads via /status.
+        task = Base.Threads.@spawn _run_campaign_task!(id, input_path, periods,
+                                                      scenario_spec, n_workers,
+                                                      threads_per_worker, solver_sym,
+                                                      mode_sym, cancel_ref)
+        lock(UI_CAMPAIGNS_LOCK)
+        try
+            UI_CAMPAIGN_TASKS[id] = task
+        finally
+            unlock(UI_CAMPAIGNS_LOCK)
+        end
+
+        return Dict{String,Any}(
+            "ok" => true,
+            "campaign_id" => id,
+            "snapshot" => _scenario_status(id),
+            "warnings" => v.warnings,
+        )
+    catch err
+        return Dict{String,Any}(
+            "ok" => false,
+            "errors" => [sprint(showerror, err)],
+            "warnings" => String[],
+        )
+    end
+end
+
+"""
+    _run_campaign_task!(id, input_path, periods, scenario_spec, n_workers,
+                        threads_per_worker, solver, mode, cancel)
+
+Background task that loads ModelData, primes derivations/clustering as
+required by `mode`, and calls `run_scenario_space` with callbacks that
+update the JSON snapshot. Catches all errors and records them on the
+snapshot so the UI can surface them.
+"""
+function _run_campaign_task!(id::String, input_path::String, periods::Vector{Int},
+                             scenario_spec, n_workers::Int, threads_per_worker::Int,
+                             solver::Symbol, mode::Symbol, cancel::Ref{Bool})
+    try
+        _campaign_update!(id) do snap
+            snap["campaign"]["status"] = "reading"
+            snap["campaign"]["stage"] = "Reading workbook"
+        end
+        md = _read_ui_data_cached(input_path)
+        if !isempty(periods)
+            selected = [p for p in periods if p in md.sets.periods]
+            if !isempty(selected)
+                md.sets.periods_solve = selected
+            end
+        end
+
+        _campaign_update!(id) do snap
+            snap["campaign"]["status"] = "preparing"
+            snap["campaign"]["stage"] = "Deriving sets and parameters"
+        end
+        derive_sets!(md)
+        compute_derived_params!(md)
+        if mode == :ts
+            _campaign_update!(id) do snap
+                snap["campaign"]["stage"] = "Clustering representative days"
+            end
+            build_temporal_clusters!(md)
+        end
+
+        _campaign_update!(id) do snap
+            snap["campaign"]["status"] = "running"
+            snap["campaign"]["stage"] = "Solving variants"
+        end
+
+        # round-robin worker assignment so each variant has a worker slot
+        # the UI can colour. Distributed dispatch order is not strictly
+        # round-robin, but using `(variant_id - 1) % n_workers + 1` keeps
+        # the dashboard busy-looking even on small n.
+        nw = max(1, n_workers)
+        assign_worker = vid -> ((vid - 1) % nw) + 1
+
+        on_progress = function (info)
+            cancel[] && return
+            wid = assign_worker(info.variant_id)
+            _campaign_update!(id) do snap
+                w = snap["workers"][wid]
+                if info.stage == "start"
+                    w["status"] = "running"
+                    w["variant_id"] = info.variant_id
+                    w["assigned"] += 1
+                    w["started_at"] = time()
+                    w["progress"] = 0.0
+                elseif info.stage == "done"
+                    res = get(info, :result, nothing)
+                    failed = res === nothing ? false :
+                             !(uppercase(res.term_status) in ("OPTIMAL", "LOCALLY_SOLVED"))
+                    w["status"] = failed ? "failed" : "done"
+                    w["variant_id"] = info.variant_id
+                    if failed
+                        w["failed"] += 1
+                        snap["campaign"]["failed"] += 1
+                    else
+                        w["completed"] += 1
+                        snap["campaign"]["completed"] += 1
+                    end
+                    w["progress"] = 1.0
+                end
+            end
+        end
+
+        on_result = function (r)
+            # Reserved for streaming per-variant detail (results table /
+            # DuckDB write). on_progress already drives the dashboard.
+            return nothing
+        end
+
+        result = run_scenario_space(md, scenario_spec;
+                                    n_workers = n_workers,
+                                    threads_per_worker = threads_per_worker,
+                                    solver = solver,
+                                    mode = mode,
+                                    cancel = cancel,
+                                    on_progress = on_progress,
+                                    on_result = on_result)
+
+        _campaign_update!(id) do snap
+            snap["campaign"]["status"] = cancel[] ? "cancelled" : "completed"
+            snap["campaign"]["stage"] = cancel[] ?
+                "Cancelled after $(snap["campaign"]["completed"])/$(snap["campaign"]["total"]) variants" :
+                "All variants completed"
+            snap["campaign"]["runtime_sec"] = round(result.runtime_seconds, digits = 3)
+            snap["done"] = true
+            for w in snap["workers"]
+                if w["status"] == "running"
+                    w["status"] = "idle"
+                end
+            end
+        end
+    catch err
+        msg = sprint(showerror, err)
+        @error "Campaign task failed" id error=msg exception=(err, catch_backtrace())
+        _campaign_update!(id) do snap
+            snap["campaign"]["status"] = "failed"
+            snap["campaign"]["stage"] = "Failed: $msg"
+            snap["done"] = true
+            snap["error"] = msg
+        end
+    end
+    return nothing
+end
+
+"""
+    _campaign_update!(f, id::String)
+
+Apply `f(snap)` to the campaign snapshot under the lock. `f` is called
+with the live `Dict{String,Any}` and may mutate it in place.
+"""
+function _campaign_update!(f, id::String)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        snap = get(UI_CAMPAIGNS, id, nothing)
+        snap === nothing && return nothing
+        f(snap)
+        snap["campaign"]["updated_at"] = time()
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+    yield()
+    return nothing
+end
+
+"""
+    _scenario_status(id) -> Dict
+
+Return a deep-ish copy of the campaign snapshot keyed by `id`, or an
+error dict if the id is unknown.
+"""
+function _scenario_status(id::AbstractString)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        snap = get(UI_CAMPAIGNS, String(id), nothing)
+        snap === nothing && return Dict{String,Any}(
+            "ok" => false,
+            "error" => "Unknown campaign id: $id",
+        )
+        return deepcopy(snap)
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+end
+
+"""
+    _scenario_stop!(id) -> Dict
+
+Flip the cancel Ref for `id`. The orchestrator stops dispatching new
+variants but lets currently-running ones finish. Returns `{ok: true}`
+on success, or an error dict if the id is unknown.
+"""
+function _scenario_stop!(id::AbstractString)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        cref = get(UI_CAMPAIGN_CANCEL, String(id), nothing)
+        cref === nothing && return Dict{String,Any}(
+            "ok" => false,
+            "error" => "Unknown campaign id: $id",
+        )
+        cref[] = true
+        snap = get(UI_CAMPAIGNS, String(id), nothing)
+        if snap !== nothing
+            snap["campaign"]["status"] = "cancelling"
+            snap["campaign"]["stage"] = "Cancel requested — finishing in-flight variants"
+        end
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+    return Dict{String,Any}("ok" => true, "campaign_id" => id)
+end
+
+"""
+    _scenario_result(id) -> Dict
+
+Final summary for a completed campaign. Returns `done=false` if the
+task is still running so the UI can keep polling.
+"""
+function _scenario_result(id::AbstractString)
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        snap = get(UI_CAMPAIGNS, String(id), nothing)
+        snap === nothing && return Dict{String,Any}(
+            "ok" => false,
+            "error" => "Unknown campaign id: $id",
+        )
+        return Dict{String,Any}(
+            "ok" => true,
+            "done" => snap["done"],
+            "campaign" => snap["campaign"],
+            "workers" => snap["workers"],
+            "error" => snap["error"],
+        )
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
     end
 end
