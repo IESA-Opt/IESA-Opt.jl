@@ -216,6 +216,27 @@
             </div>
           </section>
 
+          <section class="panel">
+            <div class="panel-title">
+              <h2>Parameter Space</h2>
+              <div class="panel-toolbar">
+                <button id="scAddRow" type="button" class="secondary-button">+ Add row</button>
+                <button id="scDuplicateRow" type="button" class="secondary-button">Duplicate</button>
+                <button id="scRemoveRow" type="button" class="danger-button">Remove selected</button>
+                <span class="sc-col-add-wrap"><button id="scAddColumnBtn" type="button" class="secondary-button" title="Add a hidden column back">+ Column</button><div id="scAddColumnMenu" class="sc-col-menu hidden"></div></span>
+                <button id="scValidateBtn" type="button" class="secondary-button">Validate</button>
+                <button id="scPreviewBtn" type="button" class="primary-button" style="width:auto;">Preview sample</button>
+              </div>
+            </div>
+            <div class="table-wrap" style="max-height:none;overflow:visible;">
+              <table id="scTable" class="sc-table">
+                <thead id="scTableHead"></thead>
+                <tbody id="scTableBody"></tbody>
+              </table>
+            </div>
+            <div id="scMessages" class="sc-messages"></div>
+          </section>
+
           <div class="main-grid">
             <section class="panel compact-panel">
               <h2>Solve Mode</h2>
@@ -248,27 +269,6 @@
           </section>
         </div>
       </form>
-
-      <section class="panel">
-        <div class="panel-title">
-          <h2>Parameter Space</h2>
-          <div class="panel-toolbar">
-            <button id="scAddRow" type="button" class="secondary-button">+ Add row</button>
-            <button id="scDuplicateRow" type="button" class="secondary-button">Duplicate</button>
-            <button id="scRemoveRow" type="button" class="danger-button">Remove selected</button>
-            <span class="sc-col-add-wrap"><button id="scAddColumnBtn" type="button" class="secondary-button" title="Add a hidden column back">+ Column</button><div id="scAddColumnMenu" class="sc-col-menu hidden"></div></span>
-            <button id="scValidateBtn" type="button" class="secondary-button">Validate</button>
-            <button id="scPreviewBtn" type="button" class="primary-button" style="width:auto;">Preview sample</button>
-          </div>
-        </div>
-        <div class="table-wrap" style="max-height:none;overflow:visible;">
-          <table id="scTable" class="sc-table">
-            <thead id="scTableHead"></thead>
-            <tbody id="scTableBody"></tbody>
-          </table>
-        </div>
-        <div id="scMessages" class="sc-messages"></div>
-      </section>
 
       <section class="panel">
         <div class="panel-title">
