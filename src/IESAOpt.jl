@@ -98,6 +98,11 @@ include("scenario/manifest.jl")
 include("scenario/variant.jl")
 # Phase 3: campaign runner (serial + Distributed.jl worker pool)
 include("scenario/runner.jl")
+# Phase 4: high-level orchestrator + result persistence
+include("scenario/orchestrator.jl")
+include("scenario/persistence.jl")
+# Phase 5: analysis helpers (objective_table, sensitivity_scan, pareto_front)
+include("scenario/analysis.jl")
 
 include("ui_server.jl")
 # include("sweeps.jl")
@@ -150,6 +155,12 @@ export build_mutations, apply_mutation!, apply_mutations!
 export apply_leaf_change!, apply_leaf_changes!, apply_variant!
 # Scenario-space exploration (Phase 3: campaign runner)
 export VariantResult, run_campaign
+# Scenario-space exploration (Phase 4: orchestrator + persistence)
+export LeafTarget, ScenarioSpec, ScenarioResult
+export sample_scenario_space, samples_to_changes, run_scenario_space
+export save_scenario_results, load_scenario_results
+# Scenario-space exploration (Phase 5: analysis helpers)
+export objective_table, sensitivity_scan, pareto_front
 
 # ---------------------------------------------------------------------------
 # Module init — populate the scenario-space mutation registry with the

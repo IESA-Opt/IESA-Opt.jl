@@ -27,3 +27,11 @@ end
     include("test_scenario_runner.jl")
 end
 
+@testset "Scenario-space exploration (Phase 4: orchestrator + persistence)" begin
+    include("test_scenario_orchestrator.jl")
+end
+
+@testset "Scenario-space exploration (Phase 5: analysis helpers)" begin
+    include("test_scenario_analysis.jl")
+end
+
