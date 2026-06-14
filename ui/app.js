@@ -63,6 +63,7 @@ async function init() {
   // Most importantly, loadOutputs() must always run so the Results sidebar stops
   // showing "Loading outputs." even if a downstream binding fails.
   safeRun("bindTabs", bindTabs);
+  safeRun("bindSections", bindSections);
   safeRun("bindControls", bindControls);
   safeRun("renderJob(null)", () => renderJob(null));
   safeRun("startStatusPolling", startStatusPolling);
@@ -165,6 +166,26 @@ function renderJuliaStatus(status) {
 async function fetchJson(url, options) { const r = await fetch(url, options); const p = await r.json(); if (!r.ok) throw new Error(p.error || r.statusText); return p; }
 function bindTabs() { document.querySelectorAll(".tab-button").forEach(b => b.addEventListener("click", () => switchTab(b.dataset.tab))); }
 function switchTab(tab) { document.querySelectorAll(".tab-button").forEach(b => b.classList.toggle("active", b.dataset.tab === tab)); document.querySelectorAll(".tab-panel").forEach(p => p.classList.toggle("active", p.id === `tab-${tab}`)); }
+function bindSections() {
+  document.querySelectorAll(".section-button").forEach(b => {
+    if (b.disabled) return;
+    b.addEventListener("click", () => switchSection(b.dataset.section));
+  });
+  // Establish initial visibility based on the section button currently marked active.
+  const initial = document.querySelector(".section-button.active") || document.querySelector(".section-button:not([disabled])");
+  if (initial) switchSection(initial.dataset.section);
+}
+function switchSection(section) {
+  document.querySelectorAll(".section-button").forEach(b => b.classList.toggle("active", b.dataset.section === section));
+  document.querySelectorAll(".tab-button").forEach(b => { b.hidden = b.dataset.section !== section; });
+  // After filtering, ensure exactly one visible tab is active. If the previously-active tab
+  // belongs to the new section, leave it; otherwise activate the first visible one.
+  const visibleActive = document.querySelector(".tab-button.active:not([hidden])");
+  if (!visibleActive) {
+    const firstVisible = document.querySelector(`.tab-button[data-section="${section}"]`);
+    if (firstVisible) switchTab(firstVisible.dataset.tab);
+  }
+}
 
 function bindControls() {
   $("runForm").addEventListener("submit", onRunButtonClick);

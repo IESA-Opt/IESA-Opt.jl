@@ -22,12 +22,20 @@
     </div>
   </header>
 
+  <nav class="sections" aria-label="Workspaces">
+    <button class="section-button active" data-section="main" type="button">Single run</button>
+    <button class="section-button" data-section="scenario" type="button">Scenario Space</button>
+    <button class="section-button" data-section="mga" type="button" disabled title="Coming soon">MGA (coming soon)</button>
+  </nav>
+
   <nav class="tabs" aria-label="Main views">
-    <button class="tab-button active" data-tab="run" type="button">Run</button>
-    <button class="tab-button" data-tab="progress" type="button">Progress</button>
-    <button class="tab-button" data-tab="results" type="button">Results</button>
-    <button class="tab-button" data-tab="scenario" type="button">Scenario Space</button>
-    <button class="tab-button" data-tab="about" type="button">About</button>
+    <button class="tab-button active" data-section="main" data-tab="run" type="button">Run</button>
+    <button class="tab-button" data-section="main" data-tab="progress" type="button">Progress</button>
+    <button class="tab-button" data-section="main" data-tab="results" type="button">Results</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-setup" type="button">Setup</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-progress" type="button">Progress</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-results" type="button">Results</button>
+    <button class="tab-button" data-section="main" data-tab="about" type="button">About</button>
   </nav>
 
   <main>
@@ -161,7 +169,7 @@
       </section>
     </section>
 
-    <section id="tab-scenario" class="tab-panel">
+    <section id="tab-scenario-setup" class="tab-panel">
       <section class="panel">
         <div class="panel-title">
           <div>
@@ -221,6 +229,26 @@
       </section>
     </section>
 
+    <section id="tab-scenario-progress" class="tab-panel">
+      <section class="panel">
+        <div class="panel-title">
+          <h2>Campaign progress</h2>
+          <p class="subtle">Live progress for the running campaign &mdash; UI hookup lands with the Phase&nbsp;3 runner integration.</p>
+        </div>
+        <p class="subtle">No campaign running. Configure a campaign on the <strong>Setup</strong> tab and launch it to see per-variant progress here.</p>
+      </section>
+    </section>
+
+    <section id="tab-scenario-results" class="tab-panel">
+      <section class="panel">
+        <div class="panel-title">
+          <h2>Campaign results</h2>
+          <p class="subtle">Aggregated results across the variant set &mdash; UI hookup lands with the Phase&nbsp;4/5 results integration.</p>
+        </div>
+        <p class="subtle">No campaign results yet. Once a campaign finishes, summary tables and parameter-impact plots will appear here.</p>
+      </section>
+    </section>
+
     <section id="tab-about" class="tab-panel">
       <section class="about-page panel">
         <img src="/assets/iesa-opt-logo.png" alt="IESA-Opt" class="about-logo">
@@ -233,7 +261,13 @@
         </div>
 
         <h3>Using the dashboard</h3>
-        <p>The dashboard has four tabs along the top: <strong>Run</strong>, <strong>Progress</strong>, <strong>Results</strong>, and <strong>About</strong>. Each tab is described below together with every option it exposes.</p>
+        <p>The dashboard is organised into <strong>sections</strong> along the very top &mdash; each section is its own workspace with its own set of tabs underneath:</p>
+        <ul class="about-list">
+          <li><strong>Single run</strong> &mdash; the default workspace. Tabs: <em>Run</em>, <em>Progress</em>, <em>Results</em>, <em>About</em>. Used to launch one optimisation, watch it solve, and inspect the resulting output folder.</li>
+          <li><strong>Scenario Space</strong> &mdash; the campaign workspace. Tabs: <em>Setup</em> (define parameter space + sample variants), <em>Progress</em> (live campaign progress, Phase 3 hookup pending), <em>Results</em> (aggregated cross-variant analytics, Phase 4/5 hookup pending).</li>
+          <li><strong>MGA</strong> &mdash; coming soon. Will host modelling-to-generate-alternatives explorations.</li>
+        </ul>
+        <p>The tabs below the section bar are filtered automatically: only the tabs that belong to the active section are shown. Each tab is described below together with every option it exposes.</p>
 
         <h3>Run tab</h3>
         <p>This is the launchpad for a new optimisation. The left side fixes the solver; the right side fixes the scenario, temporal resolution, and reporting flags. Press <strong>Run model</strong> to start; the page will switch to <strong>Progress</strong> automatically.</p>
