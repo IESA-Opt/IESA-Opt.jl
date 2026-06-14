@@ -37,6 +37,7 @@ end
     @test r.error === nothing
     @test r.term_status == ""
     @test r.leaf_values == Float64[]
+    @test r.worker_pid == 1  # default = master
 
     r2 = VariantResult(variant_id = 1,
                        objective = 42.0,
@@ -45,11 +46,13 @@ end
                        leaf_values = [3.14, 2.71],
                        build_seconds = 1.5,
                        apply_seconds = 0.2,
-                       solve_seconds = 0.7)
+                       solve_seconds = 0.7,
+                       worker_pid = 3)
     @test r2.objective == 42.0
     @test r2.term_status == "OPTIMAL"
     @test r2.leaf_values == [3.14, 2.71]
     @test r2.build_seconds == 1.5
+    @test r2.worker_pid == 3
 end
 
 @testset "_run_one_variant! happy path" begin

@@ -47,6 +47,7 @@ Base.@kwdef struct VariantResult
     build_seconds::Float64           = 0.0
     apply_seconds::Float64           = 0.0
     solve_seconds::Float64           = 0.0
+    worker_pid::Int                  = 1
     error::Union{String,Nothing}     = nothing
 end
 
@@ -63,22 +64,31 @@ const _DEFAULT_HIGHS_ATTRS_CAMPAIGN = Dict{String,Any}(
 )
 
 """
-    _campaign_optimizer(solver::Symbol, threads::Int) -> JuMP-optimizer-factory
+    _campaign_optimizer(solver::Symbol, threads::Int; attrs_override) -> JuMP-optimizer-factory
 
 Build a per-worker optimizer factory. `solver` is `:highs` (default,
 license-free) or `:gurobi` (requires Gurobi.jl + GUROBI_HOME). `threads` is
 the per-instance thread cap; for parallel campaigns set this low (e.g. 1)
-so workers do not oversubscribe the CPU.
+so workers do not oversubscribe the CPU.  `attrs_override::AbstractDict`
+is merged on top of the campaign defaults so callers can override one or
+two solver tunings (e.g. `"Crossover" => -1` for Gurobi barrier+crossover).
 """
-function _campaign_optimizer(solver::Symbol, threads::Int)
+function _campaign_optimizer(solver::Symbol, threads::Int;
+                             attrs_override::AbstractDict = Dict{String,Any}())
     if solver === :highs
         attrs = copy(_DEFAULT_HIGHS_ATTRS_CAMPAIGN)
         # HiGHS uses "threads" if positive; ignored otherwise.
         threads > 0 && (attrs["threads"] = threads)
+        for (k, v) in attrs_override
+            attrs[k] = v
+        end
         return highs_optimizer(; attrs = attrs)
     elseif solver === :gurobi
         attrs = default_gurobi_attributes(; threads = max(0, threads))
         attrs["OutputFlag"] = 0
+        for (k, v) in attrs_override
+            attrs[k] = v
+        end
         return gurobi_optimizer(; attrs = attrs)
     else
         throw(ArgumentError("Unknown solver `$solver`; expected :highs or :gurobi."))
@@ -93,8 +103,9 @@ look them up. Caller must have already run `derive_sets!`, `compute_derived_para
 and (for `mode === :ts`) `build_temporal_clusters!`.
 """
 function _build_campaign_model(md::ModelData; solver::Symbol, threads::Int,
-                               mode::Symbol)
-    m = Model(_campaign_optimizer(solver, threads))
+                               mode::Symbol,
+                               attrs_override::AbstractDict = Dict{String,Any}())
+    m = Model(_campaign_optimizer(solver, threads; attrs_override = attrs_override))
     # Scenario-space MUST keep names so constraint_by_name works.
     apply_lp_generation_speedups!(m; keep_names = true)
     if mode === :ts
@@ -159,13 +170,15 @@ tests and by `run_campaign` when `n_workers <= 1`.
 function _run_campaign_serial(base_md::ModelData,
                               changes_per_variant::AbstractVector;
                               solver::Symbol, threads::Int, mode::Symbol,
+                              attrs_override::AbstractDict,
                               on_progress::Function, on_result::Function,
                               cancel::Ref{Bool})
     n = length(changes_per_variant)
     md_work = deepcopy(base_md)
     t_build = @elapsed begin
         model = _build_campaign_model(md_work; solver = solver,
-                                      threads = threads, mode = mode)
+                                      threads = threads, mode = mode,
+                                      attrs_override = attrs_override)
     end
     results = Vector{VariantResult}(undef, n)
     @inbounds for i in 1:n
@@ -179,13 +192,15 @@ function _run_campaign_serial(base_md::ModelData,
         end
         on_progress((variant_id = i, total = n, stage = "start"))
         r = _run_one_variant!(model, md_work, changes_per_variant[i], i)
-        # Record build time on the first variant for cost accounting.
-        i == 1 && (r = VariantResult(
+        # Always stamp worker_pid; record build_seconds on the first variant.
+        r = VariantResult(
             variant_id = r.variant_id, leaf_values = r.leaf_values,
             objective = r.objective, term_status = r.term_status,
-            primal_status = r.primal_status, build_seconds = t_build,
+            primal_status = r.primal_status,
+            build_seconds = (i == 1 ? t_build : 0.0),
             apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
-            error = r.error))
+            worker_pid = Distributed.myid(),
+            error = r.error)
         results[i] = r
         on_result(r)
         on_progress((variant_id = i, total = n, stage = "done", result = r))
@@ -206,11 +221,13 @@ variant and reuses it for every subsequent variant (warm-start retained).
 """
 function _worker_loop(task_ch::RemoteChannel, result_ch::RemoteChannel,
                       base_md::ModelData,
-                      solver::Symbol, threads::Int, mode::Symbol)
+                      solver::Symbol, threads::Int, mode::Symbol,
+                      attrs_override::AbstractDict)
     md = nothing
     model = nothing
     t_build = 0.0
     n_done = 0
+    pid = Distributed.myid()
     try
         while true
             item = take!(task_ch)
@@ -220,18 +237,21 @@ function _worker_loop(task_ch::RemoteChannel, result_ch::RemoteChannel,
                 md = deepcopy(base_md)
                 t_build = @elapsed begin
                     model = _build_campaign_model(md; solver = solver,
-                                                  threads = threads, mode = mode)
+                                                  threads = threads, mode = mode,
+                                                  attrs_override = attrs_override)
                 end
             end
             r = _run_one_variant!(model, md, changes, variant_id)
-            if n_done == 0
-                r = VariantResult(
-                    variant_id = r.variant_id, leaf_values = r.leaf_values,
-                    objective = r.objective, term_status = r.term_status,
-                    primal_status = r.primal_status, build_seconds = t_build,
-                    apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
-                    error = r.error)
-            end
+            # Stamp worker_pid on every result; build_seconds only on the
+            # first variant this worker handles (subsequent variants reuse).
+            r = VariantResult(
+                variant_id = r.variant_id, leaf_values = r.leaf_values,
+                objective = r.objective, term_status = r.term_status,
+                primal_status = r.primal_status,
+                build_seconds = (n_done == 0 ? t_build : 0.0),
+                apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
+                worker_pid = pid,
+                error = r.error)
             n_done += 1
             put!(result_ch, r)
         end
@@ -240,6 +260,7 @@ function _worker_loop(task_ch::RemoteChannel, result_ch::RemoteChannel,
         put!(result_ch, VariantResult(
             variant_id  = -1,
             term_status = "WORKER_ERROR",
+            worker_pid  = pid,
             error       = sprint(showerror, err),
         ))
     end
@@ -259,6 +280,7 @@ function _run_campaign_distributed(base_md::ModelData,
                                    changes_per_variant::AbstractVector;
                                    n_workers::Int, threads_per_worker::Int,
                                    solver::Symbol, mode::Symbol,
+                                   attrs_override::AbstractDict,
                                    on_progress::Function, on_result::Function,
                                    cancel::Ref{Bool})
     n = length(changes_per_variant)
@@ -268,17 +290,22 @@ function _run_campaign_distributed(base_md::ModelData,
     project_dir = dirname(project_path)
     exeflags = ["--project=$project_dir", "--threads=$(max(1, threads_per_worker))"]
     @info "run_campaign: spawning $n_workers worker(s)" exeflags solver mode
-    pids = addprocs(n_workers; exeflags = exeflags)
+    t_addprocs = @elapsed pids = addprocs(n_workers; exeflags = exeflags)
+    @info "run_campaign: addprocs done" t_addprocs pids
     try
         # Bootstrap workers with IESAOpt.  We cannot use `@everywhere using ...`
         # inside a function body (the macro expands to a top-level expression).
         # We also cannot send a closure that *references* IESAOpt before the
         # worker has loaded it (the closure deserializer needs the parent
         # module). Workaround: send a quoted Expr to `Main.eval` — `Main`
-        # exists on every fresh worker.
-        for p in pids
-            remotecall_wait(Main.eval, p, :(using IESAOpt))
+        # exists on every fresh worker.  We fan out via @async so the per-worker
+        # `using IESAOpt` cost runs in parallel rather than sequentially.
+        t_using = @elapsed begin
+            @sync for p in pids
+                @async remotecall_wait(Main.eval, p, :(using IESAOpt))
+            end
         end
+        @info "run_campaign: workers loaded IESAOpt" t_using
 
         # Bounded result channel — caps memory pressure on master under
         # a slow downstream consumer.
@@ -287,13 +314,20 @@ function _run_campaign_distributed(base_md::ModelData,
         task_ch  = RemoteChannel(() -> Channel{Any}(task_cap))
         result_ch = RemoteChannel(() -> Channel{VariantResult}(res_cap))
 
-        # Start the worker loops.
+        # Start the worker loops.  This is where `base_md` gets serialized
+        # and shipped to each worker — one ship per worker.  We fan out
+        # via @async so the (sequential-by-default) shipping happens in
+        # parallel rather than blocking the master per-worker.
         worker_futures = Future[]
-        for p in pids
-            push!(worker_futures,
-                  remotecall(IESAOpt._worker_loop, p, task_ch, result_ch,
-                             base_md, solver, threads_per_worker, mode))
+        t_ship = @elapsed begin
+            @sync for p in pids
+                @async push!(worker_futures,
+                      remotecall(IESAOpt._worker_loop, p, task_ch, result_ch,
+                                 base_md, solver, threads_per_worker, mode,
+                                 attrs_override))
+            end
         end
+        @info "run_campaign: base ModelData shipped to all workers" t_ship
 
         # Producer: push variants then `nothing` x n_workers (poison pills).
         producer = @async begin
@@ -344,7 +378,8 @@ function _run_campaign_distributed(base_md::ModelData,
         return results
     finally
         try
-            rmprocs(pids; waitfor = 60)
+            t_rmprocs = @elapsed rmprocs(pids; waitfor = 60)
+            @info "run_campaign: rmprocs done" t_rmprocs
         catch err
             @warn "rmprocs failed; workers may linger" err
         end
@@ -375,6 +410,11 @@ Keyword arguments:
     `n_workers * threads_per_worker > num_physical_cores` you will likely
     see oversubscription slowdowns. Default 1 keeps it conservative.
   * `solver::Symbol = :highs` — `:highs` (license-free, default) or `:gurobi`.
+  * `solver_attrs::AbstractDict = Dict()` — extra solver attributes merged on
+    top of the campaign defaults. For Gurobi barrier+crossover use
+    `Dict("Method" => 2, "Crossover" => -1)`. For Gurobi barrier alone use
+    `Dict("Method" => 2, "Crossover" => 0)`. Keys must match the solver-native
+    option names (HiGHS uses lowercase strings, Gurobi uses MixedCase).
   * `mode::Symbol = :ts` — `:ts`, `:fh`, or `:annual`. Must match what
     `base_md` was prepared for (TS requires the cluster pass).
   * `cancel::Ref{Bool} = Ref(false)` — set to `true` from another task to
@@ -389,6 +429,7 @@ function run_campaign(base_md::ModelData,
                       n_workers::Int                = 0,
                       threads_per_worker::Int       = 1,
                       solver::Symbol                = :highs,
+                      solver_attrs::AbstractDict    = Dict{String,Any}(),
                       mode::Symbol                  = :ts,
                       cancel::Ref{Bool}             = Ref(false),
                       on_progress::Function         = _noop_progress,
@@ -399,13 +440,15 @@ function run_campaign(base_md::ModelData,
     if n_workers <= 1
         return _run_campaign_serial(base_md, changes_per_variant;
                                     solver = solver, threads = threads_per_worker,
-                                    mode = mode, on_progress = on_progress,
+                                    mode = mode, attrs_override = solver_attrs,
+                                    on_progress = on_progress,
                                     on_result = on_result, cancel = cancel)
     else
         return _run_campaign_distributed(base_md, changes_per_variant;
                                          n_workers = n_workers,
                                          threads_per_worker = threads_per_worker,
                                          solver = solver, mode = mode,
+                                         attrs_override = solver_attrs,
                                          on_progress = on_progress,
                                          on_result = on_result, cancel = cancel)
     end
