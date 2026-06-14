@@ -26,6 +26,7 @@
     <button class="tab-button active" data-tab="run" type="button">Run</button>
     <button class="tab-button" data-tab="progress" type="button">Progress</button>
     <button class="tab-button" data-tab="results" type="button">Results</button>
+    <button class="tab-button" data-tab="scenario" type="button">Scenario Space</button>
     <button class="tab-button" data-tab="about" type="button">About</button>
   </nav>
 
@@ -160,6 +161,66 @@
       </section>
     </section>
 
+    <section id="tab-scenario" class="tab-panel">
+      <section class="panel">
+        <div class="panel-title">
+          <div>
+            <h2>Scenario Space Exploration</h2>
+            <p class="subtle">Define a parameter space, sample variants, and run a campaign. Phase&nbsp;1 only validates the spec and previews the sample &mdash; the campaign runner lands in Phase&nbsp;3.</p>
+          </div>
+        </div>
+        <div class="form-grid three">
+          <label class="field"><span>Campaign name</span><input id="scCampaignName" type="text" placeholder="my_campaign" value="my_campaign"></label>
+          <label class="field"><span>Sampling method</span><select id="scMethod"><option value="lhs">Latin hypercube</option><option value="morris">Morris</option><option value="sobol">Sobol</option><option value="factorial">Factorial</option></select></label>
+          <label class="field"><span>Number of variants</span><input id="scNVariants" type="number" min="1" step="1" value="100"></label>
+          <label class="field"><span>Random seed</span><input id="scSeed" type="number" min="0" step="1" value="12345"></label>
+          <div class="field"><span>Implied evaluations</span><div id="scImplied" class="custom-input-path">&mdash;</div></div>
+          <div class="field"><span>Status</span><div id="scStatus" class="custom-input-path">Not validated yet.</div></div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <h2>Parameter Space</h2>
+          <div class="panel-toolbar">
+            <button id="scAddRow" type="button" class="secondary-button">+ Add row</button>
+            <button id="scDuplicateRow" type="button" class="secondary-button">Duplicate</button>
+            <button id="scRemoveRow" type="button" class="danger-button">Remove selected</button>
+            <button id="scValidateBtn" type="button" class="secondary-button">Validate</button>
+            <button id="scPreviewBtn" type="button" class="primary-button" style="width:auto;">Preview sample</button>
+          </div>
+        </div>
+        <div class="table-wrap" style="max-height:none;overflow:visible;">
+          <table id="scTable" class="sc-table">
+            <thead>
+              <tr>
+                <th style="width:32px"></th>
+                <th>Parameter</th>
+                <th>Sub-parameter</th>
+                <th>Sheet</th>
+                <th>Cell</th>
+                <th>Type</th>
+                <th>Min</th>
+                <th>Max</th>
+                <th>Step</th>
+                <th>Notes</th>
+              </tr>
+            </thead>
+            <tbody id="scTableBody"></tbody>
+          </table>
+        </div>
+        <div id="scMessages" class="sc-messages"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-title">
+          <h2>Sample preview</h2>
+          <span id="scPreviewStatus" class="subtle">Click <em>Preview sample</em> to generate the first 20 variants.</span>
+        </div>
+        <div id="scPreviewWrap" class="table-wrap" style="max-height:480px;"></div>
+      </section>
+    </section>
+
     <section id="tab-about" class="tab-panel">
       <section class="about-page panel">
         <img src="/assets/iesa-opt-logo.png" alt="IESA-Opt" class="about-logo">
@@ -239,5 +300,6 @@
   </main>
   <script src="/vendor/plotly.min.js"></script>
   <script src="/app.js"></script>
+  <script src="/app.scenario.js"></script>
 </body>
 </html>

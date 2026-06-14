@@ -15,3 +15,7 @@ end
     include("test_data_writing.jl")
 end
 
+@testset "Scenario-space exploration (Phase 1)" begin
+    include("test_scenario.jl")
+end
+

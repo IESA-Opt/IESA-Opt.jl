@@ -238,3 +238,16 @@ th { position:sticky; top:0; background:#eef6f6; font-weight:700; }
 .vstack-tooltip.show { opacity:1; }
 @media (max-width:1120px) { .run-layout,.main-grid,.results-layout,.results-main,.form-grid.two,.form-grid.three,.split-tables,.comparison-charts { grid-template-columns:1fr; } .run-sidebar,.results-sidebar { position:static; height:auto; max-height:none; } .output-list,.results-sidebar .output-list { max-height:360px; height:auto; } .span-2 { grid-column:auto; } .metric-grid { grid-template-columns:repeat(2,minmax(150px,1fr)); } .stage-steps { grid-template-columns:repeat(2,minmax(120px,1fr)); } .activity-lights { grid-template-columns:repeat(6,1fr); } }
 @media (max-width:680px) { .topbar,.panel-title { align-items:flex-start; flex-direction:column; } main,.topbar,.tabs { padding-left:14px; padding-right:14px; } .metric-grid { grid-template-columns:1fr; } .bar-row,.output-row,.compare-row,.stacked-row { grid-template-columns:1fr; } .output-row-actions { grid-column:auto; } .bar-value { text-align:left; } .progress-actions,.output-actions { width:100%; justify-content:space-between; } }
+/* Scenario Space tab */
+.sc-table { width:100%; border-collapse:collapse; min-width:980px; }
+.sc-table th { background:#eef6f6; font-weight:700; padding:7px 8px; border-bottom:1px solid var(--line); text-align:left; }
+.sc-table td { padding:4px 6px; border-bottom:1px solid var(--line); vertical-align:middle; }
+.sc-table tr.selected { background:#edf8fb; }
+.sc-table input[type="text"], .sc-table input[type="number"], .sc-table select { min-height:30px; padding:3px 6px; font-size:13px; }
+.sc-table input[type="checkbox"] { width:16px; height:16px; accent-color:var(--green); }
+.sc-messages { margin-top:10px; }
+.sc-messages ul { margin:0 0 6px; padding-left:22px; }
+.sc-messages .sc-errors li { color:var(--red); }
+.sc-messages .sc-warnings li { color:var(--amber); }
+#scStatus.sc-status-ok { color:#2e6c29; font-weight:650; background:#f1faf3; border-color:#a9d090; }
+#scStatus.sc-status-error { color:var(--red); font-weight:650; background:#fff3f2; border-color:#d88982; }

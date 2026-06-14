@@ -164,6 +164,10 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         return _json_response(_delete_output_runs!(body))
     elseif method == "POST" && path == "/api/browseInputFile"
         return _json_response(Dict("path" => _browse_for_input_file()))
+    elseif method == "POST" && path == "/api/scenario/validate"
+        return _json_response(_scenario_validate(_json_body(req)))
+    elseif method == "POST" && path == "/api/scenario/preview"
+        return _json_response(_scenario_preview(_json_body(req)))
     elseif method == "GET" && startswith(path, "/api/jobs/")
         parts = _url_parts(path)
         if length(parts) == 3
@@ -3034,4 +3038,90 @@ function _emissions_payload(out_dir::AbstractString, group_by::AbstractString)
         "rows" => rows,
         "detailRows" => detail_rows,
     )
+end
+
+# =============================================================================
+# Scenario-space exploration (Phase 1: validate + preview only)
+#
+# These two endpoints let the UI's ScenarioSpace tab round-trip a campaign
+# spec to the server before the user clicks Run:
+#   * POST /api/scenario/validate -> errors/warnings + implied sample size
+#   * POST /api/scenario/preview  -> first N rows of the sampled matrix
+# Neither endpoint touches the model. Phase 2+ will add /start, /:id, etc.
+# =============================================================================
+
+"""
+    _scenario_validate(body) -> Dict
+
+Build a `CampaignSpec` from the JSON body, run [`validate_spec`](@ref), and
+report the implied sample size. Always returns a 200 with `valid=false`
+when validation fails — the UI is responsible for displaying messages.
+"""
+function _scenario_validate(body)
+    try
+        spec = spec_from_dict(body)
+        v = validate_spec(spec)
+        return Dict{String,Any}(
+            "valid" => v.valid,
+            "errors" => v.errors,
+            "warnings" => v.warnings,
+            "impliedSampleSize" => v.valid ? implied_sample_size(spec) : -1,
+            "uniqueParameters" => unique_parameters(spec),
+        )
+    catch err
+        return Dict{String,Any}(
+            "valid" => false,
+            "errors" => [sprint(showerror, err)],
+            "warnings" => String[],
+            "impliedSampleSize" => -1,
+            "uniqueParameters" => String[],
+        )
+    end
+end
+
+"""
+    _scenario_preview(body) -> Dict
+
+Sample the spec and return the first `previewRows` (default 20) rows of the
+matrix so the user can sanity-check before launching a campaign. Includes
+the implied sample size and seed-determined first-row values to make
+client-side reproducibility checks cheap.
+"""
+function _scenario_preview(body)
+    preview_rows = Int(_config_get(body, "previewRows", 20))
+    preview_rows = clamp(preview_rows, 1, 200)
+    try
+        spec = spec_from_dict(body)
+        v = validate_spec(spec)
+        v.valid || return Dict{String,Any}(
+            "ok" => false,
+            "errors" => v.errors,
+            "warnings" => v.warnings,
+        )
+        sample = sample_campaign(spec)
+        n_show = min(preview_rows, sample.n_variants)
+        rows = Vector{Dict{String,Any}}(undef, n_show)
+        for i in 1:n_show
+            row = Dict{String,Any}("variant" => i)
+            for (j, p) in pairs(sample.parameters)
+                row[p] = sample.values[i, j]
+            end
+            rows[i] = row
+        end
+        return Dict{String,Any}(
+            "ok" => true,
+            "errors" => String[],
+            "warnings" => v.warnings,
+            "impliedSampleSize" => sample.n_variants,
+            "parameters" => sample.parameters,
+            "rows" => rows,
+            "shown" => n_show,
+        )
+    catch err
+        return Dict{String,Any}(
+            "ok" => false,
+            "errors" => [sprint(showerror, err)],
+            "warnings" => String[],
+        )
+    end
 end

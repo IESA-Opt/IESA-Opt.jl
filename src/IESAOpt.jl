@@ -87,6 +87,12 @@ include("solve.jl")
 include("violations.jl")
 # include("postprocess.jl")
 include("writers.jl")
+
+# ---------------------------------------------------------------------------
+# Scenario-space exploration (Phase 1: spec parsing + sampling, no model touch)
+include("scenario/spec.jl")
+include("scenario/sampling.jl")
+
 include("ui_server.jl")
 # include("sweeps.jl")
 
@@ -124,6 +130,13 @@ export add_cyclic_closures!
 export write_parquet_results, write_duckdb_results
 export serve_ui!
 # Phase 7+: export sweep_ts_postfix
+
+# Scenario-space exploration (Phase 1)
+export ParameterRow, CampaignSpec, SampleMatrix
+export parse_sampling_method, parse_param_type
+export unique_parameters, parameter_bounds, parameter_steps
+export validate_spec, spec_from_dict, spec_to_dict
+export sample_campaign, implied_sample_size
 
 # ---------------------------------------------------------------------------
 # PrecompileTools workload
