@@ -1284,7 +1284,7 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         # residual "Other" segment shrinks.
         local optimizer, attrs, effective_solver, model
         _, optimizer_init_seconds = _elapsed() do
-            optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path)
+            optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path, rep_days = config["representativeDays"])
             model_label = mode == :ts ? "time-slice" : "full-hourly"
             _job_update!(job_id; stage = "generation", message = "Generating $(model_label) model with $(effective_solver)", extra = Dict("effectiveSolver" => effective_solver))
             model = Model(optimizer)
@@ -1415,7 +1415,7 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
     return nothing
 end
 
-function _optimizer_for_ui_run(requested_solver::AbstractString, method::AbstractString, threads::Integer; solver_log_path::AbstractString = "")
+function _optimizer_for_ui_run(requested_solver::AbstractString, method::AbstractString, threads::Integer; solver_log_path::AbstractString = "", rep_days::Union{Nothing,Integer} = nothing)
     solver = lowercase(String(requested_solver))
     solver = solver == "auto" ? _choose_auto_solver() : solver
     if solver == "highs"
@@ -1423,7 +1423,7 @@ function _optimizer_for_ui_run(requested_solver::AbstractString, method::Abstrac
         _apply_highs_method!(attrs, method)
         return highs_optimizer(; attrs), attrs, "HiGHS"
     elseif solver == "gurobi"
-        attrs = default_gurobi_attributes(; threads = Int(threads))
+        attrs = default_gurobi_attributes(; threads = Int(threads), rep_days = rep_days)
         _apply_gurobi_method!(attrs, method)
         isempty(solver_log_path) || (attrs["LogFile"] = solver_log_path)
         return gurobi_optimizer(; attrs), attrs, "Gurobi"

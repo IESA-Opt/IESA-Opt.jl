@@ -102,7 +102,7 @@ export compute_decom_planned_sel!, compute_flex_loss_split!
 export compute_emission_target_aggregates!
 export compute_tech_activity!, init_policy_targets!
 export write_sets_dump, write_params_dump, write_run_summary, write_run_statistics
-export default_gurobi_attributes, default_highs_attributes
+export default_gurobi_attributes, gurobi_tuned_attributes_for_repdays, default_highs_attributes
 export gurobi_optimizer, highs_optimizer, apply_solver_attributes!
 # Phase 2: annual LP
 export AnnualVars, add_annual_variables!

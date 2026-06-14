@@ -7,12 +7,13 @@ hoursPer_day >= 12 branch (the TS sweep hot path).
 """
 
 """
-    default_gurobi_attributes() -> Dict{String,Any}
+    default_gurobi_attributes(; threads=0, rep_days=nothing) -> Dict{String,Any}
 
 Default Gurobi attributes for the production TS solve path. Mirrors the
 IESA-Opt 1.0 Phase 7 settings: Barrier method, no crossover, BarHomogeneous=1
-for Optimal certification, Gurobi auto-presolve, Gurobi auto-scaling,
-all tolerances at 1e-7, all-cores threading.
+for Optimal certification, all tolerances at 1e-7, all-cores threading. When
+`rep_days` is provided, representative-day tuning ranges add Gurobi presolve
+and scaling settings validated with `grbtune` on 2026-06-14.
 
 Usage:
 ```julia
@@ -23,8 +24,40 @@ for (k, v) in IESAOpt.default_gurobi_attributes()
 end
 ```
 """
-function default_gurobi_attributes(; threads::Int = 0)::Dict{String,Any}
-    Dict{String,Any}(
+const GUROBI_TUNED_RD_RANGES = (
+    (lo = 1,  hi = 7,            attrs = Pair{String,Any}[]),
+    (lo = 8,  hi = 12,           attrs = Pair{String,Any}["AggFill" => 0, "Presolve" => 1, "PreSparsify" => 2, "ScaleFlag" => 0]),
+    (lo = 13, hi = 17,           attrs = Pair{String,Any}["AggFill" => 10, "NumericFocus" => 1, "ScaleFlag" => 0]),
+    (lo = 18, hi = 22,           attrs = Pair{String,Any}["AggFill" => 100, "PreDepRow" => 1, "PreSparsify" => 0, "ScaleFlag" => 0]),
+    (lo = 23, hi = 27,           attrs = Pair{String,Any}["AggFill" => 100, "PrePasses" => 1, "ScaleFlag" => 0]),
+    (lo = 28, hi = 32,           attrs = Pair{String,Any}["AggFill" => 100, "PrePasses" => 3, "ScaleFlag" => 0]),
+    (lo = 33, hi = 37,           attrs = Pair{String,Any}["ScaleFlag" => 0]),
+    (lo = 38, hi = 42,           attrs = Pair{String,Any}["AggFill" => 100, "Aggregate" => 2, "Presolve" => 1, "ScaleFlag" => 0]),
+    (lo = 43, hi = 47,           attrs = Pair{String,Any}["PrePasses" => 3, "ScaleFlag" => 0]),
+    (lo = 48, hi = 55,           attrs = Pair{String,Any}["AggFill" => 100, "Presolve" => 1, "ScaleFlag" => 0]),
+    (lo = 56, hi = 80,           attrs = Pair{String,Any}["AggFill" => 10, "Presolve" => 1, "ScaleFlag" => 0]),
+    (lo = 81, hi = typemax(Int), attrs = Pair{String,Any}["Presolve" => 1]),
+)
+
+"""
+    gurobi_tuned_attributes_for_repdays(rep_days) -> Dict{String,Any}
+
+Return the Gurobi-only tuned attributes for a representative-day count. These
+settings intentionally exclude `Threads`, `Method`, and `Crossover` so caller
+thread counts and solve-method selections remain authoritative.
+"""
+function gurobi_tuned_attributes_for_repdays(rep_days::Integer)::Dict{String,Any}
+    rd = max(1, Int(rep_days))
+    for range in GUROBI_TUNED_RD_RANGES
+        if range.lo <= rd <= range.hi
+            return Dict{String,Any}(range.attrs)
+        end
+    end
+    return Dict{String,Any}()
+end
+
+function default_gurobi_attributes(; threads::Int = 0, rep_days::Union{Nothing,Integer} = nothing)::Dict{String,Any}
+    attrs = Dict{String,Any}(
         # Method selection (TS sweep hot path = Barrier)
         "Method"            => 2,        # 2 = Barrier
         "Crossover"         => 0,        # No crossover (we accept Barrier endpoint)
@@ -47,6 +80,10 @@ function default_gurobi_attributes(; threads::Int = 0)::Dict{String,Any}
         "OutputFlag"        => 1,
         "LogToConsole"      => 1,
     )
+    if rep_days !== nothing
+        merge!(attrs, gurobi_tuned_attributes_for_repdays(rep_days))
+    end
+    return attrs
 end
 
 """
