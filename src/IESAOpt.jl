@@ -155,6 +155,9 @@ export build_mutations, apply_mutation!, apply_mutations!
 export apply_leaf_change!, apply_leaf_changes!, apply_variant!
 # Scenario-space exploration (Phase 3: campaign runner)
 export VariantResult, run_campaign
+# Scenario-space exploration (Phase 3.5: per-variant clustering)
+export register_clustering_affecting!, unregister_clustering_affecting!
+export is_clustering_affecting, clustering_affecting_fields, variant_affects_clustering
 # Scenario-space exploration (Phase 4: orchestrator + persistence)
 export LeafTarget, ScenarioSpec, ScenarioResult
 export sample_scenario_space, samples_to_changes, run_scenario_space

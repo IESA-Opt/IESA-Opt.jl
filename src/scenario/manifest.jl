@@ -96,6 +96,78 @@ mutation builder.
 """
 registered_mutation_fields() = sort!(collect(keys(MUTATION_REGISTRY)))
 
+# -----------------------------------------------------------------------------
+# Clustering-affecting registry (Phase 3.5)
+#
+# A leaf is "clustering-affecting" when changing its value invalidates the
+# representative-day clustering computed by `build_temporal_clusters!`. The
+# canonical example is `hourly_profilesReadOrig` (the 8760-hour read profiles
+# clustering reads from). When a campaign variant touches such a leaf, the
+# runner must re-cluster + rebuild the LP for that variant instead of
+# warm-applying onto the pre-clustered base model.
+#
+# Default state: EMPTY. No leaves are tagged out of the box, which means the
+# Phase 3 fast path is preserved bit-for-bit for any campaign that only
+# perturbs scalar leaves (prices, caps, emission targets — every leaf
+# registered by `_register_default_mutations!`). Tagging happens opt-in via
+# `register_clustering_affecting!`, typically alongside a custom mutation
+# builder for a profile leaf.
+# -----------------------------------------------------------------------------
+
+const CLUSTERING_AFFECTING_FIELDS = Set{Symbol}()
+
+"""
+    register_clustering_affecting!(field::Symbol)
+
+Mark `field` as a leaf whose mutation invalidates the temporal clustering.
+[`run_campaign`](@ref) will group variants by their clustering-affecting
+sub-state and rebuild the cluster + LP once per group (Phase 3.5).
+Idempotent. Returns nothing.
+
+```julia
+register_clustering_affecting!(:hourly_profilesReadOrig)
+```
+"""
+function register_clustering_affecting!(field::Symbol)
+    push!(CLUSTERING_AFFECTING_FIELDS, field)
+    return nothing
+end
+
+"""
+    unregister_clustering_affecting!(field::Symbol) -> Bool
+
+Remove `field` from the clustering-affecting registry. Returns `true` if it
+was present (and is now gone), `false` if it was not registered.
+"""
+function unregister_clustering_affecting!(field::Symbol)
+    was_present = field in CLUSTERING_AFFECTING_FIELDS
+    delete!(CLUSTERING_AFFECTING_FIELDS, field)
+    return was_present
+end
+
+"""
+    is_clustering_affecting(field::Symbol) -> Bool
+
+`true` iff `field` is in the clustering-affecting registry.
+"""
+is_clustering_affecting(field::Symbol) = field in CLUSTERING_AFFECTING_FIELDS
+
+"""
+    clustering_affecting_fields() -> Vector{Symbol}
+
+Sorted list of every leaf tagged as clustering-affecting.
+"""
+clustering_affecting_fields() = sort!(collect(CLUSTERING_AFFECTING_FIELDS))
+
+"""
+    variant_affects_clustering(changes) -> Bool
+
+`true` iff any [`LeafChange`](@ref) in `changes` targets a clustering-
+affecting field.
+"""
+variant_affects_clustering(changes) =
+    any(c -> is_clustering_affecting(c.field), changes)
+
 """
     build_mutations(md, field::Symbol, indices, new_value) -> Vector{Mutation}
 

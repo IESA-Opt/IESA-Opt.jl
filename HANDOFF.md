@@ -229,33 +229,45 @@ None of them affects the scaling-validation work you're being asked to do
 — the benchmark sweep perturbs only **scalar** parameters (`price_co2`,
 `emissionTargetBunker`) and so is safe under the current implementation.
 
-### A. Per-variant clustering when hourly profiles change
+### A. Per-variant clustering when hourly profiles change  ✅ *resolved in Phase 3.5*
 
-`build_temporal_clusters!(base_md)` is currently called **once** before the
-campaign and every variant solves against the same representative days.
-That is correct for variants that only perturb scalars (prices, caps,
-emission targets…). It is **wrong** for variants that perturb hourly
-profile inputs (`hourly_avail`, demand profiles, weather), because the
-cluster assignment is computed from the base profile and stops being
-representative of the perturbed one.
+**Status**: implemented on `scenariospace` (see commit message starting with
+`Phase 3.5:`). Tests: `test/test_scenario_clustering.jl` (35 testsets),
+plus regression: every previous scenario testset still green
+(P2/P3/P4/P5 = 80/31/95/33).
 
-Planned fix (Phase 3.5 or Phase 6):
+How it works:
 
-1. Tag each leaf in the mutation registry with an `affects_clustering::Bool`
-   flag (default `false`; `true` for `hourly_avail`, `dem_profile`, etc.).
-2. In the campaign runner, before each variant: if any of its `LeafChange`s
-   has `affects_clustering == true`, re-run `build_temporal_clusters!` on
-   the variant's mutated `md` AND rebuild the LP (because cluster days
-   change → time index changes → `apply_variant!` can no longer warm-start).
-3. **Optimisation**: hash the profile-defining subset of params for each
-   variant. Variants with the same hash share the same clustering output,
-   so N variants that draw from only K << N unique profile sets pay K
-   clustering costs instead of N. Cache the clustered `md` (or just the
-   cluster days + weights + medoids) keyed on that hash.
+1. New registry in `src/scenario/manifest.jl`:
+   - `register_clustering_affecting!(field::Symbol)`
+   - `unregister_clustering_affecting!(field::Symbol) -> Bool`
+   - `is_clustering_affecting(field::Symbol) -> Bool`
+   - `clustering_affecting_fields() -> Vector{Symbol}`
+   - `variant_affects_clustering(changes) -> Bool`
+2. Default state: **empty**. With no field tagged, `_cluster_cache_key`
+   returns `()` for every variant, every variant lands in the same
+   "group", and the runner collapses to the Phase 3 fast path —
+   *bit-for-bit identical* to the previous behaviour. Existing campaigns
+   that only mutate scalar parameters (the benchmark, the smoke scripts,
+   every Phase 4 test) pay zero overhead.
+3. Opt-in: tag a profile leaf (e.g. `:hourly_profilesReadOrig`) once at
+   campaign setup time. The runner then:
+   - **Serial** path (`_run_campaign_serial`): partitions variants by
+     their clustering-affecting sub-state, builds one
+     `(md_template, model)` per group, warm-applies scalar remainders
+     across all variants in the group.
+   - **Distributed** path (`_worker_loop`): each worker keeps a
+     `Dict{cluster_key, (md, model)}` cache. First time a worker sees a
+     new key it pays one cluster + LP build; every subsequent variant
+     with the same key reuses the cached model. N variants with only
+     K << N unique profile sets cost K builds per worker, not N.
+4. Mutation builders for profile leaves: still required if you want the
+   change to flow into the LP **without** triggering a rebuild. Profile
+   changes that ONLY affect clustering and not directly the LP need no
+   mutation builder, but they must be `register_clustering_affecting!`-tagged
+   so the runner re-clusters + rebuilds for them.
 
-This was deliberately deferred so the runner could land first; opening it
-up requires touching `manifest.jl` (add the flag), `runner.jl` (the
-per-variant branch), and probably a small `cluster_cache.jl` helper.
+See `docs/src/user-guide/scenario-space.md` for a full walk-through.
 
 ### B. Worker-count heuristic in `run_campaign`
 

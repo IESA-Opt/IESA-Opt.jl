@@ -27,6 +27,10 @@ end
     include("test_scenario_runner.jl")
 end
 
+@testset "Scenario-space exploration (Phase 3.5: per-variant clustering)" begin
+    include("test_scenario_clustering.jl")
+end
+
 @testset "Scenario-space exploration (Phase 4: orchestrator + persistence)" begin
     include("test_scenario_orchestrator.jl")
 end

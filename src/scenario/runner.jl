@@ -102,21 +102,18 @@ Build the LP for `md` with constraint names preserved so the manifest can
 look them up. Caller must have already run `derive_sets!`, `compute_derived_params!`,
 and (for `mode === :ts`) `build_temporal_clusters!`.
 
-!!! note "Clustering is shared across all variants in a campaign"
-    `build_temporal_clusters!` is run ONCE on `base_md` before the campaign
-    starts; every variant solves against the same representative days.
-    This is correct for variants that only perturb **scalar** parameters
-    (prices, capacities, emission targets…). It is **incorrect** for
-    variants that perturb hourly profile inputs (`hourly_avail`, demand
-    profiles, weather), because the cluster assignment is computed from the
-    base profile and will no longer be representative of the perturbed one.
+!!! note "Per-variant clustering (Phase 3.5)"
+    `build_temporal_clusters!` is run ONCE on `base_md` before each
+    *clustering group* (see [`_partition_variants_by_cluster_key`](@ref)),
+    not once per variant. Variants whose `LeafChange` lists only touch
+    scalar leaves all share the same group and pay one cluster build for
+    the whole campaign — bit-for-bit equivalent to the Phase 3 fast path.
 
-    TODO (planned for a future phase): when any leaf in a variant's
-    `LeafChange` list belongs to a profile-defining field, re-run
-    `build_temporal_clusters!` on the variant's mutated `md`. To stay fast,
-    cache the cluster output keyed by a hash of the profile-defining subset
-    of params so N variants that share only K << N unique profile sets pay
-    K clustering costs, not N. See HANDOFF.md → "Known limitations".
+    Variants that mutate a leaf tagged via
+    [`register_clustering_affecting!`](@ref) are partitioned into separate
+    groups (one per unique `(field, indices, value, type)` sub-state) and
+    each group pays its own cluster + LP rebuild. N variants drawing from
+    only K << N unique profile sets therefore cost K cluster builds, not N.
 """
 function _build_campaign_model(md::ModelData; solver::Symbol, threads::Int,
                                mode::Symbol,
@@ -174,14 +171,187 @@ function _run_one_variant!(model::JuMP.Model, md::ModelData,
 end
 
 # -----------------------------------------------------------------------------
+# Phase 3.5 — per-variant clustering with a shared template per cluster group
+# -----------------------------------------------------------------------------
+#
+# When NO leaves are tagged via `register_clustering_affecting!` (the
+# default), every variant's cluster key is the empty tuple `()`, every
+# variant lands in the same group, and the runner falls back to a single
+# template + single LP build — bit-for-bit equivalent to the Phase 3 fast
+# path.
+#
+# When some leaves ARE tagged (e.g. `:hourly_profilesReadOrig`), variants
+# are partitioned by the tuple of `(field, indices, value)` for their
+# clustering-affecting subset. Each group pays exactly ONE cluster build +
+# ONE LP build; variants within a group warm-apply the scalar remainder of
+# their LeafChange list on the shared model (the existing apply_variant!
+# fast path).
+
+"""
+    _cluster_cache_key(changes::AbstractVector{LeafChange}) -> Tuple
+
+Stable, hashable key identifying the clustering-affecting sub-state of a
+variant. Empty tuple `()` when no leaves are tagged (or when none of the
+variant's changes touch a tagged leaf). Sorting the tuple makes the key
+invariant under permutation of `changes`, so two variants with the same
+profile mutations always share a group regardless of input order.
+"""
+function _cluster_cache_key(changes::AbstractVector{LeafChange})
+    # Fast path: when nothing is tagged, every variant hashes to `()`.
+    isempty(CLUSTERING_AFFECTING_FIELDS) && return ()
+    rel = Tuple{Symbol,Tuple,Float64,Symbol}[]
+    for c in changes
+        is_clustering_affecting(c.field) || continue
+        push!(rel, (c.field, c.indices, c.value, c.type))
+    end
+    isempty(rel) && return ()
+    sort!(rel; by = x -> (x[1], string(x[2]), x[3], x[4]))
+    return Tuple(rel)
+end
+
+"""
+    _partition_variants_by_cluster_key(changes_per_variant) -> (ordered_keys, groups)
+
+Partition variants into groups that share the same clustering-affecting
+sub-state. `ordered_keys::Vector` preserves first-seen order so log output
+is deterministic; `groups::Dict{Any,Vector{Int}}` maps key → original
+variant ids. With no tagged leaves the result is `([()], Dict(() => 1:n))`
+— one group, no overhead.
+"""
+function _partition_variants_by_cluster_key(changes_per_variant::AbstractVector)
+    ordered_keys = Any[]
+    groups = Dict{Any,Vector{Int}}()
+    for (i, ch) in pairs(changes_per_variant)
+        k = _cluster_cache_key(ch)
+        if !haskey(groups, k)
+            push!(ordered_keys, k)
+            groups[k] = Int[]
+        end
+        push!(groups[k], i)
+    end
+    return ordered_keys, groups
+end
+
+"""
+    _split_cluster_changes(changes) -> (cluster_changes, scalar_changes)
+
+Partition a variant's `LeafChange` list into the subset that affects
+temporal clustering (already applied to the group's template `md`) and the
+scalar subset that still needs to flow through `apply_variant!` on every
+solve. Preserves the original order within each subset.
+"""
+function _split_cluster_changes(changes::AbstractVector{LeafChange})
+    isempty(CLUSTERING_AFFECTING_FIELDS) && return (LeafChange[], collect(changes))
+    cluster_changes = LeafChange[]
+    scalar_changes  = LeafChange[]
+    for c in changes
+        if is_clustering_affecting(c.field)
+            push!(cluster_changes, c)
+        else
+            push!(scalar_changes, c)
+        end
+    end
+    return (cluster_changes, scalar_changes)
+end
+
+"""
+    _build_cluster_template(base_md, cluster_changes; solver, threads, mode, attrs_override)
+        -> (md_template, model)
+
+Build one (`md_template`, `model`) pair for a cluster group. When
+`cluster_changes` is empty this returns `deepcopy(base_md)` + an LP built
+from it — identical to Phase 3's single-template behaviour. Otherwise it
+deep-copies the base, applies just the clustering-affecting leaves,
+re-runs `compute_derived_params!`, `build_temporal_clusters!`, and finally
+[`_build_campaign_model`](@ref).
+"""
+function _build_cluster_template(base_md::ModelData,
+                                 cluster_changes::AbstractVector{LeafChange};
+                                 solver::Symbol, threads::Int, mode::Symbol,
+                                 attrs_override::AbstractDict)
+    md_template = deepcopy(base_md)
+    if !isempty(cluster_changes)
+        apply_leaf_changes!(md_template, cluster_changes)
+        compute_derived_params!(md_template)
+        if mode === :ts
+            build_temporal_clusters!(md_template)
+        end
+    end
+    model = _build_campaign_model(md_template; solver = solver,
+                                  threads = threads, mode = mode,
+                                  attrs_override = attrs_override)
+    return md_template, model
+end
+
+"""
+    _run_one_variant_filtered!(model, md_template, full_changes, scalar_changes,
+                                cluster_changes, variant_id) -> VariantResult
+
+Like [`_run_one_variant!`](@ref) but only the `scalar_changes` flow through
+`apply_variant!`; `cluster_changes` were baked into `md_template` by the
+caller. The `leaf_values` field of the result is assembled in the order of
+`full_changes`, with values read straight off `md_template` for the cluster
+leaves (since they are already mutated there) and from the apply_variant!
+output for the scalar leaves.
+"""
+function _run_one_variant_filtered!(model::JuMP.Model, md_template::ModelData,
+                                    full_changes::AbstractVector{LeafChange},
+                                    scalar_changes::AbstractVector{LeafChange},
+                                    variant_id::Int)
+    try
+        t_apply = @elapsed begin
+            out = apply_variant!(model, md_template, scalar_changes; rederive = true)
+        end
+        # Reassemble leaf_values in `full_changes` order. Cluster leaves were
+        # already mutated into md_template by _build_cluster_template, so we
+        # read them straight back. Scalar leaves come from apply_variant!.
+        leaf_vals = Vector{Float64}(undef, length(full_changes))
+        scalar_iter = 1
+        @inbounds for (i, ch) in pairs(full_changes)
+            if is_clustering_affecting(ch.field)
+                d = _get_param_dict(md_template, ch.field)
+                k = _scalar_key(ch.indices)
+                leaf_vals[i] = get(d, k, NaN)
+            else
+                leaf_vals[i] = out.values[scalar_iter]
+                scalar_iter += 1
+            end
+        end
+        t_solve = @elapsed optimize!(model)
+        term = string(termination_status(model))
+        prim = string(primal_status(model))
+        obj  = (term == "OPTIMAL") ? objective_value(model) : NaN
+        return VariantResult(
+            variant_id     = variant_id,
+            leaf_values    = leaf_vals,
+            objective      = obj,
+            term_status    = term,
+            primal_status  = prim,
+            apply_seconds  = t_apply,
+            solve_seconds  = t_solve,
+        )
+    catch err
+        return VariantResult(
+            variant_id  = variant_id,
+            error       = sprint(showerror, err),
+            term_status = "ERROR",
+        )
+    end
+end
+
+# -----------------------------------------------------------------------------
 # Serial path
 # -----------------------------------------------------------------------------
 """
     _run_campaign_serial(base_md, changes_per_variant; solver, threads, mode,
                          on_progress, on_result, cancel) -> Vector{VariantResult}
 
-Single-process loop: build model once, mutate + solve per variant. Used by
-tests and by `run_campaign` when `n_workers <= 1`.
+Single-process loop. Variants are partitioned into clustering groups via
+[`_partition_variants_by_cluster_key`](@ref); each group pays one
+deepcopy + one cluster build (if needed) + one LP build, then warm-applies
+its scalar variants on the shared model. With no clustering-affecting
+leaves registered (default state), there is exactly one group containing
+every variant and the loop collapses to Phase 3's behaviour.
 """
 function _run_campaign_serial(base_md::ModelData,
                               changes_per_variant::AbstractVector;
@@ -190,36 +360,54 @@ function _run_campaign_serial(base_md::ModelData,
                               on_progress::Function, on_result::Function,
                               cancel::Ref{Bool})
     n = length(changes_per_variant)
-    md_work = deepcopy(base_md)
-    t_build = @elapsed begin
-        model = _build_campaign_model(md_work; solver = solver,
-                                      threads = threads, mode = mode,
-                                      attrs_override = attrs_override)
-    end
     results = Vector{VariantResult}(undef, n)
-    @inbounds for i in 1:n
-        if cancel[]
-            results[i] = VariantResult(
-                variant_id  = i,
-                term_status = "CANCELLED",
-                error       = "Campaign cancelled before variant $i.",
-            )
-            continue
+    ordered_keys, groups = _partition_variants_by_cluster_key(changes_per_variant)
+    n_groups = length(ordered_keys)
+    n_groups > 1 && @info "_run_campaign_serial: per-variant clustering active" n_groups n_variants=n
+
+    pid = Distributed.myid()
+    @inbounds for (gi, key) in enumerate(ordered_keys)
+        vids = groups[key]
+        # Representative variant — all in the group share its cluster_changes.
+        rep_changes = changes_per_variant[vids[1]]
+        cluster_changes, _ = _split_cluster_changes(rep_changes)
+        md_template, model = nothing, nothing
+        t_build = @elapsed begin
+            md_template, model = _build_cluster_template(base_md, cluster_changes;
+                solver = solver, threads = threads, mode = mode,
+                attrs_override = attrs_override)
         end
-        on_progress((variant_id = i, total = n, stage = "start"))
-        r = _run_one_variant!(model, md_work, changes_per_variant[i], i)
-        # Always stamp worker_pid; record build_seconds on the first variant.
-        r = VariantResult(
-            variant_id = r.variant_id, leaf_values = r.leaf_values,
-            objective = r.objective, term_status = r.term_status,
-            primal_status = r.primal_status,
-            build_seconds = (i == 1 ? t_build : 0.0),
-            apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
-            worker_pid = Distributed.myid(),
-            error = r.error)
-        results[i] = r
-        on_result(r)
-        on_progress((variant_id = i, total = n, stage = "done", result = r))
+        n_groups > 1 && @info "  group $gi/$n_groups" key=key n_variants=length(vids) t_build=t_build
+
+        for (k, vid) in pairs(vids)
+            if cancel[]
+                results[vid] = VariantResult(
+                    variant_id  = vid,
+                    term_status = "CANCELLED",
+                    error       = "Campaign cancelled before variant $vid.",
+                    worker_pid  = pid)
+                continue
+            end
+            on_progress((variant_id = vid, total = n, stage = "start"))
+            full_changes = changes_per_variant[vid]
+            _, scalar_changes = _split_cluster_changes(full_changes)
+            r = _run_one_variant_filtered!(model, md_template, full_changes,
+                                           scalar_changes, vid)
+            # Stamp worker_pid; record build_seconds on the FIRST variant
+            # of the FIRST group (matches Phase 3 semantics when there's
+            # only one group; otherwise each group's first variant pays).
+            r = VariantResult(
+                variant_id = r.variant_id, leaf_values = r.leaf_values,
+                objective = r.objective, term_status = r.term_status,
+                primal_status = r.primal_status,
+                build_seconds = (k == 1 ? t_build : 0.0),
+                apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
+                worker_pid = pid,
+                error = r.error)
+            results[vid] = r
+            on_result(r)
+            on_progress((variant_id = vid, total = n, stage = "done", result = r))
+        end
     end
     return results
 end
@@ -232,39 +420,51 @@ end
 
 Long-running per-worker loop. Pulls `(variant_id, changes)` tuples from
 `task_ch`; pushes `VariantResult` to `result_ch`. Terminates when it
-receives `nothing` (poison pill). Builds the JuMP model lazily on first
-variant and reuses it for every subsequent variant (warm-start retained).
+receives `nothing` (poison pill).
+
+Maintains a per-worker cluster cache `Dict{cluster_key, (md, model)}` so
+each unique clustering-affecting sub-state on this worker costs ONE
+deepcopy + ONE cluster build + ONE LP build, no matter how many variants
+share that key. With no clustering-affecting leaves registered (the
+default), every variant hashes to `()` and the cache has exactly one entry
+— same behaviour as Phase 3.
 """
 function _worker_loop(task_ch::RemoteChannel, result_ch::RemoteChannel,
                       base_md::ModelData,
                       solver::Symbol, threads::Int, mode::Symbol,
                       attrs_override::AbstractDict)
-    md = nothing
-    model = nothing
-    t_build = 0.0
-    n_done = 0
+    # cluster_key -> (md_template, model)
+    cache = Dict{Any,Tuple{ModelData,JuMP.Model}}()
     pid = Distributed.myid()
+    n_done = 0
     try
         while true
             item = take!(task_ch)
             item === nothing && break  # poison pill — clean shutdown
             variant_id, changes = item
-            if model === nothing
-                md = deepcopy(base_md)
-                t_build = @elapsed begin
-                    model = _build_campaign_model(md; solver = solver,
-                                                  threads = threads, mode = mode,
-                                                  attrs_override = attrs_override)
+            key = _cluster_cache_key(changes)
+            t_build_this = 0.0
+            entry = get(cache, key, nothing)
+            if entry === nothing
+                cluster_changes, _ = _split_cluster_changes(changes)
+                t_build_this = @elapsed begin
+                    md_t, model_t = _build_cluster_template(base_md, cluster_changes;
+                        solver = solver, threads = threads, mode = mode,
+                        attrs_override = attrs_override)
                 end
+                cache[key] = (md_t, model_t)
+                entry = (md_t, model_t)
             end
-            r = _run_one_variant!(model, md, changes, variant_id)
-            # Stamp worker_pid on every result; build_seconds only on the
-            # first variant this worker handles (subsequent variants reuse).
+            md, model = entry
+            _, scalar_changes = _split_cluster_changes(changes)
+            r = _run_one_variant_filtered!(model, md, changes, scalar_changes, variant_id)
+            # Stamp worker_pid on every result; record build_seconds on the
+            # variant that paid for the cluster-group build (cache miss).
             r = VariantResult(
                 variant_id = r.variant_id, leaf_values = r.leaf_values,
                 objective = r.objective, term_status = r.term_status,
                 primal_status = r.primal_status,
-                build_seconds = (n_done == 0 ? t_build : 0.0),
+                build_seconds = t_build_this,
                 apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
                 worker_pid = pid,
                 error = r.error)
