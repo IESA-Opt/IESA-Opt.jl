@@ -25,6 +25,8 @@
   <nav class="sections" aria-label="Workspaces">
     <button class="section-button active" data-section="main" type="button">Single run</button>
     <button class="section-button" data-section="scenario" type="button">Scenario Space</button>
+    <button class="section-button" data-section="explorer" type="button">Scenario explorer</button>
+    <button class="section-button" data-section="about" type="button">About</button>
     <button class="section-button" data-section="mga" type="button" disabled title="Coming soon">Coming soon</button>
   </nav>
 
@@ -35,7 +37,17 @@
     <button class="tab-button" data-section="scenario" data-tab="scenario-setup" type="button">Parameter Space</button>
     <button class="tab-button" data-section="scenario" data-tab="scenario-progress" type="button">Progress</button>
     <button class="tab-button" data-section="scenario" data-tab="scenario-results" type="button">Results</button>
-    <button class="tab-button" data-section="main" data-tab="about" type="button">About</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-input" type="button">Input overview</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-atlas" type="button">Technology atlas</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-costs" type="button">Cost assumptions</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-activity" type="button">Activity map</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-activity-deps" type="button">Coupled Sectors</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-details" type="button">Flow details</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-profiles" type="button">Profiles 3D</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-policy" type="button">Policy</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-model" type="button">Model browser</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-tech" type="button">Technology dependencies</button>
+    <button class="tab-button" data-section="about" data-tab="about" type="button">Overview</button>
   </nav>
 
   <main>
@@ -368,6 +380,230 @@
       </div>
     </section>
 
+    <section id="tab-explorer-input" class="tab-panel">
+      <div class="explorer-layout">
+        <aside class="panel explorer-sidebar">
+          <div class="panel-title">
+            <div>
+              <h2>Input overview</h2>
+              <p id="explorerAtlasStatus" class="subtle">Loading inputs.</p>
+            </div>
+          </div>
+          <label class="field"><span>Scenario database</span><select id="explorerAtlasWorkbook"></select></label>
+          <label class="field"><span>Period</span><select id="explorerAtlasPeriod"></select></label>
+          <button id="explorerRefreshAtlas" class="primary-button" type="button">Refresh overview</button>
+          <div id="atlasMetricCards" class="atlas-metric-grid"></div>
+        </aside>
+        <section class="explorer-main-panel atlas-main-grid">
+          <section class="panel compact-panel">
+            <div class="panel-title"><h2>Workbook shape</h2><p id="atlasWorkbookSummary" class="subtle">-</p></div>
+            <div id="atlasSheetBubble" class="atlas-chart empty-state">No workbook loaded.</div>
+          </section>
+          <section class="panel compact-panel">
+            <div class="panel-title"><h2>Model sets</h2><p class="subtle">Loaded dimensions</p></div>
+            <div id="atlasSetCounts" class="atlas-chart empty-state">No model data loaded.</div>
+          </section>
+          <section class="panel compact-panel atlas-span-2">
+            <div class="panel-title"><h2>Sheets</h2><p class="subtle">Workbook inventory</p></div>
+            <div id="atlasSheetsTable" class="table-wrap explorer-table empty-state">No sheets loaded.</div>
+          </section>
+        </section>
+      </div>
+    </section>
+
+    <section id="tab-explorer-atlas" class="tab-panel">
+      <section class="explorer-main-panel atlas-main-grid">
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Sector/category composition</h2><p id="atlasCompositionSummary" class="subtle">No data loaded.</p></div>
+          <div id="atlasSectorCategory" class="atlas-chart empty-state">No composition loaded.</div>
+        </section>
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Technology economics</h2><p id="atlasTechSummary" class="subtle">No data loaded.</p></div>
+          <div id="atlasTechScatter" class="atlas-chart empty-state">No technologies loaded.</div>
+        </section>
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Technology rows</h2><p class="subtle">Top investment-cost entries</p></div>
+          <div id="atlasTechTable" class="table-wrap explorer-table empty-state">No technologies loaded.</div>
+        </section>
+      </section>
+    </section>
+
+    <section id="tab-explorer-costs" class="tab-panel">
+      <section class="explorer-main-panel atlas-main-grid">
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Annualized cost stack</h2><p id="atlasCostSummary" class="subtle">No cost data loaded.</p></div>
+          <div id="atlasCostStack" class="atlas-chart tall empty-state">No cost data loaded.</div>
+        </section>
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Cost assumptions</h2><p class="subtle">Technology cost rows</p></div>
+          <div id="atlasCostTable" class="table-wrap explorer-table empty-state">No cost rows loaded.</div>
+        </section>
+      </section>
+    </section>
+
+    <section id="tab-explorer-activity" class="tab-panel">
+      <section class="explorer-main-panel atlas-main-grid">
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Sector/activity balance</h2><p id="atlasBalanceSummary" class="subtle">No data loaded.</p></div>
+          <div id="atlasBalanceHeatmap" class="atlas-chart tall empty-state">No balance data loaded.</div>
+        </section>
+        <section class="panel compact-panel">
+          <div class="panel-title"><h2>Activity demand</h2><p class="subtle">Largest net volumes</p></div>
+          <div id="atlasDemandChart" class="atlas-chart empty-state">No demand data loaded.</div>
+        </section>
+        <section class="panel compact-panel">
+          <div class="panel-title"><h2>Balance rows</h2><p class="subtle">Largest sector/activity coefficients</p></div>
+          <div id="atlasFlowTable" class="table-wrap atlas-small-table empty-state">No balance rows loaded.</div>
+        </section>
+      </section>
+    </section>
+
+    <section id="tab-explorer-activity-deps" class="tab-panel">
+      <section class="panel explorer-main-panel">
+        <div class="panel-title explorer-title-row">
+          <div>
+            <h2>Coupled Sectors</h2>
+            <p id="explorerActivityGraphSummary" class="subtle">Select filters in Technology dependencies to render activity flows.</p>
+          </div>
+          <div id="explorerActivityGraphLegend" class="explorer-legend"></div>
+        </div>
+        <div id="explorerActivityGraph" class="explorer-graph empty-state">No coupled sectors graph loaded.</div>
+        <div class="table-wrap explorer-activity-table"><table><thead><tr><th>Technology</th><th>Inputs</th><th>Outputs</th><th>Paths</th></tr></thead><tbody id="explorerActivityDependencyRows"><tr><td colspan="4" class="subtle">No technology paths loaded.</td></tr></tbody></table></div>
+      </section>
+    </section>
+
+    <section id="tab-explorer-details" class="tab-panel">
+      <div class="explorer-layout">
+        <aside class="panel explorer-sidebar">
+          <div class="panel-title">
+            <div>
+              <h2>Flow details</h2>
+              <p id="explorerDetailStatus" class="subtle">Search a technology or activity.</p>
+            </div>
+          </div>
+          <label class="field"><span>Search</span><input id="explorerDetailSearch" type="text" placeholder="Technology or activity"></label>
+          <div id="explorerDetailResults" class="detail-search-results empty-state">No searchable items loaded.</div>
+        </aside>
+        <section class="panel explorer-main-panel">
+          <div class="panel-title explorer-title-row">
+            <div>
+              <h2 id="explorerDetailTitle">Details</h2>
+              <p id="explorerDetailSummary" class="subtle">Select a technology or activity to inspect inputs and outputs.</p>
+            </div>
+          </div>
+          <div id="explorerDetailGraph" class="explorer-graph empty-state">No detail graph loaded.</div>
+          <div id="explorerDetailLegend" class="detail-flow-legend"></div>
+          <div class="table-wrap explorer-activity-table"><table><thead><tr><th>Side</th><th>Group</th><th>Kind</th><th>Name</th><th>Coefficient</th></tr></thead><tbody id="explorerDetailRows"><tr><td colspan="5" class="subtle">No detail rows loaded.</td></tr></tbody></table></div>
+        </section>
+      </div>
+    </section>
+
+    <section id="tab-explorer-profiles" class="tab-panel">
+      <section class="explorer-main-panel atlas-main-grid">
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title explorer-title-row">
+            <div><h2>Hourly profile surface</h2><p id="atlasProfileSurfaceSummary" class="subtle">No profile loaded.</p></div>
+            <div class="explorer-actions"><label class="field inline"><span>Profile</span><select id="atlasProfileSelect"></select></label></div>
+          </div>
+          <div id="atlasProfileSurface" class="atlas-chart tall empty-state">No profile loaded.</div>
+        </section>
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Monthly profile fingerprint</h2><p id="atlasProfileSummary" class="subtle">No profiles loaded.</p></div>
+          <div id="atlasProfileHeatmap" class="atlas-chart tall empty-state">No profiles loaded.</div>
+        </section>
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Profile rows</h2><p class="subtle">Summary of hourly profile ranges</p></div>
+          <div id="atlasProfileTable" class="table-wrap explorer-table empty-state">No profile rows loaded.</div>
+        </section>
+      </section>
+    </section>
+
+    <section id="tab-explorer-policy" class="tab-panel">
+      <section class="explorer-main-panel atlas-main-grid">
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Policy constraint catalog</h2><p id="atlasPolicySummary" class="subtle">No policy constraints loaded.</p></div>
+          <div id="atlasPolicyTable" class="table-wrap explorer-table empty-state">No policy constraints loaded.</div>
+        </section>
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Policy targets</h2><p id="atlasTargetSummary" class="subtle">No targets loaded.</p></div>
+          <div id="atlasTargetsChart" class="atlas-chart empty-state">No targets loaded.</div>
+        </section>
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Target rows</h2><p class="subtle">Emission and policy target values</p></div>
+          <div id="atlasTargetTable" class="table-wrap explorer-table empty-state">No targets loaded.</div>
+        </section>
+      </section>
+    </section>
+
+    <section id="tab-explorer-model" class="tab-panel">
+      <div class="explorer-layout">
+        <aside class="panel explorer-sidebar">
+          <div class="panel-title">
+            <div>
+              <h2>Model browser</h2>
+              <p id="explorerModelStatus" class="subtle">Loading inputs.</p>
+            </div>
+          </div>
+          <label class="field"><span>Scenario database</span><select id="explorerModelWorkbook"></select></label>
+          <label class="field"><span>Period</span><select id="explorerModelPeriod"></select></label>
+          <label class="field"><span>Model shape</span><select id="explorerModelMode"><option value="timeslice">Time-slice preview</option><option value="annual">Annual</option><option value="full_hourly">Full-hourly</option></select></label>
+          <label class="field"><span>Representative days</span><input id="explorerModelRepDays" type="number" min="1" max="30" value="1"></label>
+          <label class="field"><span>Hours per day</span><select id="explorerModelHours"><option value="24">24</option><option value="12">12</option><option value="8">8</option><option value="6">6</option><option value="4">4</option><option value="3">3</option><option value="2">2</option><option value="1">1</option></select></label>
+          <button id="explorerBuildModel" class="primary-button" type="button">Generate browser</button>
+          <dl id="explorerModelStats" class="summary-list explorer-stats">
+            <div><dt>Rows</dt><dd>-</dd></div>
+            <div><dt>Columns</dt><dd>-</dd></div>
+            <div><dt>Build</dt><dd>-</dd></div>
+          </dl>
+        </aside>
+        <section class="panel explorer-main-panel">
+          <div class="panel-title explorer-title-row">
+            <div>
+              <h2>Variables and constraints</h2>
+              <p id="explorerModelSummary" class="subtle">Generate a browser snapshot.</p>
+            </div>
+            <div class="explorer-actions">
+              <label class="field inline"><span>Show</span><select id="explorerModelKind"><option value="all">All</option><option value="Variable">Variables</option><option value="Constraint">Constraints</option></select></label>
+              <label class="field inline"><span>Search</span><input id="explorerModelSearch" type="text" placeholder="Family name"></label>
+            </div>
+          </div>
+          <div id="explorerModelTable" class="table-wrap explorer-table empty-state">No model snapshot yet.</div>
+        </section>
+      </div>
+    </section>
+
+    <section id="tab-explorer-tech" class="tab-panel">
+      <div class="explorer-layout tech-graph-layout">
+        <aside class="panel explorer-sidebar">
+          <div class="panel-title">
+            <div>
+              <h2>System flow</h2>
+              <p id="explorerGraphStatus" class="subtle">Loading inputs.</p>
+            </div>
+          </div>
+          <label class="field"><span>Scenario database</span><select id="explorerGraphWorkbook"></select></label>
+          <label class="field"><span>Period</span><select id="explorerGraphPeriod"></select></label>
+          <label class="field"><span>Diagram detail</span><select id="explorerDiagramDetail"><option value="group" selected>Sector/category groups</option><option value="technology">Individual technologies</option></select></label>
+          <label class="field"><span>Max activities</span><div class="range-pair"><input id="explorerMaxActivities" type="range" min="5" max="80" value="14"><input id="explorerMaxActivitiesNumber" type="number" min="1" max="120" value="14"></div></label>
+          <div class="field"><span>Sectors</span><div id="explorerSectorFilters" class="explorer-checks"></div></div>
+          <div class="field"><span>Subsectors</span><div id="explorerSubsectorFilters" class="explorer-checks"></div></div>
+          <div class="field"><span>Technology categories</span><div id="explorerCategoryFilters" class="explorer-checks"></div></div>
+          <button id="explorerRefreshGraph" class="primary-button" type="button">Refresh graph</button>
+        </aside>
+        <section class="panel explorer-main-panel">
+          <div class="panel-title explorer-title-row">
+            <div>
+              <h2>Energy system diagram</h2>
+              <p id="explorerGraphSummary" class="subtle">Select filters to render flows.</p>
+            </div>
+            <div id="explorerGraphLegend" class="explorer-legend"></div>
+          </div>
+          <div id="explorerTechGraph" class="explorer-graph empty-state">No graph loaded.</div>
+          <div class="table-wrap explorer-activity-table"><table><thead><tr><th>Activity</th><th>Producers</th><th>Consumers</th><th>Edges</th></tr></thead><tbody id="explorerActivityRows"><tr><td colspan="4" class="subtle">No activities loaded.</td></tr></tbody></table></div>
+        </section>
+      </div>
+    </section>
+
     <section id="tab-about" class="tab-panel">
       <section class="about-page panel">
         <img src="/assets/iesa-opt-logo.png" alt="IESA-Opt" class="about-logo">
@@ -382,8 +618,10 @@
         <h3>Using the dashboard</h3>
         <p>The dashboard is organised into <strong>sections</strong> along the very top &mdash; each section is its own workspace with its own set of tabs underneath:</p>
         <ul class="about-list">
-          <li><strong>Single run</strong> &mdash; the default workspace. Tabs: <em>Setup</em>, <em>Progress</em>, <em>Results</em>, <em>About</em>. Used to launch one optimisation, watch it solve, and inspect the resulting output folder.</li>
+          <li><strong>Single run</strong> &mdash; the default workspace. Tabs: <em>Setup</em>, <em>Progress</em>, <em>Results</em>. Used to launch one optimisation, watch it solve, and inspect the resulting output folder.</li>
           <li><strong>Scenario Space</strong> &mdash; the campaign workspace. Tabs: <em>Parameter Space</em> (define the parameter space + sample variants), <em>Progress</em> (live campaign progress, Phase 3 hookup pending), <em>Results</em> (aggregated cross-variant analytics, Phase 4/5 hookup pending).</li>
+          <li><strong>Scenario explorer</strong> &mdash; workbook and generated-model inspection. Tabs: <em>Model browser</em> and <em>Technology dependencies</em>.</li>
+          <li><strong>About</strong> &mdash; this reference page.</li>
           <li><strong>MGA</strong> &mdash; coming soon. Will host modelling-to-generate-alternatives explorations.</li>
         </ul>
         <p>The tabs below the section bar are filtered automatically: only the tabs that belong to the active section are shown. Each tab is described below together with every option it exposes.</p>
@@ -451,8 +689,9 @@
       </section>
     </section>
   </main>
-  <script src="/vendor/plotly.min.js"></script>
+  <script src="/vendor/plotly-full.min.js"></script>
   <script src="/app.js"></script>
   <script src="/app.scenario.js"></script>
+  <script src="/app.explorer.js"></script>
 </body>
 </html>

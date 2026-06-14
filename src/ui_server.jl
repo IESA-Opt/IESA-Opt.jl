@@ -140,6 +140,14 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         return _json_response(Dict("solvers" => _detect_solvers()))
     elseif method == "GET" && path == "/api/outputs"
         return _json_response(Dict("outputs" => _list_output_runs()))
+    elseif method == "POST" && path == "/api/explorer/options"
+        return _json_response(_explorer_options(_json_body(req)))
+    elseif method == "POST" && path == "/api/explorer/techGraph"
+        return _json_response(_explorer_tech_graph(_json_body(req)))
+    elseif method == "POST" && path == "/api/explorer/modelBrowser"
+        return _json_response(_explorer_model_browser(_json_body(req)))
+    elseif method == "POST" && path == "/api/explorer/inputAtlas"
+        return _json_response(_explorer_input_atlas(_json_body(req)))
     elseif method == "POST" && path == "/api/run"
         config = _json_body(req)
         job_id = _start_ui_job!(config)
@@ -803,6 +811,916 @@ end
 function _ui_data_cache_path(input_path::AbstractString)
     cache_dir = joinpath(dirname(abspath(input_path)), ".iesa_cache")
     return _duckdb_input_cache_path(input_path, cache_dir)
+end
+
+function _resolve_explorer_input(body)
+    input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
+    input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
+    isfile(input_path) || error("Input workbook not found: $(input_value)")
+    rel = try
+        replace(relpath(input_path, _repo_root()), '\\' => '/')
+    catch
+        input_path
+    end
+    return input_path, rel
+end
+
+function _explorer_symbol_label(value; fallback::AbstractString = "Unspecified")
+    text = strip(String(value))
+    isempty(text) && return String(fallback)
+    text == "Symbol(\"\")" && return String(fallback)
+    return text
+end
+
+function _explorer_technology_universe(md::ModelData)
+    techs = Set{Symbol}()
+    for collection in (md.sets.technologies, md.sets.tech_balancers, md.sets.tech_infra)
+        for t in collection
+            t != Symbol("") && push!(techs, t)
+        end
+    end
+    for dict in (md.params.tech_sector, md.params.tech_subsector, md.params.tech_category, md.params.tech_name,
+                 md.params.activityPer_tech, md.params.activityPer_techOrig, md.params.tech_activity)
+        for t in keys(dict)
+            t != Symbol("") && push!(techs, t)
+        end
+    end
+    for ((t, _, _), coef) in _explorer_balance_source(md)
+        abs(coef) > 1e-12 && t != Symbol("") && push!(techs, t)
+    end
+    return sort!(collect(techs); by = string)
+end
+
+function _explorer_balance_source(md::ModelData)
+    if isempty(md.params.activity_balances) && !isempty(md.params.activity_balancesRef)
+        try
+            compute_activity_balances!(md)
+        catch err
+            @warn "Scenario explorer could not derive activity_balances; using activity_balancesRef" err
+        end
+    end
+    return isempty(md.params.activity_balances) ? md.params.activity_balancesRef : md.params.activity_balances
+end
+
+function _explorer_periods(md::ModelData)
+    periods = Set{Int}(md.sets.periods)
+    for ((_, _, period), _) in _explorer_balance_source(md)
+        push!(periods, Int(period))
+    end
+    return sort!(collect(periods))
+end
+
+function _explorer_default_period(periods::AbstractVector{Int})
+    isempty(periods) && return 2050
+    2050 in periods && return 2050
+    return last(periods)
+end
+
+function _explorer_selected_period(body, periods::AbstractVector{Int})
+    requested = _as_int(_config_get(body, "period", _explorer_default_period(periods)), _explorer_default_period(periods))
+    requested in periods && return requested
+    return _explorer_default_period(periods)
+end
+
+function _explorer_count_options(values)
+    counts = Dict{String,Int}()
+    for value in values
+        label = _explorer_symbol_label(value)
+        counts[label] = get(counts, label, 0) + 1
+    end
+    rows = [Dict("id" => key, "label" => key, "count" => counts[key]) for key in sort!(collect(keys(counts)))]
+    return rows
+end
+
+function _explorer_tech_meta(md::ModelData, t::Symbol)
+    p = md.params
+    sector = _explorer_symbol_label(get(p.tech_sector, t, Symbol("")))
+    subsector = _explorer_symbol_label(get(p.tech_subsector, t, Symbol("")))
+    category = _explorer_symbol_label(get(p.tech_category, t, Symbol("")))
+    primary = _explorer_symbol_label(get(p.tech_activity, t, get(p.activityPer_tech, t, get(p.activityPer_techOrig, t, Symbol("")))); fallback = "")
+    name = strip(String(get(p.tech_name, t, "")))
+    return Dict(
+        "id" => String(t),
+        "name" => isempty(name) ? String(t) : name,
+        "sector" => sector,
+        "subsector" => subsector,
+        "category" => category,
+        "primaryActivity" => primary,
+    )
+end
+
+function _explorer_options(body)
+    input_path, workbook = _resolve_explorer_input(body)
+    md = _read_ui_data_cached(input_path)
+    techs = _explorer_technology_universe(md)
+    sectors = [_explorer_tech_meta(md, t)["sector"] for t in techs]
+    subsectors = [_explorer_tech_meta(md, t)["subsector"] for t in techs]
+    categories = [_explorer_tech_meta(md, t)["category"] for t in techs]
+    periods = _explorer_periods(md)
+    return Dict(
+        "inputWorkbook" => workbook,
+        "periods" => periods,
+        "defaultPeriod" => _explorer_default_period(periods),
+        "technologyCount" => length(techs),
+        "sectors" => _explorer_count_options(sectors),
+        "subsectors" => _explorer_count_options(subsectors),
+        "categories" => _explorer_count_options(categories),
+    )
+end
+
+function _explorer_filter_set(body, key::String)
+    present = false
+    if body isa AbstractDict
+        present = haskey(body, key) || haskey(body, Symbol(key))
+    else
+        try
+            getproperty(body, Symbol(key))
+            present = true
+        catch
+            present = false
+        end
+    end
+    present || return nothing
+    values = _as_string_vector(_config_get(body, key, String[]))
+    return Set(strip.(values))
+end
+
+function _explorer_tech_matches(meta::AbstractDict, sectors, subsectors, categories)
+    (sectors !== nothing && !(String(meta["sector"]) in sectors)) && return false
+    (subsectors !== nothing && !(String(meta["subsector"]) in subsectors)) && return false
+    (categories !== nothing && !(String(meta["category"]) in categories)) && return false
+    return true
+end
+
+function _explorer_round(value)
+    return round(Float64(value); digits = 6)
+end
+
+function _explorer_activity_terms(md::ModelData, tech::Symbol, period::Int, positive::Bool)
+    rows = Vector{Dict{String,Any}}()
+    for ((t, activity, ps), coef) in _explorer_balance_source(md)
+        t == tech && ps == period || continue
+        positive ? (coef > 1e-12 || continue) : (coef < -1e-12 || continue)
+        push!(rows, Dict("activity" => String(activity), "coefficient" => _explorer_round(coef)))
+    end
+    sort!(rows; by = r -> -abs(Float64(r["coefficient"])))
+    return rows[1:min(length(rows), 6)]
+end
+
+function _explorer_activity_group(activity::Symbol)
+    text = lowercase(String(activity))
+    if occursin("emission", text) || occursin("emitted", text) || occursin("co2", text) || occursin("ghg", text)
+        return "Emissions"
+    elseif occursin("electric", text)
+        return "Electricity"
+    elseif occursin("heat", text) || occursin("steam", text)
+        return "Heat"
+    elseif occursin("hydrogen", text) || occursin("ammonia", text) || occursin("methanol", text)
+        return "Molecules"
+    elseif occursin("gas", text) || occursin("methane", text) || occursin("lng", text)
+        return "Gas"
+    elseif occursin("diesel", text) || occursin("kerosene", text) || occursin("gasoline", text) || occursin("naphtha", text) || occursin("lpg", text) || occursin("fuel", text)
+        return "Liquid fuels"
+    elseif occursin("biomass", text) || occursin("waste", text)
+        return "Biogenic"
+    else
+        return "Other carriers"
+    end
+end
+
+function _explorer_system_flow_payload(by_activity, selected_activities, meta_by_tech)
+    node_map = Dict{String,Dict{String,Any}}()
+    links = Vector{Dict{String,Any}}()
+
+    function ensure_activity!(activity::Symbol)
+        id = "activity:" * String(activity)
+        if !haskey(node_map, id)
+            node_map[id] = Dict(
+                "id" => id,
+                "label" => String(activity),
+                "kind" => "activity",
+                "group" => _explorer_activity_group(activity),
+                "rawId" => String(activity),
+            )
+        end
+        return id
+    end
+
+    function ensure_tech!(tech::Symbol, role::String)
+        id = "tech:" * role * ":" * String(tech)
+        if !haskey(node_map, id)
+            meta = meta_by_tech[tech]
+            node_map[id] = Dict(
+                "id" => id,
+                "label" => String(meta["name"]),
+                "kind" => "technology",
+                "role" => role,
+                "rawId" => String(tech),
+                "sector" => String(meta["sector"]),
+                "subsector" => String(meta["subsector"]),
+                "category" => String(meta["category"]),
+            )
+        end
+        return id
+    end
+
+    link_count = 0
+    for activity in selected_activities
+        values = get(by_activity, activity, Tuple{Symbol,Float64}[])
+        producers = sort!([x for x in values if x[2] > 1e-12]; by = x -> -abs(x[2]))[1:min(count(x -> x[2] > 1e-12, values), 10)]
+        consumers = sort!([x for x in values if x[2] < -1e-12]; by = x -> -abs(x[2]))[1:min(count(x -> x[2] < -1e-12, values), 10)]
+        isempty(producers) && continue
+        isempty(consumers) && continue
+        activity_id = ensure_activity!(activity)
+        for (producer, coef) in producers
+            link_count >= 700 && break
+            source = ensure_tech!(producer, "producer")
+            push!(links, Dict(
+                "source" => source,
+                "target" => activity_id,
+                "value" => _explorer_round(abs(coef)),
+                "activity" => String(activity),
+                "kind" => "output",
+                "technology" => String(producer),
+                "coefficient" => _explorer_round(coef),
+            ))
+            link_count += 1
+        end
+        for (consumer, coef) in consumers
+            link_count >= 700 && break
+            target = ensure_tech!(consumer, "consumer")
+            push!(links, Dict(
+                "source" => activity_id,
+                "target" => target,
+                "value" => _explorer_round(abs(coef)),
+                "activity" => String(activity),
+                "kind" => "input",
+                "technology" => String(consumer),
+                "coefficient" => _explorer_round(coef),
+            ))
+            link_count += 1
+        end
+        link_count >= 700 && break
+    end
+
+    nodes = collect(values(node_map))
+    sort!(nodes; by = n -> (String(n["kind"]), get(n, "group", get(n, "sector", "")), String(n["label"])))
+    return Dict("nodes" => nodes, "links" => links)
+end
+
+function _explorer_detail_flow_payload(by_activity, meta_by_tech)
+    node_map = Dict{String,Dict{String,Any}}()
+    links = Vector{Dict{String,Any}}()
+
+    function ensure_activity!(activity::Symbol)
+        id = "activity:" * String(activity)
+        if !haskey(node_map, id)
+            node_map[id] = Dict(
+                "id" => id,
+                "kind" => "activity",
+                "label" => String(activity),
+                "rawId" => String(activity),
+                "group" => _explorer_activity_group(activity),
+            )
+        end
+        return id
+    end
+
+    function ensure_tech!(tech::Symbol)
+        id = "technology:" * String(tech)
+        if !haskey(node_map, id)
+            meta = meta_by_tech[tech]
+            node_map[id] = Dict(
+                "id" => id,
+                "kind" => "technology",
+                "label" => String(meta["name"]),
+                "rawId" => String(tech),
+                "sector" => String(meta["sector"]),
+                "subsector" => String(meta["subsector"]),
+                "category" => String(meta["category"]),
+            )
+        end
+        return id
+    end
+
+    for (activity, values) in by_activity
+        activity_id = ensure_activity!(activity)
+        for (tech, coef) in values
+            haskey(meta_by_tech, tech) || continue
+            tech_id = ensure_tech!(tech)
+            if coef > 1e-12
+                push!(links, Dict(
+                    "source" => tech_id,
+                    "target" => activity_id,
+                    "technology" => String(tech),
+                    "activity" => String(activity),
+                    "group" => _explorer_activity_group(activity),
+                    "coefficient" => _explorer_round(coef),
+                    "value" => _explorer_round(abs(coef)),
+                    "sign" => "positive",
+                ))
+            elseif coef < -1e-12
+                push!(links, Dict(
+                    "source" => activity_id,
+                    "target" => tech_id,
+                    "technology" => String(tech),
+                    "activity" => String(activity),
+                    "group" => _explorer_activity_group(activity),
+                    "coefficient" => _explorer_round(coef),
+                    "value" => _explorer_round(abs(coef)),
+                    "sign" => "negative",
+                ))
+            end
+        end
+    end
+
+    nodes = collect(values(node_map))
+    sort!(nodes; by = n -> (String(n["kind"]), get(n, "group", get(n, "sector", "")), String(n["label"])))
+    sort!(links; by = l -> (-Float64(l["value"]), String(l["technology"]), String(l["activity"])))
+    return Dict("nodes" => nodes, "links" => links)
+end
+
+function _explorer_tech_graph(body)
+    input_path, workbook = _resolve_explorer_input(body)
+    md = _read_ui_data_cached(input_path)
+    periods = _explorer_periods(md)
+    period = _explorer_selected_period(body, periods)
+    max_activities = clamp(_as_int(_config_get(body, "maxActivities", 28), 28), 1, 120)
+    sectors = _explorer_filter_set(body, "sectors")
+    subsectors = _explorer_filter_set(body, "subsectors")
+    categories = _explorer_filter_set(body, "categories")
+
+    meta_by_tech = Dict{Symbol,Dict{String,Any}}()
+    for t in _explorer_technology_universe(md)
+        meta = _explorer_tech_meta(md, t)
+        _explorer_tech_matches(meta, sectors, subsectors, categories) || continue
+        meta_by_tech[t] = meta
+    end
+
+    by_activity = Dict{Symbol,Vector{Tuple{Symbol,Float64}}}()
+    for ((tech, activity, ps), coef) in _explorer_balance_source(md)
+        ps == period || continue
+        abs(coef) > 1e-12 || continue
+        haskey(meta_by_tech, tech) || continue
+        push!(get!(by_activity, activity, Vector{Tuple{Symbol,Float64}}()), (tech, Float64(coef)))
+    end
+
+    scored = Vector{Tuple{Symbol,Int,Int,Float64,Float64}}()
+    for (activity, values) in by_activity
+        producers = count(x -> x[2] > 1e-12, values)
+        consumers = count(x -> x[2] < -1e-12, values)
+        producers > 0 && consumers > 0 || continue
+        total_abs = sum(abs(x[2]) for x in values)
+        score = producers * consumers + log1p(total_abs)
+        push!(scored, (activity, producers, consumers, total_abs, score))
+    end
+    sort!(scored; by = x -> (-x[5], String(x[1])))
+    selected = scored[1:min(length(scored), max_activities)]
+    selected_activity_list = [x[1] for x in selected]
+    selected_activities = Set(selected_activity_list)
+
+    node_ids = Set{Symbol}()
+    edges = Vector{Dict{String,Any}}()
+    activity_edge_counts = Dict{Symbol,Int}()
+    for activity in selected_activity_list
+        values = by_activity[activity]
+        producers = sort!([x for x in values if x[2] > 1e-12]; by = x -> -abs(x[2]))
+        consumers = sort!([x for x in values if x[2] < -1e-12]; by = x -> -abs(x[2]))
+        pairs = Vector{Tuple{Symbol,Float64,Symbol,Float64,Float64}}()
+        for (producer, producer_coef) in producers, (consumer, consumer_coef) in consumers
+            push!(pairs, (producer, producer_coef, consumer, consumer_coef, abs(producer_coef * consumer_coef)))
+        end
+        sort!(pairs; by = x -> -x[5])
+        per_activity_limit = min(length(pairs), 80)
+        for pair in pairs[1:per_activity_limit]
+            length(edges) >= 900 && break
+            producer, producer_coef, consumer, consumer_coef, _ = pair
+            push!(node_ids, producer); push!(node_ids, consumer)
+            ratio = abs(consumer_coef) / max(abs(producer_coef), 1e-12)
+            push!(edges, Dict(
+                "from" => String(producer),
+                "to" => String(consumer),
+                "activity" => String(activity),
+                "outputRatio" => _explorer_round(producer_coef),
+                "inputRatio" => _explorer_round(abs(consumer_coef)),
+                "inputOutputRatio" => _explorer_round(ratio),
+            ))
+            activity_edge_counts[activity] = get(activity_edge_counts, activity, 0) + 1
+        end
+        length(edges) >= 900 && break
+    end
+
+    nodes = Vector{Dict{String,Any}}()
+    for tech in sort!(collect(node_ids); by = string)
+        meta = deepcopy(meta_by_tech[tech])
+        meta["inputs"] = _explorer_activity_terms(md, tech, period, false)
+        meta["outputs"] = _explorer_activity_terms(md, tech, period, true)
+        push!(nodes, meta)
+    end
+
+    activities = [Dict(
+        "activity" => String(activity),
+        "producers" => producers,
+        "consumers" => consumers,
+        "totalCoefficient" => _explorer_round(total_abs),
+        "edges" => get(activity_edge_counts, activity, 0),
+    ) for (activity, producers, consumers, total_abs, _) in selected]
+
+    return Dict(
+        "inputWorkbook" => workbook,
+        "periods" => periods,
+        "selectedPeriod" => period,
+        "maxActivities" => max_activities,
+        "availableActivities" => length(scored),
+        "nodes" => nodes,
+        "edges" => edges,
+        "systemFlows" => _explorer_system_flow_payload(by_activity, selected_activity_list, meta_by_tech),
+        "detailFlows" => _explorer_detail_flow_payload(by_activity, meta_by_tech),
+        "activities" => activities,
+    )
+end
+
+function _prepare_explorer_model_data!(md::ModelData; period::Int, mode::Symbol, representative_days::Int, hours_per_day::Int, clustering::Symbol)
+    md.sets.periods_solve = [period]
+    md.params.hoursPer_day = mode == :ts ? 24 : hours_per_day
+    md.params.n_repDays = max(1, representative_days)
+    md.params.hoursPer_day_cluster = 24
+    md.params.clustering_approach = clustering
+    md.params.ts_extremePeriods = false
+    md.params.ts_extremeDays_count = 0
+    md.params.ts_boundaryRamping = true
+    md.params.ts_capacityProfile_autoMode = true
+    md.params.ts_capacityProfile_autoFloor = 0.23
+    md.params.ts_capacityProfile_autoCap = 1.00
+    md.params.ts_capacityProfile_autoFloor_effective = 0.23
+    md.params.ts_capacityProfile_envelopeMode = 0
+    md.params.dayMix_softness = 0.0
+    md.params.dayMix_weightType = :auto
+    derive_sets!(md)
+    compute_derived_params!(md)
+    mode == :ts && build_temporal_clusters!(md)
+    return md
+end
+
+function _explorer_family_from_name(name::AbstractString)
+    text = strip(String(name))
+    isempty(text) && return "unnamed"
+    idx = findfirst(==('['), text)
+    idx === nothing && return text
+    return text[begin:prevind(text, idx)]
+end
+
+function _explorer_variable_families(model::JuMP.Model)
+    groups = Dict{String,Dict{String,Any}}()
+    for var in JuMP.all_variables(model)
+        name = String(JuMP.name(var))
+        family = _explorer_family_from_name(name)
+        row = get!(groups, family, Dict("kind" => "Variable", "family" => family, "count" => 0, "type" => "VariableRef", "examples" => String[]))
+        row["count"] = Int(row["count"]) + 1
+        examples = row["examples"]
+        length(examples) < 4 && push!(examples, isempty(name) ? family : name)
+    end
+    rows = collect(values(groups))
+    sort!(rows; by = r -> (String(r["kind"]), String(r["family"])))
+    return rows
+end
+
+function _explorer_constraint_families(model::JuMP.Model)
+    groups = Dict{String,Dict{String,Any}}()
+    for (func_type, set_type) in JuMP.list_of_constraint_types(model)
+        constraint_type = replace("$(func_type) in $(set_type)", "MathOptInterface." => "MOI.")
+        for cref in JuMP.all_constraints(model, func_type, set_type)
+            name = String(JuMP.name(cref))
+            family = _explorer_family_from_name(name)
+            key = family * "\0" * constraint_type
+            row = get!(groups, key, Dict("kind" => "Constraint", "family" => family, "count" => 0, "type" => constraint_type, "examples" => String[]))
+            row["count"] = Int(row["count"]) + 1
+            examples = row["examples"]
+            length(examples) < 4 && push!(examples, isempty(name) ? family : name)
+        end
+    end
+    rows = collect(values(groups))
+    sort!(rows; by = r -> (String(r["kind"]), String(r["family"])))
+    return rows
+end
+
+function _explorer_model_browser(body)
+    input_path, workbook = _resolve_explorer_input(body)
+    md = _read_ui_data_cached(input_path)
+    periods = _explorer_periods(md)
+    period = _explorer_selected_period(body, periods)
+    mode_raw = lowercase(String(_config_get(body, "mode", "timeslice")))
+    mode = mode_raw in ("full_hourly", "fh", "full-hourly") ? :fh : (mode_raw == "annual" ? :annual : :ts)
+    representative_days = clamp(_as_int(_config_get(body, "representativeDays", 1), 1), 1, 30)
+    hours_per_day = clamp(_as_int(_config_get(body, "hoursPerDay", 24), 24), 1, 24)
+    clustering = Symbol(String(_config_get(body, "clusteringApproach", "kmeans_avg")))
+
+    _, prepare_seconds = _elapsed() do
+        _prepare_explorer_model_data!(md; period = period, mode = mode, representative_days = representative_days, hours_per_day = hours_per_day, clustering = clustering)
+    end
+    model = JuMP.Model()
+    apply_lp_generation_speedups!(model; keep_names = true)
+    _, build_seconds = _elapsed() do
+        if mode == :annual
+            build_annual_lp!(model, md)
+        elseif mode == :fh
+            build_fh_lp!(model, md)
+        else
+            build_ts_lp!(model, md)
+        end
+    end
+
+    variable_rows = _explorer_variable_families(model)
+    constraint_rows = _explorer_constraint_families(model)
+    n_rows = try
+        JuMP.num_constraints(model; count_variable_in_set_constraints = false)
+    catch
+        sum(Int(r["count"]) for r in constraint_rows)
+    end
+    n_cols = JuMP.num_variables(model)
+    return Dict(
+        "inputWorkbook" => workbook,
+        "periods" => periods,
+        "selectedPeriod" => period,
+        "mode" => String(mode),
+        "representativeDays" => representative_days,
+        "hoursPerDay" => hours_per_day,
+        "prepareSeconds" => prepare_seconds,
+        "buildSeconds" => build_seconds,
+        "rows" => n_rows,
+        "columns" => n_cols,
+        "variables" => variable_rows,
+        "constraints" => constraint_rows,
+    )
+end
+
+function _explorer_value_or_nothing(value)
+    value === nothing && return nothing
+    value isa Real || return value
+    n = Float64(value)
+    isfinite(n) || return nothing
+    return _explorer_round(n)
+end
+
+function _explorer_sheet_inventory(input_path::AbstractString)
+    rows = Vector{Dict{String,Any}}()
+    XLSX.openxlsx(input_path, mode = "r") do xf
+        for name in XLSX.sheetnames(xf)
+            dims = try
+                data = xf[name][:]
+                (size(data, 1), size(data, 2))
+            catch
+                (0, 0)
+            end
+            sheet_group = if name in ("Technologies", "Infrastructure", "EnergyBalance", "Activities", "Feedstocks", "EffLearning", "Retrofitting")
+                "Technology system"
+            elseif occursin("Profiles", name) || occursin("Hourly", name) || occursin("Extreme", name)
+                "Time series"
+            elseif name in ("NodeParameters", "Parameters", "Types", "Ranges", "ActGrouping")
+                "Configuration"
+            else
+                "Reference"
+            end
+            push!(rows, Dict(
+                "sheet" => String(name),
+                "group" => sheet_group,
+                "rows" => Int(dims[1]),
+                "columns" => Int(dims[2]),
+                "cells" => Int(dims[1] * dims[2]),
+            ))
+        end
+    end
+    sort!(rows; by = r -> (-Int(r["cells"]), String(r["sheet"])))
+    return rows
+end
+
+function _explorer_set_counts(md::ModelData)
+    s = md.sets
+    rows = [
+        ("Technologies", length(s.technologies), "Technology system"),
+        ("Balancing technologies", length(s.tech_balancers), "Technology system"),
+        ("Infrastructure technologies", length(s.tech_infra), "Technology system"),
+        ("Activities", length(s.activities), "Activities"),
+        ("Original activities", length(s.activities_original), "Activities"),
+        ("Nodes", length(s.nodes), "Geography"),
+        ("Periods", length(s.periods), "Time"),
+        ("Hourly profile types", length(s.profile_typeRead), "Time series"),
+        ("Process types", length(s.process_type), "Taxonomy"),
+        ("Sectors", length(s.sectors), "Taxonomy"),
+        ("KEV sectors", length(s.sectors_kev), "Taxonomy"),
+        ("Energy labels", length(s.energy_labels), "Taxonomy"),
+    ]
+    return [Dict("name" => name, "count" => count, "group" => group) for (name, count, group) in rows]
+end
+
+function _explorer_sector_category_rows(md::ModelData)
+    counts = Dict{Tuple{String,String},Int}()
+    for t in _explorer_technology_universe(md)
+        meta = _explorer_tech_meta(md, t)
+        key = (String(meta["sector"]), String(meta["category"]))
+        counts[key] = get(counts, key, 0) + 1
+    end
+    rows = [Dict("sector" => sector, "category" => category, "count" => count) for ((sector, category), count) in counts]
+    sort!(rows; by = r -> (-Int(r["count"]), String(r["sector"]), String(r["category"])))
+    return rows
+end
+
+function _explorer_technology_rows(md::ModelData, period::Int)
+    p = md.params
+    rows = Vector{Dict{String,Any}}()
+    for t in _explorer_technology_universe(md)
+        meta = _explorer_tech_meta(md, t)
+        push!(rows, merge(meta, Dict(
+            "period" => period,
+            "investmentCost" => _explorer_value_or_nothing(get(p.inv_cost, (t, period), nothing)),
+            "fixedOM" => _explorer_value_or_nothing(get(p.fom_cost, (t, period), nothing)),
+            "variableOM" => _explorer_value_or_nothing(get(p.vom_cost, (t, period), nothing)),
+            "economicLifetime" => _explorer_value_or_nothing(get(p.economic_lifetime, t, nothing)),
+            "technicalLifetime" => _explorer_value_or_nothing(get(p.technical_lifetime, t, nothing)),
+            "wacc" => _explorer_value_or_nothing(get(p.WACC, t, nothing)),
+            "cap2act" => _explorer_value_or_nothing(get(p.cap2act, t, nothing)),
+            "stockExisting" => _explorer_value_or_nothing(get(p.techStock_exist, t, nothing)),
+        )))
+    end
+    return rows
+end
+
+function _explorer_activity_balance_atlas(md::ModelData, period::Int)
+    sector_activity = Dict{Tuple{String,String},Float64}()
+    sector_total = Dict{String,Float64}()
+    activity_total = Dict{String,Float64}()
+    output_total = Dict{Tuple{String,String},Float64}()
+    input_total = Dict{Tuple{String,String},Float64}()
+    for ((tech, activity, ps), coef) in _explorer_balance_source(md)
+        ps == period || continue
+        abs(coef) > 1e-12 || continue
+        meta = _explorer_tech_meta(md, tech)
+        sector = String(meta["sector"])
+        activity_name = String(activity)
+        key = (sector, activity_name)
+        sector_activity[key] = get(sector_activity, key, 0.0) + Float64(coef)
+        sector_total[sector] = get(sector_total, sector, 0.0) + abs(Float64(coef))
+        activity_total[activity_name] = get(activity_total, activity_name, 0.0) + abs(Float64(coef))
+        if coef > 0
+            output_total[key] = get(output_total, key, 0.0) + Float64(coef)
+        else
+            input_total[key] = get(input_total, key, 0.0) + abs(Float64(coef))
+        end
+    end
+    activities = sort!(collect(keys(activity_total)); by = a -> (-activity_total[a], a))[1:min(length(activity_total), 36)]
+    sectors = sort!(collect(keys(sector_total)); by = s -> (-sector_total[s], s))[1:min(length(sector_total), 18)]
+    z = [[_explorer_round(get(sector_activity, (sector, activity), 0.0)) for activity in activities] for sector in sectors]
+    flows = Vector{Dict{String,Any}}()
+    for sector in sectors, activity in activities
+        key = (sector, activity)
+        out = get(output_total, key, 0.0)
+        inn = get(input_total, key, 0.0)
+        abs(out) + abs(inn) > 1e-12 || continue
+        push!(flows, Dict("sector" => sector, "activity" => activity, "output" => _explorer_round(out), "input" => _explorer_round(inn), "net" => _explorer_round(out - inn)))
+    end
+    sort!(flows; by = r -> -(abs(Float64(r["output"])) + abs(Float64(r["input"]))))
+    return Dict("sectors" => sectors, "activities" => activities, "z" => z, "flows" => flows[1:min(length(flows), 80)])
+end
+
+function _explorer_activity_demand_rows(md::ModelData, period::Int)
+    rows = Vector{Dict{String,Any}}()
+    for ((activity, ps), value) in md.params.activities_netVolumes
+        ps == period || continue
+        meta_type = _explorer_symbol_label(get(md.params.activityType_act, activity, Symbol("")))
+        dispatch = _explorer_symbol_label(get(md.params.dispatchType_act, activity, Symbol("")); fallback = "")
+        node = _explorer_symbol_label(get(md.params.nodePer_act, activity, Symbol("")); fallback = "")
+        push!(rows, Dict("activity" => String(activity), "type" => meta_type, "dispatch" => dispatch, "node" => node, "value" => _explorer_round(value)))
+    end
+    sort!(rows; by = r -> -abs(Float64(r["value"])))
+    return rows[1:min(length(rows), 80)]
+end
+
+function _explorer_monthly_profile_heatmap(md::ModelData)
+    profiles = sort!(collect(Set(a for (_, a) in keys(md.params.hourly_profilesReadOrig))); by = string)
+    isempty(profiles) && return Dict("profiles" => String[], "months" => Int[], "z" => [])
+    totals = Dict{Tuple{Symbol,Int},Float64}()
+    counts = Dict{Tuple{Symbol,Int},Int}()
+    for ((hour, profile), value) in md.params.hourly_profilesReadOrig
+        month = get(md.params.monthPer_hourOrig, hour, 0)
+        1 <= month <= 12 || continue
+        key = (profile, month)
+        totals[key] = get(totals, key, 0.0) + Float64(value)
+        counts[key] = get(counts, key, 0) + 1
+    end
+    variation = Dict{Symbol,Float64}()
+    for profile in profiles
+        vals = [get(totals, (profile, m), 0.0) / max(get(counts, (profile, m), 0), 1) for m in 1:12]
+        variation[profile] = maximum(vals) - minimum(vals)
+    end
+    selected = sort!(profiles; by = p -> (-variation[p], String(p)))[1:min(length(profiles), 24)]
+    z = [[_explorer_round(get(totals, (profile, m), 0.0) / max(get(counts, (profile, m), 0), 1)) for m in 1:12] for profile in selected]
+    return Dict("profiles" => String.(selected), "months" => collect(1:12), "z" => z)
+end
+
+function _explorer_profile_surfaces(md::ModelData)
+    profiles = sort!(collect(Set(profile for (_, profile) in keys(md.params.hourly_profilesReadOrig))); by = string)
+    isempty(profiles) && return Dict("profiles" => String[], "days" => Int[], "hours" => Int[], "surfaces" => Dict{String,Any}(), "summary" => [])
+    max_hour = maximum(Int(hour) for (hour, _) in keys(md.params.hourly_profilesReadOrig))
+    days_count = clamp(cld(max_hour, 24), 1, 366)
+    days = collect(1:days_count)
+    hours = collect(1:24)
+    surfaces = Dict{String,Any}()
+    summary = Vector{Dict{String,Any}}()
+    for profile in profiles
+        z = [zeros(Float64, days_count) for _ in 1:24]
+        vals = Float64[]
+        for ((hour, prof), value) in md.params.hourly_profilesReadOrig
+            prof == profile || continue
+            h = Int(hour)
+            day = div(h - 1, 24) + 1
+            1 <= day <= days_count || continue
+            hour_day = mod(h - 1, 24) + 1
+            v = Float64(value)
+            z[hour_day][day] = _explorer_round(v)
+            push!(vals, v)
+        end
+        label = String(profile)
+        surfaces[label] = z
+        if isempty(vals)
+            push!(summary, Dict("profile" => label, "min" => 0.0, "max" => 0.0, "average" => 0.0, "spread" => 0.0))
+        else
+            mn = minimum(vals); mx = maximum(vals); avg = sum(vals) / length(vals)
+            push!(summary, Dict("profile" => label, "min" => _explorer_round(mn), "max" => _explorer_round(mx), "average" => _explorer_round(avg), "spread" => _explorer_round(mx - mn)))
+        end
+    end
+    sort!(summary; by = r -> (-Float64(r["spread"]), String(r["profile"])))
+    return Dict("profiles" => String.(profiles), "days" => days, "hours" => hours, "surfaces" => surfaces, "summary" => summary)
+end
+
+function _explorer_policy_component(label::AbstractString, values; limit::Int = 80)
+    raw_items = sort!(unique(string.(collect(values))))
+    visible = raw_items[1:min(length(raw_items), limit)]
+    return Dict(
+        "label" => String(label),
+        "count" => length(raw_items),
+        "items" => visible,
+        "truncated" => max(length(raw_items) - length(visible), 0),
+    )
+end
+
+function _explorer_policy_target_values(target_dict; limit::Int = 80)
+    rows = String[]
+    for (key, value) in target_dict
+        label = key isa Tuple ? join(string.(key), " / ") : string(key)
+        push!(rows, "$(label) = $(_explorer_round(value))")
+    end
+    sort!(rows)
+    return rows[1:min(length(rows), limit)]
+end
+
+function _explorer_policy_constraint_rows(md::ModelData)
+    model_sets = md.sets
+    model_params = md.params
+
+    techs_at_node(node::Symbol) = [technology for technology in model_sets.tech_balancers if get(model_params.nodePer_techBal, technology, Symbol("")) == node]
+    techs_with_activity(activities; tech_filter::Function = _ -> true) = begin
+        activity_set = Set(Symbol.(activities))
+        technology_set = Set{Symbol}()
+        for ((technology, activity, _period), coefficient) in model_params.activity_balances
+            coefficient == 0.0 && continue
+            activity in activity_set || continue
+            technology in model_sets.tech_balancers || continue
+            tech_filter(technology) || continue
+            push!(technology_set, technology)
+        end
+        collect(technology_set)
+    end
+    techs_with_activity_per(activity::Symbol) = [technology for technology in model_sets.tech_balancers if get(model_params.activityPer_tech, technology, Symbol("")) == activity]
+    technologies_named(names::Vector{Symbol}) = [technology for technology in names if technology in model_sets.tech_balancers]
+    technologies_matching(filter::Function) = [technology for technology in model_sets.tech_balancers if filter(technology)]
+    period_values(target_dict) = _explorer_policy_target_values(target_dict)
+
+    function components(; technologies = Symbol[], activities = Symbol[], targets = String[], notes = String[])
+        groups = Vector{Dict{String,Any}}()
+        isempty(technologies) || push!(groups, _explorer_policy_component("Technologies", technologies))
+        isempty(activities) || push!(groups, _explorer_policy_component("Activities", activities))
+        isempty(targets) || push!(groups, _explorer_policy_component("Target values", targets))
+        isempty(notes) || push!(groups, _explorer_policy_component("Scenario control", notes; limit = 20))
+        return groups
+    end
+
+    scenario_note = ["Included by the selected scenario or constraint group; this catalog shows the formulation contents, not a live enabled/disabled state."]
+    nl_techs = techs_at_node(:NL)
+    eu_techs = techs_at_node(:EU)
+    bunker_navigation_techs = technologies_matching(technology -> get(model_params.tech_sector_kev, technology, Symbol("")) == :Bunkerbrandstoffen && get(model_params.tech_activity, technology, Symbol("")) == Symbol("Bunker Navigation"))
+    bunker_aviation_techs = technologies_matching(technology -> get(model_params.tech_sector_kev, technology, Symbol("")) == :Bunkerbrandstoffen && get(model_params.tech_activity, technology, Symbol("")) == Symbol("Bunker Aviation"))
+    refinery_fossil_techs = technologies_matching(technology -> get(model_params.tech_sector, technology, Symbol("")) == :Refineries && get(model_params.tech_subsector, technology, Symbol("")) == Symbol("Fossil Based"))
+    ccus_storage_techs = technologies_matching(technology -> get(model_params.tech_subsector, technology, Symbol("")) == Symbol("CCUS Storage"))
+    nuclear_techs = technologies_matching(technology -> occursin("Nuclear", get(model_params.tech_name, technology, "")))
+    aviation_consumption_techs = techs_with_activity_per(Symbol("Bunker Aviation"))
+    navigation_consumption_techs = techs_with_activity_per(Symbol("Bunker Navigation"))
+
+    rows = [
+        Dict("constraint" => "emTargetAir", "category" => "Base emission cap", "description" => "Limits annual air-emission activities by node and period using emissionTargetAir from NodeParameters.", "components" => components(
+            technologies = union(nl_techs, technologies_named([:OPE01_03, :OPE02_03, :OPE03_03, :TNB01_05, :TNB01_08, :TAI01_03])),
+            activities = union(model_sets.activities_target, model_sets.activities_target_FeedStocks, model_sets.activities_target_Bunkers),
+            targets = period_values(model_params.emissionTargetAir), notes = scenario_note)),
+        Dict("constraint" => "emTargetBunker", "category" => "Bunker emission cap", "description" => "Limits bunker-navigation and bunker-aviation target emissions where bunker target rows are present.", "components" => components(
+            technologies = techs_with_activity(model_sets.activities_target_Bunkers), activities = model_sets.activities_target_Bunkers, targets = period_values(model_params.emissionTargetBunker), notes = scenario_note)),
+        Dict("constraint" => "emTargetFS", "category" => "Feedstock emission cap", "description" => "Limits feedstock end-of-life CO2 target activity using the feedstock target columns.", "components" => components(
+            technologies = techs_with_activity(model_sets.activities_target_FeedStocks), activities = model_sets.activities_target_FeedStocks, targets = period_values(model_params.emissionTargetFS), notes = scenario_note)),
+        Dict("constraint" => "emTargetAll", "category" => "Scope 3 and fuel export cap", "description" => "Limits all counted emissions by node and period using target, feedstock, and bunker target activities.", "components" => components(
+            technologies = union(techs_with_activity(model_sets.activities_target), techs_with_activity(model_sets.activities_target_FeedStocks), techs_with_activity(model_sets.activities_target_Bunkers)),
+            activities = union(model_sets.activities_target, model_sets.activities_target_FeedStocks, model_sets.activities_target_Bunkers),
+            targets = period_values(model_params.emissionTargetAll), notes = scenario_note)),
+        Dict("constraint" => "emTargetInclScope3", "category" => "Derived NL scope cap", "description" => "Applies the derived NL inclusive Scope 3 and fuel export cap by period.", "components" => components(
+            technologies = union(techs_with_activity(model_sets.activities_target; tech_filter = technology -> technology in nl_techs), techs_with_activity(model_sets.activities_target_FeedStocks; tech_filter = technology -> technology in union(nl_techs, eu_techs))),
+            activities = union(model_sets.activities_target, model_sets.activities_target_FeedStocks), targets = period_values(model_params.emissionTarget_inclScope3andFuelex), notes = scenario_note)),
+        Dict("constraint" => "emTargetCum", "category" => "Cumulative CO2 cap", "description" => "Constrains cumulative emissions over solved periods by node.", "components" => components(
+            technologies = techs_with_activity([activity for activity in model_sets.activities if get(model_params.nodePer_act, activity, Symbol("")) in keys(model_params.emissionTarget_cum)]),
+            activities = [activity for activity in model_sets.activities if get(model_params.nodePer_act, activity, Symbol("")) in keys(model_params.emissionTarget_cum)], targets = period_values(model_params.emissionTarget_cum), notes = scenario_note)),
+        Dict("constraint" => "co2StorageCum", "category" => "Cumulative CO2 storage cap", "description" => "Limits cumulative stored CO2 by node where storage caps are configured.", "components" => components(
+            technologies = ccus_storage_techs, activities = Symbol[], targets = period_values(model_params.cumulative_CO2storage), notes = scenario_note)),
+        Dict("constraint" => "AdaptBunkNav50", "category" => "ADAPT bunker navigation target", "description" => "2050 sectoral emission target for bunker navigation after credit subtraction.", "components" => components(
+            technologies = union(bunker_navigation_techs, technologies_named([:TNB01_10])), activities = union(model_sets.activities_emission, model_sets.activities_credits), targets = ["2050 bunker navigation RHS = 26.7"], notes = scenario_note)),
+        Dict("constraint" => "AdaptBunkAvi50", "category" => "ADAPT bunker aviation target", "description" => "2050 sectoral emission target for bunker aviation after credit subtraction.", "components" => components(
+            technologies = union(bunker_aviation_techs, technologies_named([:TAI01_07])), activities = union(model_sets.activities_emission, model_sets.activities_credits), targets = ["2050 bunker aviation RHS = 5.5"], notes = scenario_note)),
+        Dict("constraint" => "AdaptRefinProd50", "category" => "ADAPT refinery production cap", "description" => "2050 cap on positive refinery energy output from fossil-based refinery technologies.", "components" => components(
+            technologies = refinery_fossil_techs, activities = model_sets.activities_energy, targets = ["2050 refinery production RHS = 1202.0"], notes = scenario_note)),
+        Dict("constraint" => "CO2credAvi", "category" => "Aviation CO2 credit balance", "description" => "Balances aviation CO2 credit technology output against e-kerosene and synthetic kerosene credit terms.", "components" => components(
+            technologies = union(technologies_named([:TAI01_07]), aviation_consumption_techs), activities = union(model_sets.activities_credits, Symbol[Symbol("E-Kerosene"), Symbol("Syn Kerosene")]), notes = scenario_note)),
+        Dict("constraint" => "CO2credNav", "category" => "Navigation CO2 credit balance", "description" => "Balances navigation CO2 credit output against methanol, e-methanol, and synthetic diesel credit terms.", "components" => components(
+            technologies = union(technologies_named([:TNB01_10]), navigation_consumption_techs), activities = union(model_sets.activities_credits, Symbol[:Methanol, Symbol("E-Methanol"), Symbol("Syn Diesel")]), notes = scenario_note)),
+        Dict("constraint" => "eSAF_Avi", "category" => "ReFuelEU aviation eSAF share", "description" => "Requires e-kerosene consumption in bunker aviation to meet the eSAF share target from 2030 onward.", "components" => components(
+            technologies = aviation_consumption_techs, activities = Symbol[Symbol("E-Kerosene"), Symbol("Bunker Aviation")], targets = period_values(model_params.ReFuelEU_Aviation_eSAF_target), notes = scenario_note)),
+        Dict("constraint" => "SAF_Avi", "category" => "ReFuelEU aviation SAF share", "description" => "Requires eligible SAF/eSAF/synthetic kerosene consumption in bunker aviation to meet the SAF share target.", "components" => components(
+            technologies = aviation_consumption_techs, activities = Symbol[Symbol("E-Kerosene"), Symbol("Bio Kerosene"), Symbol("Syn Kerosene"), Symbol("Bunker Aviation")], targets = period_values(model_params.ReFuelEU_Aviation_SAF_target), notes = scenario_note)),
+        Dict("constraint" => "H2credAvi", "category" => "Aviation hydrogen credit balance", "description" => "Links aviation hydrogen-credit technology output to e-kerosene use with the model credit factor.", "components" => components(
+            technologies = union(technologies_named([:TAI01_06]), aviation_consumption_techs), activities = union(model_sets.activities_credits, Symbol[Symbol("E-Kerosene")]), targets = ["Aviation hydrogen credit factor = 2.1"], notes = scenario_note)),
+        Dict("constraint" => "H2credNav", "category" => "Navigation hydrogen credit balance", "description" => "Links navigation hydrogen-credit technology output to ammonia and methanol bunker navigation fuels.", "components" => components(
+            technologies = union(technologies_named([:TNB01_09]), navigation_consumption_techs), activities = union(model_sets.activities_credits, Symbol[:Ammonia, :Methanol]), targets = ["Ammonia credit factor = 1.15", "Methanol credit factor = 1.20"], notes = scenario_note)),
+        Dict("constraint" => "SectorTgtBunkNav", "category" => "FuelEU maritime target", "description" => "Limits bunker-navigation target emissions net of CO2 credits using FuelEU Maritime target values.", "components" => components(
+            technologies = union(bunker_navigation_techs, technologies_named([:TNB01_10])), activities = union(model_sets.activities_target_Bunkers, model_sets.activities_credits), targets = period_values(model_params.FuelEU_Maritime_target), notes = scenario_note)),
+        Dict("constraint" => "MinLoad", "category" => "Nuclear minimum load", "description" => "Optional full-hourly nuclear minimum-load constraint. It mirrors an IESA-Opt 1.0 constraint that is not in standard groups.", "components" => components(
+            technologies = nuclear_techs, activities = Symbol[:Flat], targets = ["Minimum hourly output = 30% of stock x cap2act x Flat profile"], notes = scenario_note)),
+    ]
+    sort!(rows; by = row -> String(row["constraint"]))
+    return rows
+end
+
+function _explorer_target_rows(md::ModelData)
+    p = md.params
+    rows = Vector{Dict{String,Any}}()
+    function add_period_dict!(label, dict)
+        for ((node, period), value) in dict
+            push!(rows, Dict("target" => label, "node" => String(node), "period" => Int(period), "value" => _explorer_round(value)))
+        end
+    end
+    add_period_dict!("Air", p.emissionTargetAir)
+    add_period_dict!("All", p.emissionTargetAll)
+    add_period_dict!("Bunker", p.emissionTargetBunker)
+    add_period_dict!("Feedstock", p.emissionTargetFS)
+    for (node, value) in p.CO2_cumulative_budget
+        push!(rows, Dict("target" => "Cumulative CO2 budget", "node" => String(node), "period" => 0, "value" => _explorer_round(value)))
+    end
+    for (period, value) in p.ReFuelEU_Aviation_eSAF_target
+        push!(rows, Dict("target" => "ReFuelEU eSAF", "node" => "Policy", "period" => Int(period), "value" => _explorer_round(value)))
+    end
+    for (period, value) in p.ReFuelEU_Aviation_SAF_target
+        push!(rows, Dict("target" => "ReFuelEU SAF", "node" => "Policy", "period" => Int(period), "value" => _explorer_round(value)))
+    end
+    for (period, value) in p.FuelEU_Maritime_target
+        push!(rows, Dict("target" => "FuelEU Maritime", "node" => "Policy", "period" => Int(period), "value" => _explorer_round(value)))
+    end
+    sort!(rows; by = r -> (String(r["target"]), String(r["node"]), Int(r["period"])))
+    return rows
+end
+
+function _explorer_input_atlas(body)
+    input_path, workbook = _resolve_explorer_input(body)
+    md = _read_ui_data_cached(input_path)
+    periods = _explorer_periods(md)
+    period = _explorer_selected_period(body, periods)
+    tech_rows = _explorer_technology_rows(md, period)
+    sheet_rows = _explorer_sheet_inventory(input_path)
+    return Dict(
+        "inputWorkbook" => workbook,
+        "periods" => periods,
+        "selectedPeriod" => period,
+        "sheets" => sheet_rows,
+        "setCounts" => _explorer_set_counts(md),
+        "sectorCategories" => _explorer_sector_category_rows(md),
+        "technologies" => tech_rows,
+        "balance" => _explorer_activity_balance_atlas(md, period),
+        "demands" => _explorer_activity_demand_rows(md, period),
+        "profiles" => _explorer_monthly_profile_heatmap(md),
+        "profileSurfaces" => _explorer_profile_surfaces(md),
+        "targets" => _explorer_target_rows(md),
+        "policyConstraints" => _explorer_policy_constraint_rows(md),
+        "metrics" => Dict(
+            "sheets" => length(sheet_rows),
+            "technologies" => length(tech_rows),
+            "activities" => length(md.sets.activities),
+            "nodes" => length(md.sets.nodes),
+            "periods" => length(periods),
+            "profileTypes" => length(md.sets.profile_typeRead),
+        ),
+    )
 end
 
 function _detect_solvers()
