@@ -289,8 +289,14 @@
     const th = $("scThreads");
     const thn = $("scThreadsNumber");
     if (th && thn) {
-      th.addEventListener("input", () => { thn.value = th.value; });
-      thn.addEventListener("input", () => { th.value = thn.value; });
+      th.addEventListener("input", () => { thn.value = th.value; updateThreadsPerWorker(); });
+      thn.addEventListener("input", () => { th.value = thn.value; updateThreadsPerWorker(); });
+    }
+    const wk = $("scWorkers");
+    const wkn = $("scWorkersNumber");
+    if (wk && wkn) {
+      wk.addEventListener("input", () => { wkn.value = wk.value; updateThreadsPerWorker(); });
+      wkn.addEventListener("input", () => { wk.value = wkn.value; updateThreadsPerWorker(); });
     }
     const periods = $("scPeriods");
     if (periods) periods.addEventListener("change", updateScenarioSummary);
@@ -318,11 +324,19 @@
     const cores = String(Math.max(4, navigator.hardwareConcurrency || 64));
     if ($("scThreads")) $("scThreads").max = cores;
     if ($("scThreadsNumber")) $("scThreadsNumber").max = cores;
+    if ($("scWorkers")) $("scWorkers").max = cores;
+    if ($("scWorkersNumber")) $("scWorkersNumber").max = cores;
+    // Sensible default for parallel workers: half the detected cores (min 1).
+    const detected = Number(navigator.hardwareConcurrency) || 0;
+    const defaultWorkers = Math.max(1, Math.min(detected ? Math.floor(detected / 2) : 4, Number(cores)));
+    if ($("scWorkers") && !$("scWorkers").dataset.touched) $("scWorkers").value = defaultWorkers;
+    if ($("scWorkersNumber") && !$("scWorkersNumber").dataset.touched) $("scWorkersNumber").value = defaultWorkers;
 
     populateSolvers(solvers || [], d.solver);
     updateTotalSlices();
     updateTimeSlicingControls();
     updateScenarioSummary();
+    updateThreadsPerWorker();
   }
 
   function fillSelect(id, values, selected) {
@@ -437,6 +451,34 @@
     if ($("scRepresentativeDaysField")) $("scRepresentativeDaysField").classList.toggle("hidden", !tsOn);
     if ($("scClusteringApproachField")) $("scClusteringApproachField").classList.toggle("hidden", !tsOn);
     if ($("scExtremeDaysField")) $("scExtremeDaysField").classList.toggle("hidden", !tsOn);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Compute and display the implied threads/worker.
+  //   - Total CPU cores (scThreads): cap on cores allocated to the campaign.
+  //     0 means "let the solver pick".
+  //   - Parallel workers (scWorkers): how many variants run in parallel.
+  //   - Threads per worker = floor(totalCores / workers), with a floor of 1.
+  //
+  // When totalCores is 0 (auto), we report "auto" instead of dividing by the
+  // detected hardware concurrency since the actual core count the solver
+  // claims at runtime is decided by HiGHS/Gurobi internally.
+  // ---------------------------------------------------------------------------
+  function updateThreadsPerWorker() {
+    const out = $("scThreadsPerWorker");
+    if (!out) return;
+    const totalCores = Number(($("scThreads") || {}).value || 0);
+    const workers = Math.max(1, Number(($("scWorkers") || {}).value || 1));
+    if (totalCores <= 0) {
+      out.textContent = `auto (${workers} workers)`;
+      return;
+    }
+    const perWorker = Math.max(1, Math.floor(totalCores / workers));
+    const allocated = perWorker * workers;
+    const slack = totalCores - allocated;
+    out.textContent = slack > 0
+      ? `${perWorker} thread(s) \u00d7 ${workers} = ${allocated} (+${slack} unused)`
+      : `${perWorker} thread(s) \u00d7 ${workers} = ${allocated}`;
   }
 
   function updateScenarioSummary() {
@@ -653,8 +695,12 @@
 
   function startDemo() {
     if (progressState.demoTimer) return;
-    const nWorkers = Math.min(8, Math.max(2, Math.floor((navigator.hardwareConcurrency || 4) / 2)));
-    const total = 60;
+    // Use the configured worker count so the slider visibly affects the demo.
+    const configuredWorkers = Number(($("scWorkers") || {}).value || 0);
+    const nWorkers = configuredWorkers > 0
+      ? Math.min(50, configuredWorkers)
+      : Math.min(8, Math.max(2, Math.floor((navigator.hardwareConcurrency || 4) / 2)));
+    const total = Math.max(nWorkers, Number(($("scNVariants") || {}).value) || 60);
     const variantsPerWorker = Math.ceil(total / nWorkers);
     progressState.active = true;
     progressState.startedAt = Date.now();

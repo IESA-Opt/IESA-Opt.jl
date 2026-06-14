@@ -190,6 +190,7 @@
             <label class="field"><span>Sampling method</span><select id="scMethod"><option value="lhs">Latin hypercube</option><option value="morris">Morris</option><option value="sobol">Sobol</option><option value="factorial">Factorial</option></select></label>
             <label class="field"><span>Number of variants</span><input id="scNVariants" type="number" min="1" step="1" value="100"></label>
             <label class="field"><span>Random seed</span><input id="scSeed" type="number" min="0" step="1" value="12345"></label>
+            <label class="field"><span>Parallel workers</span><div class="range-pair"><input id="scWorkers" type="range" min="1" max="32" value="4"><input id="scWorkersNumber" type="number" min="1" max="32" value="4"></div></label>
             <div class="field"><span>Implied evaluations</span><div id="scImplied" class="custom-input-path">&mdash;</div></div>
             <div class="field"><span>Status</span><div id="scStatus" class="custom-input-path">Not validated yet.</div></div>
           </section>
@@ -199,7 +200,8 @@
             <label class="field"><span>Solver</span><select id="scSolver"></select></label>
             <div id="scSolverDetails" class="subtle detail-text"></div>
             <div class="field"><span>Solve method</span><div id="scSolveMethod" class="segmented vertical"></div></div>
-            <label class="field"><span>CPU cores per worker</span><div class="range-pair"><input id="scThreads" type="range" min="0" max="64" value="0"><input id="scThreadsNumber" type="number" min="0" max="64" value="0"></div></label>
+            <label class="field"><span>Total CPU cores</span><div class="range-pair"><input id="scThreads" type="range" min="0" max="64" value="0"><input id="scThreadsNumber" type="number" min="0" max="64" value="0"></div></label>
+            <div class="field"><span>Threads per worker</span><div id="scThreadsPerWorker" class="custom-input-path">auto</div></div>
           </section>
         </aside>
 
