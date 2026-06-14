@@ -16,9 +16,10 @@ If Julia cannot find Gurobi, set `GUROBI_HOME` according to the Gurobi.jl instal
 
 ## Built-In Presets
 
-IESA-Opt.jl exposes two solver preset helpers:
+IESA-Opt.jl exposes these solver preset helpers:
 
-- `IESAOpt.default_gurobi_attributes(; threads=0)`: production-oriented Gurobi settings.
+- `IESAOpt.default_gurobi_attributes(; threads=0, rep_days=nothing)`: production-oriented Gurobi settings. Pass `rep_days` to apply representative-day tuned Gurobi settings.
+- `IESAOpt.gurobi_tuned_attributes_for_repdays(rep_days)`: the tuned Gurobi attributes only, excluding thread count and solve method.
 - `IESAOpt.default_highs_attributes(; threads=0)`: license-free HiGHS settings for smoke tests and development.
 
 Inspect the Gurobi preset from the repository root:
@@ -27,7 +28,43 @@ Inspect the Gurobi preset from the repository root:
 julia --project=. -e "using IESAOpt; display(IESAOpt.default_gurobi_attributes())"
 ```
 
-The default Gurobi preset uses barrier, skips crossover, lets Gurobi choose presolve and scaling, and applies numerical tolerances suitable for the model's large LPs. Thread count defaults to `0`, meaning Gurobi may use all available cores.
+The default Gurobi preset uses barrier, skips crossover, lets Gurobi choose presolve and scaling unless `rep_days` is supplied, and applies numerical tolerances suitable for the model's large LPs. Thread count defaults to `0`, meaning Gurobi may use all available cores.
+
+## Representative-Day Gurobi Tuning
+
+The Gurobi representative-day presets come from a `grbtune` campaign on the default workbook, run for 60 minutes per RD with `Method=2`, `Crossover=-1`, and `Threads=10`. The production helper keeps `Threads`, `Method`, and `Crossover` outside the tuned range table so UI and script selections still control those values.
+
+| Representative days | Tuned Gurobi attributes |
+|---:|---|
+| 1-7 | Baseline production preset; no tuned override improved RD5. |
+| 8-12 | `AggFill=0`, `Presolve=1`, `PreSparsify=2`, `ScaleFlag=0` |
+| 13-17 | `AggFill=10`, `NumericFocus=1`, `ScaleFlag=0` |
+| 18-22 | `AggFill=100`, `PreDepRow=1`, `PreSparsify=0`, `ScaleFlag=0` |
+| 23-27 | `AggFill=100`, `PrePasses=1`, `ScaleFlag=0` |
+| 28-32 | `AggFill=100`, `PrePasses=3`, `ScaleFlag=0` |
+| 33-37 | `ScaleFlag=0` |
+| 38-42 | `AggFill=100`, `Aggregate=2`, `Presolve=1`, `ScaleFlag=0` |
+| 43-47 | `PrePasses=3`, `ScaleFlag=0` |
+| 48-55 | `AggFill=100`, `Presolve=1`, `ScaleFlag=0` |
+| 56-80 | `AggFill=10`, `Presolve=1`, `ScaleFlag=0` |
+| 81+ | `Presolve=1` |
+
+The top tuned candidates observed for each sampled RD were:
+
+| RD | Baseline runtime | Tuned candidates |
+|---:|---:|---|
+| 5 | 1.69 s | No improvement over baseline. |
+| 10 | 5.71 s | 3.30 s: `AggFill=0`, `Presolve=1`, `PreSparsify=2`, `ScaleFlag=0`; 3.73 s: `AggFill=100`, `PreSparsify=2`, `ScaleFlag=0`; 3.86 s: `AggFill=100`, `ScaleFlag=0` |
+| 15 | 12.17 s | 6.34 s: `AggFill=10`, `NumericFocus=1`, `ScaleFlag=0`; 7.72 s: `NumericFocus=1`, `ScaleFlag=0`; 9.92 s: `ScaleFlag=0` |
+| 20 | 20.48 s | 10.54 s: `AggFill=100`, `PreDepRow=1`, `PreSparsify=0`, `ScaleFlag=0`; 11.38 s: `AggFill=100`, `PreDepRow=1`, `ScaleFlag=0`; 11.52 s: `AggFill=100`, `ScaleFlag=0` |
+| 25 | 32.87 s | 13.78 s: `AggFill=100`, `PrePasses=1`, `ScaleFlag=0`; 15.76 s: `AggFill=100`, `ScaleFlag=0`; 25.13 s: `ScaleFlag=0` |
+| 30 | 41.98 s | 20.42 s: `AggFill=100`, `PrePasses=3`, `ScaleFlag=0`; 21.42 s: `AggFill=100`, `ScaleFlag=0`; 32.82 s: `ScaleFlag=0` |
+| 35 | 62.78 s | 25.49 s: `ScaleFlag=0` |
+| 40 | 74.96 s | 33.64 s: `AggFill=100`, `Aggregate=2`, `Presolve=1`, `ScaleFlag=0`; 34.45 s: `Aggregate=2`, `PreDepRow=0`, `ScaleFlag=0`; 35.36 s: `Aggregate=2`, `ScaleFlag=0` |
+| 45 | 79.91 s | 42.77 s: `PrePasses=3`, `ScaleFlag=0`; 46.50 s: `ScaleFlag=0` |
+| 50 | 139.26 s | 40.28 s: `AggFill=100`, `Presolve=1`, `ScaleFlag=0`; 42.59 s: `AggFill=100`, `ScaleFlag=0`; 49.88 s: `ScaleFlag=0` |
+| 60 | 139.63 s | 70.82 s: `AggFill=10`, `Presolve=1`, `ScaleFlag=0`; 71.82 s: `Presolve=1`, `ScaleFlag=0`; 129.65 s: `Presolve=1` |
+| 100 | 393.64 s | 351.50 s: `Presolve=1` |
 
 ## Overriding Settings
 

@@ -37,11 +37,48 @@ end
     @test h["start_crossover_tolerance"] == 1e-4
 end
 
+@testset "Gurobi representative-day tuning presets" begin
+    @test isempty(IESAOpt.gurobi_tuned_attributes_for_repdays(5))
+    @test IESAOpt.gurobi_tuned_attributes_for_repdays(10) == Dict{String,Any}(
+        "AggFill" => 0,
+        "Presolve" => 1,
+        "PreSparsify" => 2,
+        "ScaleFlag" => 0,
+    )
+    @test IESAOpt.gurobi_tuned_attributes_for_repdays(30) == Dict{String,Any}(
+        "AggFill" => 100,
+        "PrePasses" => 3,
+        "ScaleFlag" => 0,
+    )
+    @test IESAOpt.gurobi_tuned_attributes_for_repdays(60) == Dict{String,Any}(
+        "AggFill" => 10,
+        "Presolve" => 1,
+        "ScaleFlag" => 0,
+    )
+    @test IESAOpt.gurobi_tuned_attributes_for_repdays(100) == Dict{String,Any}("Presolve" => 1)
+
+    tuned = IESAOpt.default_gurobi_attributes(; threads = 6, rep_days = 40)
+    @test tuned["Threads"] == 6
+    @test tuned["Method"] == 2
+    @test tuned["Crossover"] == 0
+    @test tuned["AggFill"] == 100
+    @test tuned["Aggregate"] == 2
+    @test tuned["Presolve"] == 1
+    @test tuned["ScaleFlag"] == 0
+end
+
 @testset "UI solve method mappings" begin
     g = IESAOpt.default_gurobi_attributes()
     IESAOpt._apply_gurobi_method!(g, "barrier_crossover")
     @test g["Method"] == 2
     @test g["Crossover"] == -1
+    @test !haskey(g, "BarHomogeneous")
+
+    g = IESAOpt.default_gurobi_attributes(; rep_days = 40)
+    IESAOpt._apply_gurobi_method!(g, "barrier_crossover")
+    @test g["Method"] == 2
+    @test g["Crossover"] == -1
+    @test g["ScaleFlag"] == 0
     @test !haskey(g, "BarHomogeneous")
 
     h = IESAOpt.default_highs_attributes(; threads = 6)
