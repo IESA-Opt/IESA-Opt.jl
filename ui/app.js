@@ -86,6 +86,11 @@ async function init() {
         window.IESAExplorer.populateForm(state.options);
       }
     });
+    safeRun("mgaPopulateForm", () => {
+      if (window.IESAMGA && typeof window.IESAMGA.populateForm === "function") {
+        window.IESAMGA.populateForm(state.options);
+      }
+    });
     $("connectionStatus").textContent = "Local UI connected";
   } catch (error) {
     console.error("init: failed to load options/solvers", error);

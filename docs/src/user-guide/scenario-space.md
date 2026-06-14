@@ -6,6 +6,23 @@ campaign. Each variant solves a slightly different LP; the runner returns a
 table of objectives + leaf values + solver diagnostics that you can save to
 DuckDB or CSV and post-process with the bundled analysis helpers.
 
+The local UI adds an **Analysis** sheet to Scenario Space campaigns. It reads
+completed campaign results and provides two first-pass diagnostics:
+
+- **Scenario Discovery (PRIM-style).** The UI treats the lowest-cost quartile
+    as the outcome of interest, then reports parameter boxes with density,
+    coverage, mass, and mean system cost. These boxes are intended to identify
+    compact regions of the sampled parameter space that repeatedly produce low
+    system cost.
+- **Global sensitivity analysis.** The UI ranks sampled inputs by Spearman
+    rank correlation against system cost and CO2 price. This is sampling-method
+    agnostic and works with LHS, Sobol, Morris, and factorial campaigns; later
+    method-specific indices can be linked to the sampler metadata.
+
+For analysis to work, run a new campaign after the Analysis feature is
+available so each result row includes both objective outputs and sampled
+parameter values.
+
 This page is a tour from "I want to vary one parameter" all the way through
 "I want to do a 1 000-point Sobol scan over five profile assumptions on a
 24-core machine". Read the sections in order on a first pass; come back to

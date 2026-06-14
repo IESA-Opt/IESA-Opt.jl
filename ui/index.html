@@ -26,8 +26,8 @@
     <button class="section-button active" data-section="main" type="button">Single run</button>
     <button class="section-button" data-section="scenario" type="button">Scenario Space</button>
     <button class="section-button" data-section="explorer" type="button">Scenario explorer</button>
+    <button class="section-button" data-section="mga" type="button">MGA</button>
     <button class="section-button" data-section="about" type="button">About</button>
-    <button class="section-button" data-section="mga" type="button" disabled title="Coming soon">Coming soon</button>
   </nav>
 
   <nav class="tabs" aria-label="Main views">
@@ -37,6 +37,9 @@
     <button class="tab-button" data-section="scenario" data-tab="scenario-setup" type="button">Parameter Space</button>
     <button class="tab-button" data-section="scenario" data-tab="scenario-progress" type="button">Progress</button>
     <button class="tab-button" data-section="scenario" data-tab="scenario-results" type="button">Results</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-analysis" type="button">Analysis</button>
+    <button class="tab-button" data-section="mga" data-tab="mga-setup" type="button">Configure</button>
+    <button class="tab-button" data-section="mga" data-tab="mga-results" type="button">Results</button>
     <button class="tab-button" data-section="explorer" data-tab="explorer-input" type="button">Input overview</button>
     <button class="tab-button" data-section="explorer" data-tab="explorer-atlas" type="button">Technology atlas</button>
     <button class="tab-button" data-section="explorer" data-tab="explorer-costs" type="button">Cost assumptions</button>
@@ -380,6 +383,68 @@
       </div>
     </section>
 
+    <section id="tab-scenario-analysis" class="tab-panel">
+      <section class="explorer-main-panel atlas-main-grid">
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Scenario Discovery</h2><p id="scenarioPrimSummary" class="subtle">Select a campaign in Results to run PRIM-style discovery.</p></div>
+          <div id="scenarioPrimChart" class="atlas-chart empty-state">No scenario results loaded.</div>
+          <div id="scenarioPrimTable" class="table-wrap explorer-table empty-state">No discovery boxes loaded.</div>
+        </section>
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>Global sensitivity analysis</h2><p id="scenarioGsaSummary" class="subtle">Rank inputs by association with system cost and CO2 price.</p></div>
+          <div id="scenarioGsaChart" class="atlas-chart empty-state">No sensitivity results loaded.</div>
+          <div id="scenarioGsaTable" class="table-wrap explorer-table empty-state">No sensitivity rows loaded.</div>
+        </section>
+      </section>
+    </section>
+
+    <section id="tab-mga-setup" class="tab-panel">
+      <form id="mgaForm" class="run-layout">
+        <aside class="run-sidebar">
+          <section class="panel run-card">
+            <p class="eyebrow">Model-generated alternatives</p>
+            <h2 id="mgaTitle">Ready to plan</h2>
+            <button id="mgaRunBtn" class="primary-button" type="submit">Run MGA campaign</button>
+            <p id="mgaHint" class="subtle">Preview an efficient directional MGA design, then dispatch the direction set.</p>
+            <dl class="summary-list">
+              <div><dt>Slack</dt><dd id="mgaSlackSummary">5%</dd></div>
+              <div><dt>Directions</dt><dd id="mgaDirectionSummary">24</dd></div>
+              <div><dt>Workers</dt><dd id="mgaWorkerSummary">4</dd></div>
+            </dl>
+          </section>
+        </aside>
+        <div class="run-main">
+          <section class="panel compact-panel">
+            <div class="panel-title"><h2>MGA setup</h2><span id="mgaScenarioSummary" class="subtle">Default workbook</span></div>
+            <div class="form-grid three">
+              <label class="field"><span>Campaign name</span><input id="mgaName" type="text" value="mga_campaign"></label>
+              <label class="field"><span>Scenario database</span><select id="mgaInputWorkbook"></select></label>
+              <label class="field"><span>System-cost slack (%)</span><input id="mgaCostSlack" type="number" min="0.1" step="0.1" value="5"></label>
+              <label class="field"><span>Directions</span><input id="mgaDirections" type="number" min="4" max="240" step="1" value="24"></label>
+              <label class="field"><span>Parallel workers</span><input id="mgaWorkers" type="number" min="1" max="64" step="1" value="4"></label>
+              <label class="field"><span>Total CPU threads</span><input id="mgaThreads" type="number" min="0" step="1" value="0"></label>
+            </div>
+          </section>
+          <section class="panel compact-panel">
+            <div class="panel-title"><h2>Method</h2><button id="mgaPreviewBtn" class="secondary-button" type="button">Preview design</button></div>
+            <p id="mgaMethodText" class="subtle">Efficient directional MGA explores low-correlation sector-weighted objective directions within a user-defined system-cost slack. Directions are independent, so they are naturally parallel.</p>
+            <div id="mgaPreviewChart" class="atlas-chart empty-state">Preview the MGA design.</div>
+            <div id="mgaPreviewTable" class="table-wrap explorer-table empty-state">No MGA directions loaded.</div>
+          </section>
+        </div>
+      </form>
+    </section>
+
+    <section id="tab-mga-results" class="tab-panel">
+      <section class="explorer-main-panel atlas-main-grid">
+        <section class="panel compact-panel atlas-span-2">
+          <div class="panel-title"><h2>MGA results</h2><p id="mgaResultsSummary" class="subtle">No MGA campaign has run.</p></div>
+          <div id="mgaResultsChart" class="atlas-chart empty-state">No MGA results loaded.</div>
+          <div id="mgaResultsTable" class="table-wrap explorer-table empty-state">No MGA results loaded.</div>
+        </section>
+      </section>
+    </section>
+
     <section id="tab-explorer-input" class="tab-panel">
       <div class="explorer-layout">
         <aside class="panel explorer-sidebar">
@@ -693,5 +758,6 @@
   <script src="/app.js"></script>
   <script src="/app.scenario.js"></script>
   <script src="/app.explorer.js"></script>
+  <script src="/app.mga.js"></script>
 </body>
 </html>

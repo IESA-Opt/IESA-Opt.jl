@@ -1214,6 +1214,7 @@
     }
 
     renderCostCo2Scatter(points, total);
+    renderScenarioAnalysis(rows);
   }
 
   function renderCostCo2Scatter(points, totalRows) {
@@ -1251,6 +1252,176 @@
       showlegend: false,
     };
     window.Plotly.react(el, [trace], layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+  }
+
+  function renderScenarioAnalysis(rows) {
+    const usable = (Array.isArray(rows) ? rows : []).map((r) => ({
+      variant_id: Number(r.variant_id),
+      system_cost: Number(r.system_cost),
+      co2_price: Number(r.co2_price),
+      parameters: r && r.parameters && typeof r.parameters === "object" ? r.parameters : {},
+    })).filter((r) => Number.isFinite(r.system_cost) && Object.keys(r.parameters).length);
+    if (!usable.length) {
+      analysisEmpty("scenarioPrimSummary", "scenarioPrimChart", "scenarioPrimTable", "Scenario Discovery needs completed campaign rows with sampled parameter values.");
+      analysisEmpty("scenarioGsaSummary", "scenarioGsaChart", "scenarioGsaTable", "GSA needs completed campaign rows with sampled parameter values.");
+      return;
+    }
+    const labels = Object.keys(usable[0].parameters).filter((label) => usable.some((r) => Number.isFinite(Number(r.parameters[label]))));
+    if (!labels.length) {
+      analysisEmpty("scenarioPrimSummary", "scenarioPrimChart", "scenarioPrimTable", "No numeric sampled parameters were available.");
+      analysisEmpty("scenarioGsaSummary", "scenarioGsaChart", "scenarioGsaTable", "No numeric sampled parameters were available.");
+      return;
+    }
+    const prim = computePrimBoxes(usable, labels);
+    const gsa = computeGsaRows(usable, labels);
+    renderPrim(prim, usable.length);
+    renderGsa(gsa, usable.length);
+  }
+
+  function analysisEmpty(summaryId, chartId, tableId, message) {
+    const summary = $(summaryId);
+    const chart = $(chartId);
+    const table = $(tableId);
+    if (summary) summary.textContent = message;
+    if (chart) {
+      if (chart._fullLayout && window.Plotly) window.Plotly.purge(chart);
+      chart.className = "atlas-chart empty-state";
+      chart.textContent = message;
+    }
+    if (table) {
+      table.className = "table-wrap explorer-table empty-state";
+      table.textContent = message;
+    }
+  }
+
+  function quantile(values, q) {
+    const xs = values.filter(Number.isFinite).sort((a, b) => a - b);
+    if (!xs.length) return NaN;
+    const pos = (xs.length - 1) * q;
+    const lo = Math.floor(pos);
+    const hi = Math.ceil(pos);
+    if (lo === hi) return xs[lo];
+    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo);
+  }
+
+  function computePrimBoxes(rows, labels) {
+    const threshold = quantile(rows.map((r) => r.system_cost), 0.25);
+    const target = rows.filter((r) => r.system_cost <= threshold);
+    const totalTarget = Math.max(1, target.length);
+    return labels.map((label) => {
+      const allVals = rows.map((r) => Number(r.parameters[label])).filter(Number.isFinite);
+      const targetVals = target.map((r) => Number(r.parameters[label])).filter(Number.isFinite);
+      const lo = quantile(targetVals, 0.1);
+      const hi = quantile(targetVals, 0.9);
+      const inBox = rows.filter((r) => {
+        const v = Number(r.parameters[label]);
+        return Number.isFinite(v) && v >= lo && v <= hi;
+      });
+      const inTarget = inBox.filter((r) => r.system_cost <= threshold);
+      return {
+        label,
+        min: lo,
+        max: hi,
+        fullMin: quantile(allVals, 0),
+        fullMax: quantile(allVals, 1),
+        density: inBox.length ? inTarget.length / inBox.length : 0,
+        coverage: inTarget.length / totalTarget,
+        mass: inBox.length / Math.max(1, rows.length),
+        meanCost: inBox.length ? inBox.reduce((acc, r) => acc + r.system_cost, 0) / inBox.length : NaN,
+      };
+    }).filter((r) => Number.isFinite(r.min) && Number.isFinite(r.max))
+      .sort((a, b) => (b.density * b.coverage) - (a.density * a.coverage))
+      .slice(0, 12);
+  }
+
+  function ranks(values) {
+    const indexed = values.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+    const out = Array(values.length).fill(0);
+    let i = 0;
+    while (i < indexed.length) {
+      let j = i + 1;
+      while (j < indexed.length && indexed[j].v === indexed[i].v) j += 1;
+      const rank = (i + j + 1) / 2;
+      for (let k = i; k < j; k += 1) out[indexed[k].i] = rank;
+      i = j;
+    }
+    return out;
+  }
+
+  function corr(x, y) {
+    const n = Math.min(x.length, y.length);
+    if (n < 3) return NaN;
+    const mx = x.reduce((a, b) => a + b, 0) / n;
+    const my = y.reduce((a, b) => a + b, 0) / n;
+    let num = 0, dx = 0, dy = 0;
+    for (let i = 0; i < n; i += 1) {
+      const vx = x[i] - mx;
+      const vy = y[i] - my;
+      num += vx * vy;
+      dx += vx * vx;
+      dy += vy * vy;
+    }
+    return dx > 0 && dy > 0 ? num / Math.sqrt(dx * dy) : NaN;
+  }
+
+  function spearman(rows, label, output) {
+    const pairs = rows.map((r) => [Number(r.parameters[label]), Number(r[output])]).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    if (pairs.length < 4) return NaN;
+    return corr(ranks(pairs.map((p) => p[0])), ranks(pairs.map((p) => p[1])));
+  }
+
+  function computeGsaRows(rows, labels) {
+    return labels.map((label) => {
+      const cost = spearman(rows, label, "system_cost");
+      const co2 = spearman(rows, label, "co2_price");
+      return { label, cost, co2, influence: Math.max(Math.abs(cost) || 0, Math.abs(co2) || 0) };
+    }).filter((r) => Number.isFinite(r.cost) || Number.isFinite(r.co2))
+      .sort((a, b) => b.influence - a.influence)
+      .slice(0, 18);
+  }
+
+  function renderPrim(rows, n) {
+    const summary = $("scenarioPrimSummary");
+    if (summary) summary.textContent = rows.length ? `PRIM-style discovery from ${n} completed variants; target is the lowest-cost quartile.` : "No PRIM boxes found.";
+    const table = $("scenarioPrimTable");
+    if (table) {
+      if (!rows.length) {
+        table.className = "table-wrap explorer-table empty-state";
+        table.textContent = "No PRIM boxes found.";
+      } else {
+        table.className = "table-wrap explorer-table";
+        table.innerHTML = `<table><thead><tr><th>Parameter</th><th>Box range</th><th>Density</th><th>Coverage</th><th>Mass</th><th>Mean cost</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.min.toPrecision(4)} to ${r.max.toPrecision(4)}</td><td>${(100 * r.density).toFixed(1)}%</td><td>${(100 * r.coverage).toFixed(1)}%</td><td>${(100 * r.mass).toFixed(1)}%</td><td>${Number.isFinite(r.meanCost) ? r.meanCost.toPrecision(5) : ""}</td></tr>`).join("")}</tbody></table>`;
+      }
+    }
+    const chart = $("scenarioPrimChart");
+    if (!chart || !window.Plotly || !rows.length) {
+      if (chart) { chart.className = "atlas-chart empty-state"; chart.textContent = rows.length ? "Plotly is not loaded." : "No PRIM boxes found."; }
+      return;
+    }
+    chart.className = "atlas-chart plotly-chart";
+    window.Plotly.react(chart, [{ type: "bar", orientation: "h", y: rows.map((r) => r.label).reverse(), x: rows.map((r) => r.density).reverse(), name: "Density", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y: rows.map((r) => r.label).reverse(), x: rows.map((r) => r.coverage).reverse(), name: "Coverage", marker: { color: "#c07122" } }], { barmode: "group", margin: { l: 160, r: 16, t: 16, b: 42 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", xaxis: { title: "Share", tickformat: ".0%", gridcolor: "#dbe4ec" }, yaxis: { automargin: true } }, { responsive: true, displaylogo: false });
+  }
+
+  function renderGsa(rows, n) {
+    const summary = $("scenarioGsaSummary");
+    if (summary) summary.textContent = rows.length ? `Rank-correlation sensitivity from ${n} completed variants.` : "No sensitivity rows found.";
+    const table = $("scenarioGsaTable");
+    if (table) {
+      if (!rows.length) {
+        table.className = "table-wrap explorer-table empty-state";
+        table.textContent = "No sensitivity rows found.";
+      } else {
+        table.className = "table-wrap explorer-table";
+        table.innerHTML = `<table><thead><tr><th>Parameter</th><th>System cost rho</th><th>CO2 price rho</th><th>Influence</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${Number.isFinite(r.cost) ? r.cost.toFixed(3) : ""}</td><td>${Number.isFinite(r.co2) ? r.co2.toFixed(3) : ""}</td><td>${r.influence.toFixed(3)}</td></tr>`).join("")}</tbody></table>`;
+      }
+    }
+    const chart = $("scenarioGsaChart");
+    if (!chart || !window.Plotly || !rows.length) {
+      if (chart) { chart.className = "atlas-chart empty-state"; chart.textContent = rows.length ? "Plotly is not loaded." : "No sensitivity rows found."; }
+      return;
+    }
+    chart.className = "atlas-chart plotly-chart";
+    window.Plotly.react(chart, [{ type: "bar", orientation: "h", y: rows.map((r) => r.label).reverse(), x: rows.map((r) => r.cost || 0).reverse(), name: "System cost", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y: rows.map((r) => r.label).reverse(), x: rows.map((r) => r.co2 || 0).reverse(), name: "CO2 price", marker: { color: "#8a5a2b" } }], { barmode: "group", margin: { l: 160, r: 16, t: 16, b: 42 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", xaxis: { title: "Spearman rho", range: [-1, 1], gridcolor: "#dbe4ec", zerolinecolor: "#455a64" }, yaxis: { automargin: true } }, { responsive: true, displaylogo: false });
   }
 
   async function stopLiveCampaign() {

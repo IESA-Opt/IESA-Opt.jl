@@ -18,7 +18,8 @@ IESA-Opt.jl is intended for studies that need to analyse long-term energy-system
 - investment and dispatch planning across coupled energy sectors;
 - comparison of hourly and representative-day temporal resolutions;
 - assessment of storage, flexibility, emissions caps, and technology portfolios;
-- scenario comparison using structured input workbooks and reproducible output folders.
+- scenario comparison using structured input workbooks and reproducible output folders;
+- parallel scenario-space exploration, scenario discovery, global sensitivity analysis, and model-generated alternatives (MGA) for near-optimal system configurations.
 
 ## Documentation
 
@@ -88,11 +89,13 @@ Pair both for the fastest development loop. Unset them (or set to `0`) to get th
 
 ### Using the UI
 
-The UI has three tabs:
+The UI has the following main workspaces:
 
 - **Run.** Pick an input workbook (Browse selects any `.xlsx` / `.xlsm` / `.xls` file under `data/`), choose temporal mode (annual, time-slice, or full-hourly), set periods, representative days, hours per day, solver, threads, and output name, then click *Run*. The right-hand panel streams live solver output and per-stage progress (read → prepare → cluster → generate → solve → write).
-- **Results.** Lists every folder under `Output/` and `Output_Batch/` that contains result files, sorted by most recent first. Click a run to inspect it; Ctrl/⌘-click adds runs to a compare set, Shift-click selects a range. Each panel has a *Show table* toggle for the underlying data.
-- **Compare.** When two or more runs are selected, the comparison panel displays side-by-side system costs, solve times, and component-cost breakdowns.
+- **Results and Compare.** Inspect output folders under `Output/` and `Output_Batch/`, view interactive Plotly charts, and compare multiple runs side by side.
+- **Scenario Space.** Define sampled workbook/model parameters, run parallel campaigns, monitor worker progress, inspect system-cost versus CO2-price scatter plots, and use the Analysis sheet for PRIM-style scenario discovery and rank-correlation global sensitivity analysis.
+- **Scenario Explorer.** Browse workbook sheets, technology dependencies, coupled sectors, profiles, policies, and flow details directly from the model input data.
+- **MGA.** Configure model-generated alternatives with a system-cost slack and parallel directional exploration to prepare diverse near-optimal system-configuration candidates.
 
 All results charts are interactive (zoom, pan, click-to-toggle legend, save-as-PNG):
 

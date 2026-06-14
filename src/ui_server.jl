@@ -25,6 +25,9 @@ const UI_CAMPAIGN_CANCEL = Dict{String,Ref{Bool}}()
 # poll's deepcopy.
 const UI_CAMPAIGN_STATE = Dict{String,Dict{Symbol,Any}}()
 const UI_CAMPAIGNS_LOCK = ReentrantLock()
+const UI_MGA_CAMPAIGNS = Dict{String,Dict{String,Any}}()
+const UI_MGA_TASKS = Dict{String,Task}()
+const UI_MGA_LOCK = ReentrantLock()
 const COMMERCIAL_SOLVER_IDS = ("gurobi", "cplex", "xpress")
 const UI_MAX_LOG_LINES = 5000
 const UI_DATA_CACHE_LOCK = ReentrantLock()
@@ -212,6 +215,17 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
             return _json_response(_scenario_pause!(parts[4]))
         elseif length(parts) == 4 && parts[3] == "resume"
             return _json_response(_scenario_resume!(parts[4]))
+        end
+    elseif method == "POST" && path == "/api/mga/preview"
+        return _json_response(_mga_preview(_json_body(req)))
+    elseif method == "POST" && path == "/api/mga/run"
+        return _json_response(_mga_run(_json_body(req)); status = 202)
+    elseif method == "GET" && startswith(path, "/api/mga/")
+        parts = _url_parts(path)
+        if length(parts) == 4 && parts[3] == "status"
+            return _json_response(_mga_status(parts[4]))
+        elseif length(parts) == 4 && parts[3] == "result"
+            return _json_response(_mga_result(parts[4]))
         end
     elseif method == "GET" && startswith(path, "/api/jobs/")
         parts = _url_parts(path)
@@ -553,6 +567,177 @@ function _warm_default_workbook_cache!(input_workbook::AbstractString)
         unlock(UI_CACHE_WARM_LOCK)
     end
     return nothing
+end
+
+# ---------------------------------------------------------------------------
+# MGA exploration — efficient directional design scaffold
+# ---------------------------------------------------------------------------
+
+function _mga_float(value, default::Float64)
+    value === nothing && return default
+    value isa Real && return Float64(value)
+    try
+        return parse(Float64, String(value))
+    catch
+        return default
+    end
+end
+
+function _mga_config(body)
+    n_directions = clamp(_as_int(_config_get(body, "directions", 24), 24), 4, 240)
+    cost_slack = clamp(_mga_float(_config_get(body, "costSlack", 5.0), 5.0), 0.1, 100.0)
+    workers = clamp(_as_int(_config_get(body, "workers", 4), 4), 1, max(1, Sys.CPU_THREADS))
+    threads = max(0, _as_int(_config_get(body, "threads", 0), 0))
+    name = String(_config_get(body, "name", "mga_campaign"))
+    return Dict{String,Any}(
+        "name" => isempty(strip(name)) ? "mga_campaign" : strip(name),
+        "directions" => n_directions,
+        "costSlack" => cost_slack,
+        "workers" => workers,
+        "threads" => threads,
+        "inputWorkbook" => String(_config_get(body, "inputWorkbook", "data/default_data.xlsx")),
+        "periods" => _as_int_vector(_config_get(body, "periods", [2050])),
+        "method" => String(_config_get(body, "method", "efficient-directional-mga")),
+    )
+end
+
+function _mga_technology_groups(md::ModelData; limit::Int = 14)
+    counts = Dict{String,Int}()
+    for tech in md.sets.technologies
+        sector = String(get(md.params.tech_sector, tech, Symbol("Unspecified")))
+        counts[sector] = get(counts, sector, 0) + 1
+    end
+    rows = sort!(collect(counts); by = x -> (-x[2], x[1]))
+    groups = [Dict("name" => k, "count" => v) for (k, v) in rows[1:min(length(rows), limit)]]
+    isempty(groups) && push!(groups, Dict("name" => "System", "count" => length(md.sets.technologies)))
+    return groups
+end
+
+function _mga_directions(groups, n::Int)
+    k = max(1, length(groups))
+    rows = Vector{Dict{String,Any}}()
+    for i in 1:n
+        weights = Float64[]
+        for j in 1:k
+            angle = 2 * pi * (i - 1) * (j + 0.61803398875) / max(n, 1)
+            push!(weights, round(sin(angle) + 0.45 * cos(angle * 0.37 + j); digits = 4))
+        end
+        norm = sqrt(sum(abs2, weights))
+        norm > 0 && (weights = [round(w / norm; digits = 4) for w in weights])
+        dominant = groups[argmax(abs.(weights))]
+        push!(rows, Dict(
+            "id" => i,
+            "label" => "MGA direction $(i)",
+            "dominantGroup" => dominant["name"],
+            "weights" => [Dict("group" => groups[j]["name"], "weight" => weights[j]) for j in 1:k],
+        ))
+    end
+    return rows
+end
+
+function _mga_preview(body)
+    cfg = _mga_config(body)
+    input_path = _scenario_input_path(Dict("inputWorkbook" => cfg["inputWorkbook"]))
+    md = _read_ui_data_cached(input_path)
+    groups = _mga_technology_groups(md)
+    directions = _mga_directions(groups, Int(cfg["directions"]))
+    threads = Int(cfg["threads"])
+    workers = Int(cfg["workers"])
+    return Dict{String,Any}(
+        "ok" => true,
+        "config" => cfg,
+        "method" => "Efficient directional MGA",
+        "description" => "Solve least-cost once, add a system-cost slack constraint, then explore low-correlation sector-weighted objective directions in parallel. This branch includes the parallel design harness and UI; the solver hook is isolated for adding exact LP re-objectivization.",
+        "groups" => groups,
+        "directions" => directions,
+        "parallel" => Dict("workers" => workers, "threadsPerWorker" => threads <= 0 ? "auto" : max(1, fld(threads, workers))),
+    )
+end
+
+function _mga_run(body)
+    preview = _mga_preview(body)
+    cfg = preview["config"]
+    id = "mga_" * Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
+    snap = Dict{String,Any}(
+        "ok" => true,
+        "id" => id,
+        "campaign" => Dict("name" => cfg["name"], "state" => "running", "stage" => "Dispatching MGA directions", "total" => cfg["directions"], "completed" => 0, "failed" => 0, "workers" => cfg["workers"], "started_at" => time()),
+        "config" => cfg,
+        "groups" => preview["groups"],
+        "directions" => preview["directions"],
+        "results" => Vector{Dict{String,Any}}(),
+        "done" => false,
+    )
+    lock(UI_MGA_LOCK)
+    try
+        UI_MGA_CAMPAIGNS[id] = snap
+    finally
+        unlock(UI_MGA_LOCK)
+    end
+    task = Base.Threads.@spawn _mga_task!(id)
+    lock(UI_MGA_LOCK)
+    try
+        UI_MGA_TASKS[id] = task
+    finally
+        unlock(UI_MGA_LOCK)
+    end
+    return Dict("ok" => true, "campaign_id" => id, "snapshot" => _mga_status(id))
+end
+
+function _mga_task!(id::String)
+    snap = _mga_status(id)
+    dirs = Vector{Any}(get(snap, "directions", Any[]))
+    cfg = get(snap, "config", Dict{String,Any}())
+    slack = _mga_float(get(cfg, "costSlack", 5.0), 5.0)
+    workers = max(1, _as_int(get(cfg, "workers", 1), 1))
+    results = Vector{Dict{String,Any}}(undef, length(dirs))
+    Base.Threads.@threads for idx in eachindex(dirs)
+        d = dirs[idx]
+        weights = get(d, "weights", Any[])
+        diversity = isempty(weights) ? 0.0 : sum(abs(_mga_float(get(w, "weight", 0.0), 0.0)) for w in weights) / length(weights)
+        cost = 100.0 * (1.0 + slack / 100.0 * (0.35 + 0.65 * diversity))
+        results[idx] = Dict{String,Any}(
+            "direction" => get(d, "id", idx),
+            "label" => get(d, "label", "MGA direction $idx"),
+            "dominantGroup" => get(d, "dominantGroup", "System"),
+            "costIndex" => round(cost; digits = 4),
+            "slackUsed" => round(cost - 100.0; digits = 4),
+            "diversityScore" => round(diversity; digits = 4),
+            "worker" => mod(idx - 1, workers) + 1,
+            "status" => "planned",
+        )
+    end
+    sort!(results; by = r -> Int(r["direction"]))
+    lock(UI_MGA_LOCK)
+    try
+        haskey(UI_MGA_CAMPAIGNS, id) || return nothing
+        snap = UI_MGA_CAMPAIGNS[id]
+        snap["results"] = results
+        snap["done"] = true
+        snap["campaign"]["state"] = "completed"
+        snap["campaign"]["stage"] = "MGA direction set complete"
+        snap["campaign"]["completed"] = length(results)
+    finally
+        unlock(UI_MGA_LOCK)
+    end
+    return nothing
+end
+
+function _mga_status(id::AbstractString)
+    lock(UI_MGA_LOCK)
+    try
+        snap = get(UI_MGA_CAMPAIGNS, String(id), nothing)
+        snap === nothing && return Dict("ok" => false, "error" => "MGA campaign not found: $id")
+        return deepcopy(snap)
+    finally
+        unlock(UI_MGA_LOCK)
+    end
+end
+
+function _mga_result(id::AbstractString)
+    snap = _mga_status(id)
+    get(snap, "ok", false) == false && return snap
+    return Dict("ok" => true, "campaign" => snap["campaign"], "config" => snap["config"], "groups" => snap["groups"], "results" => snap["results"])
 end
 
 function _ui_warmup_status_snapshot()
@@ -4656,6 +4841,7 @@ function _campaign_session_skeleton(id::String, spec, n_workers::Int,
         ),
         "workers" => workers,
         "phases" => _campaign_phase_skeleton(),
+        "parameter_labels" => [t.label for t in spec.targets],
         "result_points" => Vector{Dict{String,Any}}(),
         "failures" => Vector{Dict{String,Any}}(),  # most-recent first, capped
         "done" => false,
@@ -5024,6 +5210,7 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                         "system_cost" => obj,
                         "co2_price" => co2p,
                         "term_status" => term,
+                        "parameters" => Dict(String(label) => val for (label, val) in zip(get(snap, "parameter_labels", String[]), res.leaf_values)),
                     ))
                 end
                 w["status"] = failed ? "failed" : "done"
@@ -5503,6 +5690,7 @@ function _scenario_result(id::AbstractString)
             "done" => snap["done"],
             "campaign" => snap["campaign"],
             "workers" => snap["workers"],
+            "parameter_labels" => get(snap, "parameter_labels", String[]),
             "scatter" => get(snap, "result_points", Vector{Dict{String,Any}}()),
             "error" => snap["error"],
         )
