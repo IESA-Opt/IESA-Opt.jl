@@ -104,6 +104,10 @@ include("scenario/persistence.jl")
 # Phase 5: analysis helpers (objective_table, sensitivity_scan, pareto_front)
 include("scenario/analysis.jl")
 
+# MGA extension helpers. These define reduced-space hybrid ORACLE planning
+# utilities but do not execute during normal single-run solves.
+include("mga/hybrid_oracle.jl")
+
 include("ui_server.jl")
 # include("sweeps.jl")
 

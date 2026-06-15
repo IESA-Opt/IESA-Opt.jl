@@ -6,6 +6,35 @@ campaign. Each variant solves a slightly different LP; the runner returns a
 table of objectives + leaf values + solver diagnostics that you can save to
 DuckDB or CSV and post-process with the bundled analysis helpers.
 
+The local UI adds an **Analysis** sheet to Scenario Space campaigns. In the
+setup page, choose a **GSA method** before launching the campaign. The UI then
+sets the sampling method required by that analysis method:
+
+| GSA method | Campaign sampler | Metrics shown in Analysis |
+|---|---|---|
+| Rank correlation | Latin hypercube | Spearman rho for system cost and CO2 price |
+| Moment-independent delta | Latin hypercube | Borgonovo-style delta indices for system cost and CO2 price |
+| Morris elementary effects | Morris | `mu*` and `sigma` elementary-effect metrics |
+| Sobol variance indices | Sobol | First-order variance-index estimates for system cost and CO2 price |
+
+The Analysis sheet reads completed campaign results and provides two
+diagnostics:
+
+- **Scenario Discovery (PRIM-style).** The UI treats the lowest-cost quartile
+    as the outcome of interest, then reports parameter boxes with density,
+    coverage, mass, and mean system cost. These boxes are intended to identify
+    compact regions of the sampled parameter space that repeatedly produce low
+    system cost.
+- **Global sensitivity analysis.** The UI calculates method-specific GSA
+    metrics from the campaign design: rank correlations and moment-independent
+    Borgonovo-style delta indices for LHS campaigns, Morris elementary effects
+    for Morris campaigns, and Sobol-style first-order variance indices for Sobol
+    campaigns.
+
+For analysis to work, run a new campaign after the Analysis feature is
+available so each result row includes both objective outputs and sampled
+parameter values.
+
 This page is a tour from "I want to vary one parameter" all the way through
 "I want to do a 1 000-point Sobol scan over five profile assumptions on a
 24-core machine". Read the sections in order on a first pass; come back to

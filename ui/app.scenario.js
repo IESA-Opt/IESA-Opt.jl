@@ -95,6 +95,13 @@
     campaigns: [],
   };
 
+  const GSA_METHODS = {
+    rank: { label: "Rank correlation", sampler: "lhs", hint: "Rank correlation uses Latin hypercube sampling and reports Spearman rho." },
+    moment_delta: { label: "Moment-independent delta", sampler: "lhs", hint: "Moment-independent GSA uses Latin hypercube sampling and reports Borgonovo-style delta indices." },
+    morris: { label: "Morris elementary effects", sampler: "morris", hint: "Morris GSA uses Morris sampling and reports mu, mu*, and sigma elementary-effect metrics." },
+    sobol: { label: "Sobol variance indices", sampler: "sobol", hint: "Sobol GSA uses Sobol sampling and reports first-order variance-index estimates." },
+  };
+
   function defaultCampaignPhases() {
     return CAMPAIGN_PHASES.map((p) => ({ id: p.id, label: p.label, status: "pending", detail: "" }));
   }
@@ -165,17 +172,29 @@
     }
     $("scValidateBtn").addEventListener("click", () => validateNow());
     $("scPreviewBtn").addEventListener("click", () => previewNow());
-    ["scCampaignName", "scMethod", "scNVariants", "scSeed"].forEach((id) => {
+    ["scCampaignName", "scGsaMethod", "scMethod", "scNVariants", "scSeed"].forEach((id) => {
       const el = $(id);
       if (!el) return;
       el.addEventListener("change", onCampaignFieldChange);
       el.addEventListener("input", onCampaignFieldChange);
     });
+    syncGsaSampling();
   }
 
   function onCampaignFieldChange() {
+    syncGsaSampling();
     updateCampaignSummary();
     scheduleValidate();
+  }
+
+  function syncGsaSampling() {
+    const gsaEl = $("scGsaMethod");
+    const methodEl = $("scMethod");
+    const hint = $("scGsaMethodHint");
+    if (!gsaEl || !methodEl) return;
+    const cfg = GSA_METHODS[gsaEl.value] || GSA_METHODS.rank;
+    methodEl.value = cfg.sampler;
+    if (hint) hint.textContent = cfg.hint;
   }
 
   // ===========================================================================
@@ -678,10 +697,12 @@
   function updateCampaignSummary() {
     const name = ($("scCampaignName") || {}).value || "—";
     const method = ($("scMethod") || {}).value || "—";
+    const gsaMethod = ($("scGsaMethod") || {}).value || "rank";
     const variants = ($("scNVariants") || {}).value || "—";
     if ($("scSelectedCampaignLabel")) $("scSelectedCampaignLabel").textContent = name;
     const methodLabels = { lhs: "Latin hypercube", morris: "Morris", sobol: "Sobol", factorial: "Factorial" };
-    if ($("scSelectedMethod")) $("scSelectedMethod").textContent = methodLabels[method] || method;
+    const gsaLabel = (GSA_METHODS[gsaMethod] || GSA_METHODS.rank).label;
+    if ($("scSelectedMethod")) $("scSelectedMethod").textContent = `${gsaLabel} / ${methodLabels[method] || method}`;
     if ($("scSelectedVariants")) $("scSelectedVariants").textContent = variants;
   }
 
@@ -777,6 +798,7 @@
   function collectSpec() {
     return {
       name: $("scCampaignName").value.trim(),
+      gsaMethod: ($("scGsaMethod") || {}).value || "rank",
       method: $("scMethod").value,
       n_variants: Number($("scNVariants").value) || 0,
       seed: Number($("scSeed").value) || 0,
@@ -1214,6 +1236,7 @@
     }
 
     renderCostCo2Scatter(points, total);
+    renderScenarioAnalysis(rows, payload);
   }
 
   function renderCostCo2Scatter(points, totalRows) {
@@ -1251,6 +1274,332 @@
       showlegend: false,
     };
     window.Plotly.react(el, [trace], layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+  }
+
+  function renderScenarioAnalysis(rows, payload) {
+    const campaign = payload && payload.campaign ? payload.campaign : {};
+    const gsaMethod = String(campaign.gsa_method || (($("scGsaMethod") || {}).value) || "rank");
+    const usable = (Array.isArray(rows) ? rows : []).map((r) => ({
+      variant_id: Number(r.variant_id),
+      system_cost: Number(r.system_cost),
+      co2_price: Number(r.co2_price),
+      parameters: r && r.parameters && typeof r.parameters === "object" ? r.parameters : {},
+    })).filter((r) => Number.isFinite(r.system_cost) && Object.keys(r.parameters).length);
+    if (!usable.length) {
+      analysisEmpty("scenarioPrimSummary", "scenarioPrimChart", "scenarioPrimTable", "Scenario Discovery needs completed campaign rows with sampled parameter values.");
+      analysisEmpty("scenarioGsaSummary", "scenarioGsaChart", "scenarioGsaTable", "GSA needs completed campaign rows with sampled parameter values.");
+      return;
+    }
+    const labels = Object.keys(usable[0].parameters).filter((label) => usable.some((r) => Number.isFinite(Number(r.parameters[label]))));
+    if (!labels.length) {
+      analysisEmpty("scenarioPrimSummary", "scenarioPrimChart", "scenarioPrimTable", "No numeric sampled parameters were available.");
+      analysisEmpty("scenarioGsaSummary", "scenarioGsaChart", "scenarioGsaTable", "No numeric sampled parameters were available.");
+      return;
+    }
+    const prim = computePrimBoxes(usable, labels);
+    const gsa = computeGsaRows(usable, labels, gsaMethod);
+    renderPrim(prim, usable.length);
+    renderGsa(gsa, usable.length, gsaMethod);
+  }
+
+  function analysisEmpty(summaryId, chartId, tableId, message) {
+    const summary = $(summaryId);
+    const chart = $(chartId);
+    const table = $(tableId);
+    if (summary) summary.textContent = message;
+    if (chart) {
+      if (chart._fullLayout && window.Plotly) window.Plotly.purge(chart);
+      chart.className = "atlas-chart empty-state";
+      chart.textContent = message;
+    }
+    if (table) {
+      table.className = "table-wrap explorer-table empty-state";
+      table.textContent = message;
+    }
+  }
+
+  function quantile(values, q) {
+    const xs = values.filter(Number.isFinite).sort((a, b) => a - b);
+    if (!xs.length) return NaN;
+    const pos = (xs.length - 1) * q;
+    const lo = Math.floor(pos);
+    const hi = Math.ceil(pos);
+    if (lo === hi) return xs[lo];
+    return xs[lo] + (xs[hi] - xs[lo]) * (pos - lo);
+  }
+
+  function computePrimBoxes(rows, labels) {
+    const threshold = quantile(rows.map((r) => r.system_cost), 0.25);
+    const target = rows.filter((r) => r.system_cost <= threshold);
+    const totalTarget = Math.max(1, target.length);
+    return labels.map((label) => {
+      const allVals = rows.map((r) => Number(r.parameters[label])).filter(Number.isFinite);
+      const targetVals = target.map((r) => Number(r.parameters[label])).filter(Number.isFinite);
+      const lo = quantile(targetVals, 0.1);
+      const hi = quantile(targetVals, 0.9);
+      const inBox = rows.filter((r) => {
+        const v = Number(r.parameters[label]);
+        return Number.isFinite(v) && v >= lo && v <= hi;
+      });
+      const inTarget = inBox.filter((r) => r.system_cost <= threshold);
+      return {
+        label,
+        min: lo,
+        max: hi,
+        fullMin: quantile(allVals, 0),
+        fullMax: quantile(allVals, 1),
+        density: inBox.length ? inTarget.length / inBox.length : 0,
+        coverage: inTarget.length / totalTarget,
+        mass: inBox.length / Math.max(1, rows.length),
+        meanCost: inBox.length ? inBox.reduce((acc, r) => acc + r.system_cost, 0) / inBox.length : NaN,
+      };
+    }).filter((r) => Number.isFinite(r.min) && Number.isFinite(r.max))
+      .sort((a, b) => (b.density * b.coverage) - (a.density * a.coverage))
+      .slice(0, 12);
+  }
+
+  function ranks(values) {
+    const indexed = values.map((v, i) => ({ v, i })).sort((a, b) => a.v - b.v);
+    const out = Array(values.length).fill(0);
+    let i = 0;
+    while (i < indexed.length) {
+      let j = i + 1;
+      while (j < indexed.length && indexed[j].v === indexed[i].v) j += 1;
+      const rank = (i + j + 1) / 2;
+      for (let k = i; k < j; k += 1) out[indexed[k].i] = rank;
+      i = j;
+    }
+    return out;
+  }
+
+  function corr(x, y) {
+    const n = Math.min(x.length, y.length);
+    if (n < 3) return NaN;
+    const mx = x.reduce((a, b) => a + b, 0) / n;
+    const my = y.reduce((a, b) => a + b, 0) / n;
+    let num = 0, dx = 0, dy = 0;
+    for (let i = 0; i < n; i += 1) {
+      const vx = x[i] - mx;
+      const vy = y[i] - my;
+      num += vx * vy;
+      dx += vx * vx;
+      dy += vy * vy;
+    }
+    return dx > 0 && dy > 0 ? num / Math.sqrt(dx * dy) : NaN;
+  }
+
+  function spearman(rows, label, output) {
+    const pairs = rows.map((r) => [Number(r.parameters[label]), Number(r[output])]).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    if (pairs.length < 4) return NaN;
+    return corr(ranks(pairs.map((p) => p[0])), ranks(pairs.map((p) => p[1])));
+  }
+
+  function mean(values) {
+    return values.length ? values.reduce((acc, v) => acc + v, 0) / values.length : NaN;
+  }
+
+  function stdev(values) {
+    if (values.length < 2) return 0;
+    const m = mean(values);
+    return Math.sqrt(values.reduce((acc, v) => acc + Math.pow(v - m, 2), 0) / (values.length - 1));
+  }
+
+  function computeRankGsaRows(rows, labels) {
+    return labels.map((label) => {
+      const cost = spearman(rows, label, "system_cost");
+      const co2 = spearman(rows, label, "co2_price");
+      return { label, method: "rank", cost, co2, influence: Math.max(Math.abs(cost) || 0, Math.abs(co2) || 0) };
+    }).filter((r) => Number.isFinite(r.cost) || Number.isFinite(r.co2))
+      .sort((a, b) => b.influence - a.influence)
+      .slice(0, 18);
+  }
+
+  function computeMorrisRows(rows, labels) {
+    const sorted = rows.slice().sort((a, b) => a.variant_id - b.variant_id);
+    const byLabel = new Map(labels.map((label) => [label, { cost: [], co2: [] }]));
+    for (let i = 1; i < sorted.length; i += 1) {
+      const prev = sorted[i - 1];
+      const curr = sorted[i];
+      const changed = labels.filter((label) => {
+        const a = Number(prev.parameters[label]);
+        const b = Number(curr.parameters[label]);
+        return Number.isFinite(a) && Number.isFinite(b) && Math.abs(b - a) > 1e-12;
+      });
+      if (changed.length !== 1) continue;
+      const label = changed[0];
+      const dx = Number(curr.parameters[label]) - Number(prev.parameters[label]);
+      if (!Number.isFinite(dx) || Math.abs(dx) <= 1e-12) continue;
+      const bucket = byLabel.get(label);
+      if (Number.isFinite(prev.system_cost) && Number.isFinite(curr.system_cost)) bucket.cost.push((curr.system_cost - prev.system_cost) / dx);
+      if (Number.isFinite(prev.co2_price) && Number.isFinite(curr.co2_price)) bucket.co2.push((curr.co2_price - prev.co2_price) / dx);
+    }
+    return labels.map((label) => {
+      const bucket = byLabel.get(label) || { cost: [], co2: [] };
+      const costMu = mean(bucket.cost);
+      const costMuStar = mean(bucket.cost.map(Math.abs));
+      const costSigma = stdev(bucket.cost);
+      const co2Mu = mean(bucket.co2);
+      const co2MuStar = mean(bucket.co2.map(Math.abs));
+      const co2Sigma = stdev(bucket.co2);
+      return { label, method: "morris", n: Math.max(bucket.cost.length, bucket.co2.length), costMu, costMuStar, costSigma, co2Mu, co2MuStar, co2Sigma, influence: Math.max(costMuStar || 0, co2MuStar || 0) };
+    }).filter((r) => r.n > 0)
+      .sort((a, b) => b.influence - a.influence)
+      .slice(0, 18);
+  }
+
+  function varianceIndex(rows, label, output) {
+    const pairs = rows.map((r) => [Number(r.parameters[label]), Number(r[output])]).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    if (pairs.length < 8) return NaN;
+    pairs.sort((a, b) => a[0] - b[0]);
+    const ys = pairs.map((p) => p[1]);
+    const totalVar = Math.pow(stdev(ys), 2);
+    if (!(totalVar > 0)) return NaN;
+    const bins = Math.max(3, Math.min(8, Math.floor(Math.sqrt(pairs.length))));
+    const globalMean = mean(ys);
+    let between = 0;
+    for (let b = 0; b < bins; b += 1) {
+      const start = Math.floor(b * pairs.length / bins);
+      const stop = Math.floor((b + 1) * pairs.length / bins);
+      const part = pairs.slice(start, stop).map((p) => p[1]);
+      if (!part.length) continue;
+      between += part.length * Math.pow(mean(part) - globalMean, 2);
+    }
+    return Math.max(0, Math.min(1, between / (pairs.length * totalVar)));
+  }
+
+  function computeVarianceRows(rows, labels) {
+    return labels.map((label) => {
+      const costS1 = varianceIndex(rows, label, "system_cost");
+      const co2S1 = varianceIndex(rows, label, "co2_price");
+      return { label, method: "sobol", costS1, co2S1, influence: Math.max(costS1 || 0, co2S1 || 0) };
+    }).filter((r) => Number.isFinite(r.costS1) || Number.isFinite(r.co2S1))
+      .sort((a, b) => b.influence - a.influence)
+      .slice(0, 18);
+  }
+
+  function cdfAt(sortedValues, x) {
+    let lo = 0;
+    let hi = sortedValues.length;
+    while (lo < hi) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (sortedValues[mid] <= x) lo = mid + 1;
+      else hi = mid;
+    }
+    return sortedValues.length ? lo / sortedValues.length : NaN;
+  }
+
+  function borgonovoDelta(rows, label, output) {
+    const pairs = rows.map((r) => [Number(r.parameters[label]), Number(r[output])]).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    if (pairs.length < 10) return NaN;
+    pairs.sort((a, b) => a[0] - b[0]);
+    const global = pairs.map((p) => p[1]).sort((a, b) => a - b);
+    const gridCount = Math.min(25, Math.max(8, Math.floor(Math.sqrt(global.length))));
+    const grid = Array.from({ length: gridCount }, (_, i) => quantile(global, (i + 0.5) / gridCount)).filter(Number.isFinite);
+    const bins = Math.max(3, Math.min(8, Math.floor(Math.sqrt(pairs.length))));
+    let delta = 0;
+    let used = 0;
+    for (let b = 0; b < bins; b += 1) {
+      const start = Math.floor(b * pairs.length / bins);
+      const stop = Math.floor((b + 1) * pairs.length / bins);
+      const conditional = pairs.slice(start, stop).map((p) => p[1]).sort((a, b2) => a - b2);
+      if (conditional.length < 2) continue;
+      const distance = mean(grid.map((x) => Math.abs(cdfAt(conditional, x) - cdfAt(global, x))));
+      delta += (conditional.length / pairs.length) * distance;
+      used += conditional.length;
+    }
+    return used ? Math.max(0, Math.min(1, delta)) : NaN;
+  }
+
+  function computeMomentDeltaRows(rows, labels) {
+    return labels.map((label) => {
+      const costDelta = borgonovoDelta(rows, label, "system_cost");
+      const co2Delta = borgonovoDelta(rows, label, "co2_price");
+      return { label, method: "moment_delta", costDelta, co2Delta, influence: Math.max(costDelta || 0, co2Delta || 0) };
+    }).filter((r) => Number.isFinite(r.costDelta) || Number.isFinite(r.co2Delta))
+      .sort((a, b) => b.influence - a.influence)
+      .slice(0, 18);
+  }
+
+  function computeGsaRows(rows, labels, method) {
+    if (method === "morris") return computeMorrisRows(rows, labels);
+    if (method === "sobol") return computeVarianceRows(rows, labels);
+    if (method === "moment_delta") return computeMomentDeltaRows(rows, labels);
+    return computeRankGsaRows(rows, labels);
+  }
+
+  function renderPrim(rows, n) {
+    const summary = $("scenarioPrimSummary");
+    if (summary) summary.textContent = rows.length ? `PRIM-style discovery from ${n} completed variants; target is the lowest-cost quartile.` : "No PRIM boxes found.";
+    const table = $("scenarioPrimTable");
+    if (table) {
+      if (!rows.length) {
+        table.className = "table-wrap explorer-table empty-state";
+        table.textContent = "No PRIM boxes found.";
+      } else {
+        table.className = "table-wrap explorer-table";
+        table.innerHTML = `<table><thead><tr><th>Parameter</th><th>Box range</th><th>Density</th><th>Coverage</th><th>Mass</th><th>Mean cost</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.min.toPrecision(4)} to ${r.max.toPrecision(4)}</td><td>${(100 * r.density).toFixed(1)}%</td><td>${(100 * r.coverage).toFixed(1)}%</td><td>${(100 * r.mass).toFixed(1)}%</td><td>${Number.isFinite(r.meanCost) ? r.meanCost.toPrecision(5) : ""}</td></tr>`).join("")}</tbody></table>`;
+      }
+    }
+    const chart = $("scenarioPrimChart");
+    if (!chart || !window.Plotly || !rows.length) {
+      if (chart) { chart.className = "atlas-chart empty-state"; chart.textContent = rows.length ? "Plotly is not loaded." : "No PRIM boxes found."; }
+      return;
+    }
+    chart.className = "atlas-chart plotly-chart";
+    window.Plotly.react(chart, [{ type: "bar", orientation: "h", y: rows.map((r) => r.label).reverse(), x: rows.map((r) => r.density).reverse(), name: "Density", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y: rows.map((r) => r.label).reverse(), x: rows.map((r) => r.coverage).reverse(), name: "Coverage", marker: { color: "#c07122" } }], { barmode: "group", margin: { l: 160, r: 16, t: 16, b: 42 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", xaxis: { title: "Share", tickformat: ".0%", gridcolor: "#dbe4ec" }, yaxis: { automargin: true } }, { responsive: true, displaylogo: false });
+  }
+
+  function renderGsa(rows, n, method) {
+    const summary = $("scenarioGsaSummary");
+    const methodInfo = GSA_METHODS[method] || GSA_METHODS.rank;
+    const summaryText = method === "morris"
+      ? `Morris elementary-effect metrics from ${n} completed variants.`
+      : method === "sobol"
+        ? `Sobol-style first-order variance indices from ${n} completed variants.`
+        : method === "moment_delta"
+          ? `Moment-independent Borgonovo-style delta indices from ${n} completed variants.`
+          : `Rank-correlation sensitivity from ${n} completed variants.`;
+    if (summary) summary.textContent = rows.length ? summaryText : `No ${methodInfo.label} rows found.`;
+    const table = $("scenarioGsaTable");
+    if (table) {
+      if (!rows.length) {
+        table.className = "table-wrap explorer-table empty-state";
+        table.textContent = `No ${methodInfo.label} rows found.`;
+      } else {
+        table.className = "table-wrap explorer-table";
+        if (method === "morris") {
+          table.innerHTML = `<table><thead><tr><th>Parameter</th><th>Effects</th><th>Cost mu*</th><th>Cost sigma</th><th>CO2 mu*</th><th>CO2 sigma</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${r.n}</td><td>${Number.isFinite(r.costMuStar) ? r.costMuStar.toPrecision(4) : ""}</td><td>${Number.isFinite(r.costSigma) ? r.costSigma.toPrecision(4) : ""}</td><td>${Number.isFinite(r.co2MuStar) ? r.co2MuStar.toPrecision(4) : ""}</td><td>${Number.isFinite(r.co2Sigma) ? r.co2Sigma.toPrecision(4) : ""}</td></tr>`).join("")}</tbody></table>`;
+        } else if (method === "sobol") {
+          table.innerHTML = `<table><thead><tr><th>Parameter</th><th>System cost S1</th><th>CO2 price S1</th><th>Influence</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${Number.isFinite(r.costS1) ? r.costS1.toFixed(3) : ""}</td><td>${Number.isFinite(r.co2S1) ? r.co2S1.toFixed(3) : ""}</td><td>${r.influence.toFixed(3)}</td></tr>`).join("")}</tbody></table>`;
+        } else if (method === "moment_delta") {
+          table.innerHTML = `<table><thead><tr><th>Parameter</th><th>System cost delta</th><th>CO2 price delta</th><th>Influence</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${Number.isFinite(r.costDelta) ? r.costDelta.toFixed(3) : ""}</td><td>${Number.isFinite(r.co2Delta) ? r.co2Delta.toFixed(3) : ""}</td><td>${r.influence.toFixed(3)}</td></tr>`).join("")}</tbody></table>`;
+        } else {
+          table.innerHTML = `<table><thead><tr><th>Parameter</th><th>System cost rho</th><th>CO2 price rho</th><th>Influence</th></tr></thead><tbody>${rows.map((r) => `<tr><td>${escapeHtml(r.label)}</td><td>${Number.isFinite(r.cost) ? r.cost.toFixed(3) : ""}</td><td>${Number.isFinite(r.co2) ? r.co2.toFixed(3) : ""}</td><td>${r.influence.toFixed(3)}</td></tr>`).join("")}</tbody></table>`;
+        }
+      }
+    }
+    const chart = $("scenarioGsaChart");
+    if (!chart || !window.Plotly || !rows.length) {
+      if (chart) { chart.className = "atlas-chart empty-state"; chart.textContent = rows.length ? "Plotly is not loaded." : `No ${methodInfo.label} rows found.`; }
+      return;
+    }
+    chart.className = "atlas-chart plotly-chart";
+    const y = rows.map((r) => r.label).reverse();
+    const traces = method === "morris"
+      ? [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.costMuStar || 0).reverse(), name: "System cost mu*", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2MuStar || 0).reverse(), name: "CO2 price mu*", marker: { color: "#8a5a2b" } }]
+      : method === "sobol"
+        ? [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.costS1 || 0).reverse(), name: "System cost S1", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2S1 || 0).reverse(), name: "CO2 price S1", marker: { color: "#8a5a2b" } }]
+        : method === "moment_delta"
+          ? [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.costDelta || 0).reverse(), name: "System cost delta", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2Delta || 0).reverse(), name: "CO2 price delta", marker: { color: "#8a5a2b" } }]
+          : [{ type: "bar", orientation: "h", y, x: rows.map((r) => r.cost || 0).reverse(), name: "System cost rho", marker: { color: "#007a78" } }, { type: "bar", orientation: "h", y, x: rows.map((r) => r.co2 || 0).reverse(), name: "CO2 price rho", marker: { color: "#8a5a2b" } }];
+    const xaxis = method === "morris"
+      ? { title: "Morris mu*", gridcolor: "#dbe4ec", zerolinecolor: "#455a64" }
+      : method === "sobol"
+        ? { title: "First-order variance index", range: [0, 1], gridcolor: "#dbe4ec", zerolinecolor: "#455a64" }
+        : method === "moment_delta"
+          ? { title: "Borgonovo delta", range: [0, 1], gridcolor: "#dbe4ec", zerolinecolor: "#455a64" }
+          : { title: "Spearman rho", range: [-1, 1], gridcolor: "#dbe4ec", zerolinecolor: "#455a64" };
+    window.Plotly.react(chart, traces, { barmode: "group", margin: { l: 160, r: 16, t: 16, b: 42 }, paper_bgcolor: "rgba(0,0,0,0)", plot_bgcolor: "rgba(0,0,0,0)", xaxis, yaxis: { automargin: true } }, { responsive: true, displaylogo: false });
   }
 
   async function stopLiveCampaign() {

@@ -65,7 +65,46 @@ function Update-LauncherShortcut {
     }
 }
 
+function Reset-UiPort {
+    param(
+        [string]$HostName,
+        [int]$Port
+    )
+
+    $listeners = @(Get-NetTCPConnection -LocalAddress $HostName -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+    if ($listeners.Count -eq 0) { return }
+
+    foreach ($listener in $listeners) {
+        $owner = Get-Process -Id $listener.OwningProcess -ErrorAction SilentlyContinue
+        if ($null -eq $owner) { continue }
+
+        if ($owner.ProcessName -notin @('julia', 'juliaup')) {
+            Write-Host ""
+            Write-Host ("Port {0} is already in use by PID {1} ({2})." -f $Port, $owner.Id, $owner.ProcessName) -ForegroundColor Red
+            Write-Host "Stop that process or start IESA-Opt on a different port." -ForegroundColor Yellow
+            Read-Host "Press Enter to close"
+            exit 1
+        }
+
+        Write-Host ("Port {0} is already owned by Julia PID {1}; restarting it so the UI uses the current repo source." -f $Port, $owner.Id) -ForegroundColor Yellow
+        Stop-Process -Id $owner.Id -Force -ErrorAction SilentlyContinue
+    }
+
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 250
+        $remaining = @(Get-NetTCPConnection -LocalAddress $HostName -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+        if ($remaining.Count -eq 0) { return }
+    }
+
+    Write-Host ""
+    Write-Host ("Port {0} is still busy after stopping the old Julia UI process." -f $Port) -ForegroundColor Red
+    Write-Host "Close the old IESA-Opt terminal window and launch again." -ForegroundColor Yellow
+    Read-Host "Press Enter to close"
+    exit 1
+}
+
 Update-LauncherShortcut -RepoRoot $RepoRoot
+Reset-UiPort -HostName $UiHost -Port $UiPort
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Cyan
@@ -133,7 +172,6 @@ $proc = Start-Process -FilePath $Julia.Source -ArgumentList $julia_args -NoNewWi
 # "IESA-Opt.jl" regardless of when Julia finishes overwriting it.
 try { $Host.UI.RawUI.WindowTitle = $WindowTitle } catch {}
 
-$opened       = $false
 $portReady    = $false
 $elapsed      = 0
 $progressTick = 5
@@ -157,7 +195,6 @@ try {
                 if (-not $LoadingUri) {
                     try {
                         Start-Process $Url | Out-Null
-                        $opened = $true
                     } catch {
                         Write-Host "Could not open the default browser automatically. Open $Url manually." -ForegroundColor Yellow
                     }
