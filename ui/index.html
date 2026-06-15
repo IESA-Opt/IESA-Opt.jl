@@ -39,6 +39,7 @@
     <button class="tab-button" data-section="scenario" data-tab="scenario-results" type="button">Results</button>
     <button class="tab-button" data-section="scenario" data-tab="scenario-analysis" type="button">Analysis</button>
     <button class="tab-button" data-section="mga" data-tab="mga-setup" type="button">Configure</button>
+    <button class="tab-button" data-section="mga" data-tab="mga-progress" type="button">Progress</button>
     <button class="tab-button" data-section="mga" data-tab="mga-results" type="button">Results</button>
     <button class="tab-button" data-section="explorer" data-tab="explorer-input" type="button">Input overview</button>
     <button class="tab-button" data-section="explorer" data-tab="explorer-atlas" type="button">Technology atlas</button>
@@ -407,29 +408,76 @@
             <p class="eyebrow">Model-generated alternatives</p>
             <h2 id="mgaTitle">Ready to plan</h2>
             <button id="mgaRunBtn" class="primary-button" type="submit">Run MGA campaign</button>
-            <p id="mgaHint" class="subtle">Preview an efficient directional MGA design, then dispatch the direction set.</p>
+            <p id="mgaHint" class="subtle">Preview hybrid ORACLE exploration, then dispatch the direction set.</p>
             <dl class="summary-list">
               <div><dt>Slack</dt><dd id="mgaSlackSummary">5%</dd></div>
-              <div><dt>Directions</dt><dd id="mgaDirectionSummary">24</dd></div>
-              <div><dt>Workers</dt><dd id="mgaWorkerSummary">4</dd></div>
+              <div><dt>Directions</dt><dd id="mgaDirectionSummary">6</dd></div>
+              <div><dt>Solver</dt><dd id="mgaSelectedSolverLabel">-</dd></div>
+              <div><dt>Tolerance</dt><dd id="mgaToleranceSummary">0.1</dd></div>
             </dl>
           </section>
+
+          <section class="panel compact-panel">
+            <h2>Solver Settings</h2>
+            <label class="field"><span>Solver</span><select id="mgaSolver"></select></label>
+            <div id="mgaSolverDetails" class="subtle detail-text"></div>
+            <div class="field"><span>Solve method</span><div id="mgaSolveMethod" class="segmented vertical"></div></div>
+            <label class="field"><span>CPU threads</span><div class="range-pair"><input id="mgaThreads" type="range" min="0" max="64" value="0"><input id="mgaThreadsNumber" type="number" min="0" max="64" value="0"></div></label>
+            <p class="subtle detail-text">MGA alternatives run sequentially, so the full thread budget is applied to each solve.</p>
+          </section>
         </aside>
+
         <div class="run-main">
           <section class="panel compact-panel">
-            <div class="panel-title"><h2>MGA setup</h2><span id="mgaScenarioSummary" class="subtle">Default workbook</span></div>
-            <div class="form-grid three">
-              <label class="field"><span>Campaign name</span><input id="mgaName" type="text" value="mga_campaign"></label>
+            <div class="panel-title"><h2>Scenario</h2><span id="mgaScenarioSummary" class="subtle">Default workbook</span></div>
+            <div class="form-grid two">
               <label class="field"><span>Scenario database</span><select id="mgaInputWorkbook"></select></label>
-              <label class="field"><span>System-cost slack (%)</span><input id="mgaCostSlack" type="number" min="0.1" step="0.1" value="5"></label>
-              <label class="field"><span>Directions</span><input id="mgaDirections" type="number" min="4" max="240" step="1" value="24"></label>
-              <label class="field"><span>Parallel workers</span><input id="mgaWorkers" type="number" min="1" max="64" step="1" value="4"></label>
-              <label class="field"><span>Total CPU threads</span><input id="mgaThreads" type="number" min="0" step="1" value="0"></label>
+              <label class="field"><span>Campaign name</span><input id="mgaName" type="text" value="mga_campaign"></label>
+              <div class="field span-2"><span>Years selection</span><div id="mgaPeriods" class="choice-row dense"></div></div>
             </div>
           </section>
+
+          <div class="main-grid">
+            <section class="panel compact-panel">
+              <h2>Solve Mode</h2>
+              <label class="toggle-field"><span>Time slicing</span><input id="mgaTimeSlicingToggle" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span></label>
+              <label id="mgaRepresentativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="mgaRepresentativeDays" type="range" min="1" max="100" value="15"><input id="mgaRepresentativeDaysNumber" type="number" min="1" max="100" value="15"></div></label>
+              <label class="field"><span>Time slices</span><input id="mgaTotalSlices" type="text" value="360" readonly></label>
+            </section>
+
+            <section class="panel compact-panel">
+              <h2>Temporal Resolution</h2>
+              <div id="mgaHoursPerDayField" class="field hidden"><span>Hours in a day</span><div id="mgaHoursPerDay" class="choice-row compact"></div></div>
+              <label id="mgaClusteringApproachField" class="field"><span>Clustering approach</span><select id="mgaClusteringApproach"></select></label>
+              <label id="mgaExtremeDaysField" class="field"><span>Extreme days</span><input id="mgaExtremeDays" type="number" min="0" max="30" value="5"></label>
+            </section>
+          </div>
+
+          <section class="panel compact-panel">
+            <details open>
+              <summary>Reporting and advanced settings</summary>
+              <div class="form-grid three advanced-grid">
+                <label class="field checkbox"><input id="mgaExtremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
+                <label class="field checkbox"><input id="mgaBoundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
+                <label class="field"><span>Constraint group</span><select id="mgaConstraintGroup"></select></label>
+              </div>
+            </details>
+          </section>
+
+          <section class="panel compact-panel">
+            <h2>MGA strategy</h2>
+            <div class="form-grid three">
+              <label class="field"><span>System-cost slack (%)</span><input id="mgaCostSlack" type="number" min="0.1" step="0.1" value="5"></label>
+              <label class="field"><span>Directions</span><input id="mgaDirections" type="number" min="1" max="240" step="1" value="6"></label>
+              <label class="field"><span>ORACLE tolerance</span><input id="mgaTolerance" type="number" min="0.001" max="1" step="0.001" value="0.1"></label>
+              <label class="field"><span>ORACLE iterations</span><input id="mgaOracleIterations" type="number" min="0" max="80" step="1" value="1"></label>
+              <label class="field"><span>ORACLE batch candidates</span><input id="mgaOracleBatch" type="number" min="1" max="64" step="1" value="1"></label>
+            </div>
+          </section>
+
           <section class="panel compact-panel">
             <div class="panel-title"><h2>Method</h2><button id="mgaPreviewBtn" class="secondary-button" type="button">Preview design</button></div>
-            <p id="mgaMethodText" class="subtle">Efficient directional MGA explores low-correlation sector-weighted objective directions within a user-defined system-cost slack. Directions are independent, so they are naturally parallel.</p>
+            <p id="mgaMethodText" class="subtle">Exact Hybrid ORACLE MGA solves the base IESA-Opt LP, applies a near-optimal system-cost cap, and solves alternative LPs over the original model constraints.</p>
             <div id="mgaPreviewChart" class="atlas-chart empty-state">Preview the MGA design.</div>
             <div id="mgaPreviewTable" class="table-wrap explorer-table empty-state">No MGA directions loaded.</div>
           </section>
@@ -437,14 +485,97 @@
       </form>
     </section>
 
-    <section id="tab-mga-results" class="tab-panel">
-      <section class="explorer-main-panel atlas-main-grid">
-        <section class="panel compact-panel atlas-span-2">
-          <div class="panel-title"><h2>MGA results</h2><p id="mgaResultsSummary" class="subtle">No MGA campaign has run.</p></div>
-          <div id="mgaResultsChart" class="atlas-chart empty-state">No MGA results loaded.</div>
-          <div id="mgaResultsTable" class="table-wrap explorer-table empty-state">No MGA results loaded.</div>
-        </section>
+    <section id="tab-mga-progress" class="tab-panel">
+      <section class="panel progress-panel">
+        <div class="panel-title progress-title">
+          <div>
+            <h2>MGA Progress</h2>
+            <p id="mgaProgressSubtitle" class="subtle">No MGA campaign has started.</p>
+            <p id="mgaProgressDetail" class="subtle progress-explanation">Preview and run a hybrid ORACLE campaign to see prepare, baseline, seed, refinement, and finalize stages.</p>
+          </div>
+          <div class="progress-actions"><div id="mgaProgressStatus" class="status-pill muted">Idle</div></div>
+        </div>
+        <div class="mga-progress-bar-wrap">
+          <div class="mga-progress-bar"><div id="mgaProgressBarFill" class="mga-progress-bar-fill" style="width:0%"></div></div>
+          <div class="mga-progress-bar-meta">
+            <span id="mgaProgressBarLabel">0 / 0 alternatives</span>
+            <span id="mgaProgressBarElapsed" class="subtle"></span>
+          </div>
+        </div>
+        <div class="stage-steps mga-stage-steps">
+          <div class="stage-step" id="mgaStagePrepare"><span class="stage-dot"></span><div><strong>Prepare data</strong><span>Clusters, extreme periods</span></div></div>
+          <div class="stage-step" id="mgaStageBaseline"><span class="stage-dot"></span><div><strong>Baseline</strong><span>Least-cost LP + cap</span></div></div>
+          <div class="stage-step" id="mgaStageVmm"><span class="stage-dot"></span><div><strong>VMM seeds</strong><span>Variable-by-variable bounds</span></div></div>
+          <div class="stage-step" id="mgaStageSeed"><span class="stage-dot"></span><div><strong>Parallel seeds</strong><span>Low-discrepancy directions</span></div></div>
+          <div class="stage-step" id="mgaStageOracle"><span class="stage-dot"></span><div><strong>ORACLE refinement</strong><span>Largest reduced-space gaps</span></div></div>
+          <div class="stage-step" id="mgaStageFinalize"><span class="stage-dot"></span><div><strong>Finalize</strong><span>Certificate + results</span></div></div>
+        </div>
+        <div class="mga-progress-grid">
+          <section class="mga-workers-panel">
+            <div class="mga-subpanel-title"><h3>Workers</h3><span id="mgaWorkersSummary" class="subtle">Sequential, 1 worker</span></div>
+            <div id="mgaWorkersBody" class="mga-workers-body">No workers active.</div>
+          </section>
+          <section class="mga-directions-panel">
+            <div class="mga-subpanel-title"><h3>Alternatives</h3><span id="mgaDirectionsSummary" class="subtle">Queued: 0</span></div>
+            <div id="mgaDirectionsTable" class="mga-directions-table">No directions queued.</div>
+          </section>
+        </div>
+        <pre id="mgaProgressLog" class="run-log">Waiting for MGA campaign.</pre>
       </section>
+    </section>
+
+    <section id="tab-mga-results" class="tab-panel">
+      <div class="scenario-results-layout">
+        <aside class="panel scenario-results-sidebar">
+          <div class="panel-title">
+            <div>
+              <h2>Campaigns</h2>
+              <p id="mgaCampaignListSummary" class="subtle">No campaigns loaded.</p>
+            </div>
+            <button id="mgaRefreshCampaigns" type="button" class="secondary-button">Refresh</button>
+          </div>
+          <p class="subtle multi-select-hint">Click a campaign to load its alternatives.</p>
+          <div id="mgaCampaignList" class="scenario-campaign-list empty-state">No MGA campaigns yet.</div>
+        </aside>
+        <section class="scenario-results-main-panel">
+          <section class="panel compact-panel">
+            <div class="panel-title"><h2>MGA results</h2><p id="mgaResultsSummary" class="subtle">No MGA campaign has run.</p></div>
+            <div id="mgaCertificate" class="metric-grid"></div>
+            <div id="mgaOracleChart" class="atlas-chart empty-state">No ORACLE convergence trace loaded.</div>
+            <div id="mgaResultsChart" class="atlas-chart empty-state">No MGA results loaded.</div>
+            <div id="mgaResultsTable" class="table-wrap explorer-table empty-state">No MGA results loaded.</div>
+          </section>
+          <section class="panel compact-panel">
+            <div class="panel-title">
+              <div>
+                <h2>Investments across alternatives</h2>
+                <p id="mgaInvestmentSummary" class="subtle">Run an MGA campaign to see which technologies the alternatives invest in.</p>
+              </div>
+              <div class="mga-investment-controls">
+                <label class="mga-investment-sort">Sort by
+                  <select id="mgaInvestmentSort">
+                    <option value="max">Highest capacity</option>
+                    <option value="range">Largest range</option>
+                    <option value="relativeRange">Largest relative spread</option>
+                    <option value="baseline">Baseline level</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+            <div id="mgaInvestmentEnvelope" class="atlas-chart empty-state">No investment data loaded.</div>
+            <div class="mga-investment-grid">
+              <div class="mga-investment-block">
+                <h3>Low-regret investments <span class="subtle">(built in every alternative, tight range)</span></h3>
+                <div id="mgaLowRegretTable" class="table-wrap explorer-table empty-state">No low-regret investments detected.</div>
+              </div>
+              <div class="mga-investment-block">
+                <h3>High-volatility investments <span class="subtle">(largest spread across alternatives)</span></h3>
+                <div id="mgaHighVolatilityTable" class="table-wrap explorer-table empty-state">No high-volatility investments detected.</div>
+              </div>
+            </div>
+          </section>
+        </section>
+      </div>
     </section>
 
     <section id="tab-explorer-input" class="tab-panel">
@@ -688,8 +819,8 @@
           <li><strong>Single run</strong> &mdash; the default workspace. Tabs: <em>Setup</em>, <em>Progress</em>, <em>Results</em>. Used to launch one optimisation, watch it solve, and inspect the resulting output folder.</li>
           <li><strong>Scenario Space</strong> &mdash; the campaign workspace. Tabs: <em>Parameter Space</em> (define the parameter space + sample variants), <em>Progress</em> (live campaign progress, Phase 3 hookup pending), <em>Results</em> (aggregated cross-variant analytics, Phase 4/5 hookup pending).</li>
           <li><strong>Scenario explorer</strong> &mdash; workbook and generated-model inspection. Tabs: <em>Model browser</em> and <em>Technology dependencies</em>.</li>
+          <li><strong>MGA</strong> &mdash; solver-backed modelling-to-generate-alternatives campaigns with near-optimal cost caps and ORACLE refinement. Tabs: <em>Configure</em>, <em>Progress</em>, <em>Results</em>.</li>
           <li><strong>About</strong> &mdash; this reference page.</li>
-          <li><strong>MGA</strong> &mdash; coming soon. Will host modelling-to-generate-alternatives explorations.</li>
         </ul>
         <p>The tabs below the section bar are filtered automatically: only the tabs that belong to the active section are shown. Each tab is described below together with every option it exposes.</p>
 
@@ -751,6 +882,53 @@
         </ul>
         <p>In compare mode the System Costs and Solve Time charts switch to a multi-run stacked view, and the comparison panel shows side-by-side timing and cost-component tables. The single-run-only panels (CO<sub>2</sub> Price, Activity Prices, Power Capacities, Hourly Dispatch, Flexibility Analysis, Emissions, Supply/Demand) are hidden because they refer to one run only &mdash; click a single row in the sidebar to bring them back.</p>
 
+        <h3>MGA workspace</h3>
+        <p>Model-Generated Alternatives (MGA) explore <em>near-optimal</em> system designs &mdash; configurations whose total system cost stays within a user-chosen slack of the least-cost optimum, but whose technology mix differs. Useful when the least-cost objective alone cannot capture every political, environmental, siting, or implementation concern. The implementation is solver-backed: every alternative is a real LP over the original IESA-Opt constraints plus a system-cost cap, and ORACLE-style closest-point refinements target the largest unexplored gap in a reduced design space (see the <a href="https://iesa-opt.github.io/IESA-Opt.jl/v0.1/mga/" target="_blank" rel="noreferrer">MGA documentation</a> for the formulation).</p>
+
+        <h4>Configure tab</h4>
+        <p>Defines the campaign and previews the seed directions before any solve runs.</p>
+        <ul class="about-list">
+          <li><strong>Workbook + temporal mode + periods + representative days + extreme periods</strong> &mdash; same controls as the Single Run setup; they pin the underlying IESA-Opt model that every alternative will solve.</li>
+          <li><strong>Solver and Solve method</strong> &mdash; chooses the LP backend used for the baseline and every alternative. Gurobi <em>barrier_crossover</em> is the default when a license is available; HiGHS <em>barrier</em> is the cross-platform fallback.</li>
+          <li><strong>Cost slack (%)</strong> &mdash; how far above the least-cost optimum the alternatives are allowed to go (typically 1&ndash;10%). Larger slack means more design freedom and more diverse alternatives.</li>
+          <li><strong>Directions</strong> &mdash; total number of alternatives to solve. Split automatically between VMM seed directions, low-discrepancy parallel seeds, and ORACLE refinement directions.</li>
+          <li><strong>ORACLE iterations</strong> and <strong>ORACLE batch</strong> &mdash; control how aggressively the closest-point LPs refine the largest unexplored gap.</li>
+          <li><strong>Tolerance</strong> &mdash; target estimated max-error (in normalized design units) at which ORACLE refinement stops.</li>
+          <li><strong>Workers</strong> &mdash; reserved for future parallel solves; currently the campaign runs alternatives sequentially with the full thread budget per solve.</li>
+          <li><strong>Preview design</strong> &mdash; lists the planned directions with phase labels (<em>vmm</em>, <em>parallel-seed</em>, <em>oracle-refine</em>), dominant group, and weight summary, without solving anything.</li>
+          <li><strong>Run MGA campaign</strong> &mdash; submits the campaign and switches to the Progress tab automatically.</li>
+        </ul>
+
+        <h4>Progress tab</h4>
+        <p>Live status for the campaign that is currently solving (or the last one started).</p>
+        <ul class="about-list">
+          <li><strong>Status pill + headline</strong> &mdash; campaign name, state, and current stage message (baseline, seed, ORACLE iteration, finalize).</li>
+          <li><strong>Progress bar</strong> &mdash; alternatives completed vs. planned, with current-iteration ORACLE max-error trace alongside.</li>
+          <li><strong>Stage strip</strong> &mdash; six-step pipeline (prepare &rarr; baseline &rarr; seed solves &rarr; ORACLE &rarr; finalize &rarr; complete).</li>
+          <li><strong>Workers card</strong> &mdash; configured worker count, threads-per-solve, solver, solve method, and the direction currently being solved (label, phase, started-at).</li>
+          <li><strong>Directions table</strong> &mdash; every planned direction with status (queued / running / solved / failed), elapsed time, and any solver error message. Rows update in place as the campaign progresses.</li>
+          <li><strong>Run log</strong> &mdash; condensed campaign trace including baseline cost, cost cap, ORACLE iteration before/after errors, and accepted candidate counts.</li>
+        </ul>
+
+        <h4>Results tab</h4>
+        <p>Shows the finished campaign. The left sidebar lists every MGA campaign captured by the server (newest first); click one to load its alternatives. The main panel has two stacked sections.</p>
+        <p><em>MGA results</em> &mdash; the campaign-level certificate and per-alternative diagnostics:</p>
+        <ul class="about-list">
+          <li><strong>Certificate cards</strong> &mdash; baseline cost, cost cap, slack used, exploratory dimensions, initial vs. final estimated max error, ORACLE iterations, and convergence flag.</li>
+          <li><strong>ORACLE convergence chart</strong> &mdash; max-error trace across iterations (before vs. after).</li>
+          <li><strong>Slack-vs-diversity scatter</strong> &mdash; one marker per alternative; X-axis is the system-cost slack actually used (%), Y-axis is the design-space diversity score, color is the worker. Hover for direction label, dominant group, and worker.</li>
+          <li><strong>Alternatives table</strong> &mdash; one row per direction with phase, status, dominant group, system cost, cost index, slack used, diversity, max-error contribution, and solver.</li>
+        </ul>
+        <p><em>Investments across alternatives</em> &mdash; turns the per-alternative optimal investment decisions into actionable insight. Every solved alternative reports its full per-technology installed stock and new investment; the panel aggregates those across the campaign:</p>
+        <ul class="about-list">
+          <li><strong>Summary line</strong> &mdash; total number of technologies invested in, how many were built in <em>every</em> alternative, and how many were optional.</li>
+          <li><strong>Sort by</strong> selector &mdash; reorders the envelope chart by <em>Highest capacity</em>, <em>Largest range</em> (absolute spread), <em>Largest relative spread</em>, or <em>Baseline level</em>.</li>
+          <li><strong>Investment envelope chart</strong> &mdash; horizontal bar showing the min&rarr;max range each technology takes across all alternatives. The bar is color-coded by category (green = low-regret, orange = high-volatility, indigo = optional, blue = stable). A black diamond marks the baseline (least-cost) level so you can see at a glance whether MGA pushes the technology up, down, or both.</li>
+          <li><strong>Low-regret investments</strong> &mdash; top techs that are built in <em>every</em> alternative with a tight relative spread (&le;5%). These are the robust "no matter which near-optimal future you pick, you build this" capacities.</li>
+          <li><strong>High-volatility investments</strong> &mdash; top techs whose installed level varies the most across alternatives (relative spread &ge;40%). These are the levers MGA finds &mdash; technologies the model can swap in or out without breaking the cost cap.</li>
+        </ul>
+        <p>Use the categories together: low-regret tells you what every near-optimal pathway agrees on; high-volatility tells you where there is genuine flexibility (and therefore where political, social, or implementation preferences can decide between alternatives without paying a meaningful cost penalty).</p>
+
         <h3>About tab</h3>
         <p>This page. Use the links above to reach the source code and the full documentation.</p>
       </section>
@@ -760,6 +938,6 @@
   <script src="/app.js"></script>
   <script src="/app.scenario.js"></script>
   <script src="/app.explorer.js"></script>
-  <script src="/app.mga.js"></script>
+  <script src="/app.mga.js?v=mga-investments-20260614"></script>
 </body>
 </html>

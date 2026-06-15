@@ -135,6 +135,9 @@ function _ui_handler(req::HTTP.Request)
 end
 
 function _api_response(method::String, path::String, query::Union{Nothing,String}, req::HTTP.Request)
+    if length(path) > 1
+        path = rstrip(path, '/')
+    end
     if method == "GET" && path == "/api/options"
         return _json_response(_ui_options())
     elseif method == "GET" && path == "/api/status"
@@ -222,7 +225,9 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         return _json_response(_mga_run(_json_body(req)); status = 202)
     elseif method == "GET" && startswith(path, "/api/mga/")
         parts = _url_parts(path)
-        if length(parts) == 4 && parts[3] == "status"
+        if length(parts) == 3 && parts[3] == "campaigns"
+            return _json_response(_mga_campaigns())
+        elseif length(parts) == 4 && parts[3] == "status"
             return _json_response(_mga_status(parts[4]))
         elseif length(parts) == 4 && parts[3] == "result"
             return _json_response(_mga_result(parts[4]))
@@ -247,6 +252,17 @@ function _json_body(req::HTTP.Request)
     return isempty(req.body) ? Dict{String,Any}() : JSON3.read(String(req.body))
 end
 
+_json_sanitize(value) = value
+_json_sanitize(::Nothing) = nothing
+_json_sanitize(::Missing) = nothing
+_json_sanitize(value::AbstractString) = value
+_json_sanitize(value::Symbol) = String(value)
+_json_sanitize(value::AbstractFloat) = isfinite(value) ? value : nothing
+_json_sanitize(value::Real) = value
+_json_sanitize(value::AbstractDict) = Dict{String,Any}(String(key) => _json_sanitize(val) for (key, val) in value)
+_json_sanitize(value::AbstractVector) = Any[_json_sanitize(item) for item in value]
+_json_sanitize(value::Tuple) = Any[_json_sanitize(item) for item in value]
+
 function _json_response(payload; status::Integer = 200)
     HTTP.Response(status,
         ["Content-Type" => "application/json; charset=utf-8",
@@ -257,7 +273,7 @@ function _json_response(payload; status::Integer = 200)
          # 127.0.0.1, so opening the API to "*" does not expand the attack
          # surface beyond what file:// already grants.
          "Access-Control-Allow-Origin" => "*"],
-        JSON3.write(payload))
+        JSON3.write(_json_sanitize(payload)))
 end
 
 function _static_response(path::String)
@@ -570,7 +586,7 @@ function _warm_default_workbook_cache!(input_workbook::AbstractString)
 end
 
 # ---------------------------------------------------------------------------
-# MGA exploration — efficient directional design scaffold
+# MGA exploration — hybrid ORACLE extension API
 # ---------------------------------------------------------------------------
 
 function _mga_float(value, default::Float64)
@@ -584,73 +600,92 @@ function _mga_float(value, default::Float64)
 end
 
 function _mga_config(body)
-    n_directions = clamp(_as_int(_config_get(body, "directions", 24), 24), 4, 240)
+    n_directions = clamp(_as_int(_config_get(body, "directions", 6), 6), 1, 240)
     cost_slack = clamp(_mga_float(_config_get(body, "costSlack", 5.0), 5.0), 0.1, 100.0)
-    workers = clamp(_as_int(_config_get(body, "workers", 4), 4), 1, max(1, Sys.CPU_THREADS))
+    workers = clamp(_as_int(_config_get(body, "workers", 1), 1), 1, max(1, Sys.CPU_THREADS))
     threads = max(0, _as_int(_config_get(body, "threads", 0), 0))
+    oracle_iterations = clamp(_as_int(_config_get(body, "oracleIterations", 1), 1), 0, 80)
+    oracle_batch = clamp(_as_int(_config_get(body, "oracleBatch", 1), 1), 1, 64)
+    tolerance = clamp(_mga_float(_config_get(body, "tolerance", 0.1), 0.1), 0.001, 1.0)
     name = String(_config_get(body, "name", "mga_campaign"))
+    mode = String(_config_get(body, "mode", "timeslice"))
+    rep_days = clamp(_as_int(_config_get(body, "representativeDays", 15), 15), 1, 365)
+    hours_per_day = clamp(_as_int(_config_get(body, "hoursPerDay", 24), 24), 1, 24)
+    extreme_days = clamp(_as_int(_config_get(body, "extremeDays", 5), 5), 0, 30)
+    extreme_periods = _as_bool(_config_get(body, "extremePeriods", true), true)
+    boundary_ramping = _as_bool(_config_get(body, "boundaryRamping", true), true)
+    solver = lowercase(String(_config_get(body, "solver", _preferred_default_solver_id())))
+    solve_method = lowercase(String(_config_get(body, "solveMethod", "barrier_crossover")))
     return Dict{String,Any}(
         "name" => isempty(strip(name)) ? "mga_campaign" : strip(name),
         "directions" => n_directions,
         "costSlack" => cost_slack,
         "workers" => workers,
         "threads" => threads,
+        "oracleIterations" => oracle_iterations,
+        "oracleBatch" => oracle_batch,
+        "tolerance" => tolerance,
         "inputWorkbook" => String(_config_get(body, "inputWorkbook", "data/default_data.xlsx")),
         "periods" => _as_int_vector(_config_get(body, "periods", [2050])),
-        "method" => String(_config_get(body, "method", "efficient-directional-mga")),
+        "mode" => mode,
+        "representativeDays" => rep_days,
+        "hoursPerDay" => hours_per_day,
+        "clusteringApproach" => String(_config_get(body, "clusteringApproach", "kmeans_avg")),
+        "extremePeriods" => extreme_periods,
+        "extremeDays" => extreme_days,
+        "boundaryRamping" => boundary_ramping,
+        "constraintGroup" => String(_config_get(body, "constraintGroup", "Base + Bunkers + Scope3")),
+        "solver" => solver,
+        "solveMethod" => solve_method,
+        "method" => String(_config_get(body, "method", "hybrid-oracle-mga")),
     )
 end
 
-function _mga_technology_groups(md::ModelData; limit::Int = 14)
-    counts = Dict{String,Int}()
-    for tech in md.sets.technologies
-        sector = String(get(md.params.tech_sector, tech, Symbol("Unspecified")))
-        counts[sector] = get(counts, sector, 0) + 1
-    end
-    rows = sort!(collect(counts); by = x -> (-x[2], x[1]))
-    groups = [Dict("name" => k, "count" => v) for (k, v) in rows[1:min(length(rows), limit)]]
-    isempty(groups) && push!(groups, Dict("name" => "System", "count" => length(md.sets.technologies)))
-    return groups
-end
-
-function _mga_directions(groups, n::Int)
-    k = max(1, length(groups))
-    rows = Vector{Dict{String,Any}}()
-    for i in 1:n
-        weights = Float64[]
-        for j in 1:k
-            angle = 2 * pi * (i - 1) * (j + 0.61803398875) / max(n, 1)
-            push!(weights, round(sin(angle) + 0.45 * cos(angle * 0.37 + j); digits = 4))
-        end
-        norm = sqrt(sum(abs2, weights))
-        norm > 0 && (weights = [round(w / norm; digits = 4) for w in weights])
-        dominant = groups[argmax(abs.(weights))]
-        push!(rows, Dict(
-            "id" => i,
-            "label" => "MGA direction $(i)",
-            "dominantGroup" => dominant["name"],
-            "weights" => [Dict("group" => groups[j]["name"], "weight" => weights[j]) for j in 1:k],
-        ))
-    end
-    return rows
+function _mga_exact_config(cfg::Dict{String,Any})
+    mode_text = lowercase(String(get(cfg, "mode", "timeslice")))
+    mode = mode_text in ("full_hourly", "full-hourly", "fh") ? :fh : :ts
+    periods = _as_int_vector(get(cfg, "periods", [2050]))
+    period = isempty(periods) ? 2050 : first(periods)
+    return MGAExactConfig(
+        directions = Int(cfg["directions"]),
+        cost_slack = Float64(cfg["costSlack"]),
+        oracle_iterations = Int(cfg["oracleIterations"]),
+        oracle_batch = Int(cfg["oracleBatch"]),
+        tolerance = Float64(cfg["tolerance"]),
+        workers = Int(cfg["workers"]),
+        threads = Int(cfg["threads"]),
+        solver = String(get(cfg, "solver", _preferred_default_solver_id())),
+        solve_method = String(get(cfg, "solveMethod", "barrier_crossover")),
+        mode = mode,
+        period = period,
+        representative_days = Int(get(cfg, "representativeDays", 15)),
+        hours_per_day = Int(get(cfg, "hoursPerDay", 24)),
+        clustering = Symbol(String(get(cfg, "clusteringApproach", "kmeans_avg"))),
+        extreme_periods = Bool(get(cfg, "extremePeriods", true)),
+        extreme_days = Int(get(cfg, "extremeDays", 5)),
+        boundary_ramping = Bool(get(cfg, "boundaryRamping", true)),
+    )
 end
 
 function _mga_preview(body)
     cfg = _mga_config(body)
     input_path = _scenario_input_path(Dict("inputWorkbook" => cfg["inputWorkbook"]))
     md = _read_ui_data_cached(input_path)
-    groups = _mga_technology_groups(md)
-    directions = _mga_directions(groups, Int(cfg["directions"]))
+    design = mga_hybrid_oracle_preview(md, _mga_exact_config(cfg))
     threads = Int(cfg["threads"])
     workers = Int(cfg["workers"])
+    # MGA alternatives run sequentially today, so each solve gets the full
+    # thread budget. Expose this honestly to the UI summary card.
     return Dict{String,Any}(
         "ok" => true,
         "config" => cfg,
-        "method" => "Efficient directional MGA",
-        "description" => "Solve least-cost once, add a system-cost slack constraint, then explore low-correlation sector-weighted objective directions in parallel. This branch includes the parallel design harness and UI; the solver hook is isolated for adding exact LP re-objectivization.",
-        "groups" => groups,
-        "directions" => directions,
-        "parallel" => Dict("workers" => workers, "threadsPerWorker" => threads <= 0 ? "auto" : max(1, fld(threads, workers))),
+        "method" => design["method"],
+        "description" => design["description"],
+        "groups" => design["groups"],
+        "directions" => design["directions"],
+        "oracleTrace" => design["oracleTrace"],
+        "certificate" => design["certificate"],
+        "parallel" => Dict("workers" => workers, "threadsPerSolve" => threads <= 0 ? "auto" : threads, "parallelSolves" => false),
     )
 end
 
@@ -658,13 +693,50 @@ function _mga_run(body)
     preview = _mga_preview(body)
     cfg = preview["config"]
     id = "mga_" * Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
+    direction_states = Dict{String,Any}[]
+    for direction in preview["directions"]
+        push!(direction_states, Dict{String,Any}(
+            "id" => Int(get(direction, "id", length(direction_states) + 1)),
+            "label" => String(get(direction, "label", "")),
+            "phase" => String(get(direction, "phase", "")),
+            "dominantGroup" => String(get(direction, "dominantGroup", "")),
+            "status" => "queued",
+            "worker" => 0,
+            "startedAt" => nothing,
+            "durationSeconds" => nothing,
+            "errorMessage" => "",
+        ))
+    end
+    threads_per_solve = Int(cfg["threads"]) <= 0 ? "auto" : Int(cfg["threads"])
+    workers_info = Dict{String,Any}(
+        "configured" => Int(cfg["workers"]),
+        "threadsPerSolve" => threads_per_solve,
+        "parallelSolves" => false,
+        "solver" => String(get(cfg, "solver", "auto")),
+        "solveMethod" => String(get(cfg, "solveMethod", "")),
+        "current" => nothing,
+    )
     snap = Dict{String,Any}(
         "ok" => true,
         "id" => id,
-        "campaign" => Dict("name" => cfg["name"], "state" => "running", "stage" => "Dispatching MGA directions", "total" => cfg["directions"], "completed" => 0, "failed" => 0, "workers" => cfg["workers"], "started_at" => time()),
+        "campaign" => Dict(
+            "name" => cfg["name"],
+            "state" => "running",
+            "stage" => "Exact MGA solve queued",
+            "phase" => "prepare",
+            "total" => cfg["directions"],
+            "completed" => 0,
+            "failed" => 0,
+            "workers" => cfg["workers"],
+            "started_at" => time(),
+        ),
         "config" => cfg,
         "groups" => preview["groups"],
         "directions" => preview["directions"],
+        "directionStates" => direction_states,
+        "workersInfo" => workers_info,
+        "oracleTrace" => preview["oracleTrace"],
+        "certificate" => preview["certificate"],
         "results" => Vector{Dict{String,Any}}(),
         "done" => false,
     )
@@ -686,37 +758,129 @@ end
 
 function _mga_task!(id::String)
     snap = _mga_status(id)
-    dirs = Vector{Any}(get(snap, "directions", Any[]))
     cfg = get(snap, "config", Dict{String,Any}())
-    slack = _mga_float(get(cfg, "costSlack", 5.0), 5.0)
-    workers = max(1, _as_int(get(cfg, "workers", 1), 1))
-    results = Vector{Dict{String,Any}}(undef, length(dirs))
-    Base.Threads.@threads for idx in eachindex(dirs)
-        d = dirs[idx]
-        weights = get(d, "weights", Any[])
-        diversity = isempty(weights) ? 0.0 : sum(abs(_mga_float(get(w, "weight", 0.0), 0.0)) for w in weights) / length(weights)
-        cost = 100.0 * (1.0 + slack / 100.0 * (0.35 + 0.65 * diversity))
-        results[idx] = Dict{String,Any}(
-            "direction" => get(d, "id", idx),
-            "label" => get(d, "label", "MGA direction $idx"),
-            "dominantGroup" => get(d, "dominantGroup", "System"),
-            "costIndex" => round(cost; digits = 4),
-            "slackUsed" => round(cost - 100.0; digits = 4),
-            "diversityScore" => round(diversity; digits = 4),
-            "worker" => mod(idx - 1, workers) + 1,
-            "status" => "planned",
-        )
+    function progress(payload)
+        lock(UI_MGA_LOCK)
+        try
+            haskey(UI_MGA_CAMPAIGNS, id) || return nothing
+            current = UI_MGA_CAMPAIGNS[id]
+            campaign = current["campaign"]
+            campaign["stage"] = String(get(payload, "message", get(payload, "stage", campaign["stage"])))
+            if haskey(payload, "phase")
+                campaign["phase"] = String(payload["phase"])
+            end
+            campaign["completed"] = Int(get(payload, "completed", campaign["completed"]))
+            campaign["total"] = Int(get(payload, "total", campaign["total"]))
+            haskey(payload, "results") && (current["results"] = get(payload, "results", current["results"]))
+            haskey(payload, "oracleTrace") && (current["oracleTrace"] = get(payload, "oracleTrace", current["oracleTrace"]))
+            if haskey(payload, "baselineCost")
+                campaign["baselineCost"] = Float64(payload["baselineCost"])
+            end
+            if haskey(payload, "baselineSolveSeconds")
+                campaign["baselineSolveSeconds"] = Float64(payload["baselineSolveSeconds"])
+            end
+            if haskey(payload, "costCap")
+                campaign["costCap"] = Float64(payload["costCap"])
+            end
+            if haskey(payload, "oracleIteration")
+                campaign["oracleIteration"] = Int(payload["oracleIteration"])
+            end
+            states = get(current, "directionStates", Dict{String,Any}[])
+            workers = get(current, "workersInfo", Dict{String,Any}())
+            if haskey(payload, "directionId")
+                direction_id = Int(payload["directionId"])
+                ds = String(get(payload, "directionStatus", ""))
+                idx = findfirst(s -> Int(get(s, "id", -1)) == direction_id, states)
+                if idx !== nothing
+                    st = states[idx]
+                    if !isempty(ds)
+                        st["status"] = ds
+                    end
+                    if ds == "running"
+                        st["worker"] = 1
+                        st["startedAt"] = Float64(get(payload, "directionStartedAt", time()))
+                        st["durationSeconds"] = nothing
+                        workers["current"] = Dict{String,Any}(
+                            "directionId" => direction_id,
+                            "label" => String(get(payload, "directionLabel", get(payload, "message", ""))),
+                            "phase" => String(get(payload, "phase", st["phase"])),
+                            "startedAt" => st["startedAt"],
+                        )
+                    elseif ds in ("solved", "failed")
+                        st["durationSeconds"] = Float64(get(payload, "directionDurationSeconds", 0.0))
+                        err_msg = String(get(payload, "directionErrorMessage", ""))
+                        if !isempty(err_msg)
+                            st["errorMessage"] = err_msg
+                        end
+                        cur = get(workers, "current", nothing)
+                        if cur isa AbstractDict && Int(get(cur, "directionId", -1)) == direction_id
+                            workers["current"] = nothing
+                        end
+                    end
+                end
+            end
+            if String(get(campaign, "phase", "")) == "finalize"
+                workers["current"] = nothing
+            end
+        finally
+            unlock(UI_MGA_LOCK)
+        end
+        return nothing
     end
-    sort!(results; by = r -> Int(r["direction"]))
+    result_payload = try
+        input_path = _scenario_input_path(Dict("inputWorkbook" => cfg["inputWorkbook"]))
+        md = _read_ui_data_cached(input_path)
+        mga_hybrid_oracle_run(md, _mga_exact_config(cfg); progress = progress)
+    catch err
+        lock(UI_MGA_LOCK)
+        try
+            if haskey(UI_MGA_CAMPAIGNS, id)
+                failed = UI_MGA_CAMPAIGNS[id]
+                failed["done"] = true
+                failed["campaign"]["state"] = "failed"
+                failed["campaign"]["stage"] = sprint(showerror, err)
+                failed["campaign"]["failed"] = Int(get(failed["campaign"], "total", 0))
+            end
+        finally
+            unlock(UI_MGA_LOCK)
+        end
+        return nothing
+    end
     lock(UI_MGA_LOCK)
     try
         haskey(UI_MGA_CAMPAIGNS, id) || return nothing
         snap = UI_MGA_CAMPAIGNS[id]
-        snap["results"] = results
+        snap["groups"] = result_payload["groups"]
+        snap["directions"] = result_payload["directions"]
+        snap["oracleTrace"] = result_payload["oracleTrace"]
+        snap["certificate"] = result_payload["certificate"]
+        snap["results"] = result_payload["results"]
+        snap["baselineInvestments"] = get(result_payload, "baselineInvestments", Dict{String,Any}[])
+        snap["investmentSpread"] = get(result_payload, "investmentSpread", Dict{String,Any}[])
         snap["done"] = true
         snap["campaign"]["state"] = "completed"
-        snap["campaign"]["stage"] = "MGA direction set complete"
-        snap["campaign"]["completed"] = length(results)
+        snap["campaign"]["phase"] = "complete"
+        snap["campaign"]["stage"] = "Exact Hybrid ORACLE MGA complete"
+        snap["campaign"]["completed"] = length(result_payload["results"])
+        snap["campaign"]["failed"] = Int(result_payload["certificate"]["failedAlternatives"])
+        snap["campaign"]["completed_at"] = time()
+        # Reconcile any direction state still tagged "queued"/"running" with the
+        # final results so the table never shows a stuck "running" direction.
+        states = get(snap, "directionStates", Dict{String,Any}[])
+        for row in result_payload["results"]
+            direction_id = Int(get(row, "direction", 0))
+            idx = findfirst(s -> Int(get(s, "id", -1)) == direction_id, states)
+            idx === nothing && continue
+            st = states[idx]
+            st["status"] = String(get(row, "status", st["status"]))
+            st["durationSeconds"] = Float64(get(row, "solveSeconds", get(st, "durationSeconds", 0.0)))
+            err_msg = String(get(row, "errorMessage", ""))
+            if !isempty(err_msg)
+                st["errorMessage"] = err_msg
+            end
+        end
+        workers = get(snap, "workersInfo", Dict{String,Any}())
+        workers["current"] = nothing
     finally
         unlock(UI_MGA_LOCK)
     end
@@ -737,7 +901,53 @@ end
 function _mga_result(id::AbstractString)
     snap = _mga_status(id)
     get(snap, "ok", false) == false && return snap
-    return Dict("ok" => true, "campaign" => snap["campaign"], "config" => snap["config"], "groups" => snap["groups"], "results" => snap["results"])
+    return Dict(
+        "ok" => true,
+        "campaign" => snap["campaign"],
+        "config" => snap["config"],
+        "groups" => snap["groups"],
+        "oracleTrace" => snap["oracleTrace"],
+        "certificate" => snap["certificate"],
+        "results" => snap["results"],
+        "directionStates" => get(snap, "directionStates", Dict{String,Any}[]),
+        "workersInfo" => get(snap, "workersInfo", Dict{String,Any}()),
+        "baselineInvestments" => get(snap, "baselineInvestments", Dict{String,Any}[]),
+        "investmentSpread" => get(snap, "investmentSpread", Dict{String,Any}[]),
+    )
+end
+
+function _mga_campaigns()
+    lock(UI_MGA_LOCK)
+    try
+        rows = Dict{String,Any}[]
+        for (id, snap) in UI_MGA_CAMPAIGNS
+            c = get(snap, "campaign", Dict{String,Any}())
+            cfg = get(snap, "config", Dict{String,Any}())
+            results = get(snap, "results", Any[])
+            push!(rows, Dict{String,Any}(
+                "id" => id,
+                "name" => String(get(c, "name", id)),
+                "state" => String(get(c, "state", "")),
+                "stage" => String(get(c, "stage", "")),
+                "phase" => String(get(c, "phase", "")),
+                "total" => Int(get(c, "total", 0)),
+                "completed" => Int(get(c, "completed", 0)),
+                "failed" => Int(get(c, "failed", 0)),
+                "started_at" => Float64(get(c, "started_at", 0.0)),
+                "completed_at" => Float64(get(c, "completed_at", 0.0)),
+                "done" => Bool(get(snap, "done", false)),
+                "result_count" => length(results),
+                "solver" => String(get(cfg, "solver", "")),
+                "solveMethod" => String(get(cfg, "solveMethod", "")),
+                "directions" => Int(get(cfg, "directions", 0)),
+                "costSlack" => Float64(get(cfg, "costSlack", 0.0)),
+            ))
+        end
+        sort!(rows; by = r -> Float64(get(r, "started_at", 0.0)), rev = true)
+        return Dict{String,Any}("ok" => true, "campaigns" => rows)
+    finally
+        unlock(UI_MGA_LOCK)
+    end
 end
 
 function _ui_warmup_status_snapshot()

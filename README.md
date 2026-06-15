@@ -95,7 +95,7 @@ The UI has the following main workspaces:
 - **Results and Compare.** Inspect output folders under `Output/` and `Output_Batch/`, view interactive Plotly charts, and compare multiple runs side by side.
 - **Scenario Space.** Define sampled workbook/model parameters, run parallel campaigns, monitor worker progress, inspect system-cost versus CO2-price scatter plots, and use the Analysis sheet for PRIM-style scenario discovery and rank-correlation global sensitivity analysis.
 - **Scenario Explorer.** Browse workbook sheets, technology dependencies, coupled sectors, profiles, policies, and flow details directly from the model input data.
-- **MGA.** Configure model-generated alternatives with a system-cost slack and parallel directional exploration to prepare diverse near-optimal system-configuration candidates.
+- **MGA.** Configure model-generated alternatives with a system-cost slack and parallel directional exploration, watch baseline / seed / ORACLE refinement solves stream in live on the Progress tab, then inspect the Results tab: certificate cards, slack-vs-diversity scatter, alternatives table, and an *Investments across alternatives* panel with a min/max envelope chart and ranked low-regret + high-volatility tables that summarise which technologies every near-optimal pathway agrees on and where MGA finds genuine design flexibility. Past campaigns are listed in the sidebar and can be reloaded with one click.
 
 All results charts are interactive (zoom, pan, click-to-toggle legend, save-as-PNG):
 

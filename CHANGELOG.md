@@ -15,3 +15,10 @@ All notable changes to IESA-Opt.jl are recorded here. The format follows
 - Unit and smoke tests for package loading, data reading, derived parameters,
   data writing, solver factories, and model helpers.
 - Default input workbook at `data/default_data.xlsx`.
+- MGA Results tab now includes an *Investments across alternatives* panel with
+  a min/max envelope chart per technology (color-coded by category, with a
+  baseline diamond marker) and ranked low-regret + high-volatility tables. The
+  hybrid ORACLE solver records each alternative's full per-technology
+  investment decisions (`techStock` + `cap_investments`), and the campaign
+  result aggregates them into `investmentSpread` so the same data is available
+  via `/api/mga/result/{id}` for external post-processing.

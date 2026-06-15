@@ -88,7 +88,7 @@ async function init() {
     });
     safeRun("mgaPopulateForm", () => {
       if (window.IESAMGA && typeof window.IESAMGA.populateForm === "function") {
-        window.IESAMGA.populateForm(state.options);
+        window.IESAMGA.populateForm(state.options, state.solvers);
       }
     });
     $("connectionStatus").textContent = "Local UI connected";
