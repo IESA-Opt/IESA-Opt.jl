@@ -65,6 +65,8 @@ async function init() {
   safeRun("bindTabs", bindTabs);
   safeRun("bindSections", bindSections);
   safeRun("bindControls", bindControls);
+  safeRun("bindAboutToc", bindAboutToc);
+  safeRun("bindUiSearch", bindUiSearch);
   safeRun("renderJob(null)", () => renderJob(null));
   safeRun("startStatusPolling", startStatusPolling);
   // Fire the outputs request immediately and in parallel with options/solvers so the
@@ -200,6 +202,199 @@ function switchSection(section) {
     const firstVisible = document.querySelector(`.tab-button[data-section="${section}"]`);
     if (firstVisible) switchTab(firstVisible.dataset.tab);
   }
+}
+
+// ---------------------------------------------------------------------------
+// About tab: build a sticky table-of-contents from the H3/H4 headings.
+// ---------------------------------------------------------------------------
+function _slugify(text) {
+  return String(text || "").toLowerCase().replace(/[^\w\s-]/g, "").trim().replace(/\s+/g, "-").replace(/-+/g, "-") || "section";
+}
+function bindAboutToc() {
+  const aboutPage = document.querySelector("#tab-about .about-page");
+  const toc = document.getElementById("aboutToc");
+  if (!aboutPage || !toc) return;
+  const headings = aboutPage.querySelectorAll("h2, h3, h4");
+  if (!headings.length) { toc.innerHTML = '<p class="about-toc-empty">No sections found.</p>'; return; }
+  const used = new Set();
+  const items = [];
+  headings.forEach(h => {
+    if (h.tagName === "H2") return; // skip the page title; sidebar lists subsections only
+    if (!h.id) {
+      const base = "about-" + _slugify(h.textContent);
+      let id = base, i = 2;
+      while (used.has(id)) { id = base + "-" + i; i++; }
+      h.id = id;
+    }
+    used.add(h.id);
+    items.push({ id: h.id, text: (h.textContent || "").trim(), level: h.tagName.toLowerCase() });
+  });
+  toc.innerHTML = items.map(it => `<a href="#${it.id}" data-toc-target="${it.id}" class="level-${it.level}">${escapeHtml(it.text)}</a>`).join("");
+  const links = toc.querySelectorAll("a");
+  links.forEach(a => a.addEventListener("click", e => {
+    e.preventDefault();
+    const id = a.dataset.tocTarget;
+    const target = document.getElementById(id);
+    if (!target) return;
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    links.forEach(x => x.classList.toggle("active", x === a));
+    history.replaceState(null, "", "#" + id);
+  }));
+}
+
+// ---------------------------------------------------------------------------
+// Global UI search: index workspaces, tabs, and About reference; navigate.
+// ---------------------------------------------------------------------------
+function bindUiSearch() {
+  const button = $("uiSearchButton");
+  const overlay = $("uiSearchOverlay");
+  const input = $("uiSearchInput");
+  const results = $("uiSearchResults");
+  if (!button || !overlay || !input || !results) return;
+
+  const sectionLabels = {};
+  document.querySelectorAll(".section-button").forEach(b => { sectionLabels[b.dataset.section] = (b.textContent || "").trim(); });
+
+  const index = [];
+  document.querySelectorAll(".section-button").forEach(b => {
+    index.push({ kind: "section", label: (b.textContent || "").trim(), hint: "Workspace", section: b.dataset.section });
+  });
+  document.querySelectorAll(".tab-button").forEach(b => {
+    const section = b.dataset.section;
+    const sectionLabel = sectionLabels[section] || section;
+    index.push({ kind: "tab", label: (b.textContent || "").trim(), hint: sectionLabel + " workspace", section, tab: b.dataset.tab });
+  });
+  const aboutPage = document.querySelector("#tab-about .about-page");
+  if (aboutPage) {
+    let currentH3 = null, currentH4 = null;
+    aboutPage.querySelectorAll("h3, h4, li").forEach(el => {
+      if (el.tagName === "H3") { currentH3 = el; currentH4 = null; index.push({ kind: "about-section", label: (el.textContent || "").trim(), hint: "About > Section", section: "about", tab: "about", anchor: el.id }); }
+      else if (el.tagName === "H4") { currentH4 = el; const ctx = currentH3 ? (currentH3.textContent || "").trim() : "About"; index.push({ kind: "about-subsection", label: (el.textContent || "").trim(), hint: "About > " + ctx, section: "about", tab: "about", anchor: el.id }); }
+      else if (el.tagName === "LI" && el.closest(".about-list")) {
+        const strong = el.querySelector("strong");
+        if (!strong) return;
+        const heading = currentH4 || currentH3;
+        const ctx = heading ? (heading.textContent || "").trim() : "About";
+        const detail = (el.textContent || "").trim().replace(/\s+/g, " ");
+        index.push({ kind: "about-item", label: (strong.textContent || "").trim(), hint: "About > " + ctx, section: "about", tab: "about", anchor: heading ? heading.id : "", detail });
+      }
+    });
+  }
+
+  let activeIdx = 0, flatMatches = [];
+
+  const KIND_LABELS = { section: "Workspace", tab: "Tab", "about-section": "About", "about-subsection": "About", "about-item": "About" };
+  const KIND_CLASS = { section: "section", tab: "tab", "about-section": "about", "about-subsection": "about", "about-item": "about" };
+
+  function highlight(text, q) {
+    if (!q) return escapeHtml(text);
+    const idx = text.toLowerCase().indexOf(q);
+    if (idx < 0) return escapeHtml(text);
+    return escapeHtml(text.slice(0, idx)) + "<mark>" + escapeHtml(text.slice(idx, idx + q.length)) + "</mark>" + escapeHtml(text.slice(idx + q.length));
+  }
+
+  function score(entry, q) {
+    if (!q) return 0;
+    const lbl = entry.label.toLowerCase();
+    if (lbl === q) return 0;
+    if (lbl.startsWith(q)) return 1;
+    if (lbl.includes(q)) return 2;
+    if ((entry.hint || "").toLowerCase().includes(q)) return 3;
+    if ((entry.detail || "").toLowerCase().includes(q)) return 4;
+    return 5;
+  }
+
+  function renderResults(query) {
+    activeIdx = 0;
+    const q = query.trim().toLowerCase();
+    let matches;
+    if (!q) {
+      matches = index.filter(e => e.kind === "section" || e.kind === "about-section");
+    } else {
+      matches = index.filter(e => score(e, q) < 5).sort((a, b) => score(a, q) - score(b, q)).slice(0, 60);
+    }
+    if (!matches.length) {
+      results.innerHTML = '<p class="ui-search-empty">No matches. Try another keyword.</p>';
+      flatMatches = [];
+      return;
+    }
+    const groups = { workspaces: [], tabs: [], about: [] };
+    matches.forEach(m => {
+      if (m.kind === "section") groups.workspaces.push(m);
+      else if (m.kind === "tab") groups.tabs.push(m);
+      else groups.about.push(m);
+    });
+    const order = [["workspaces", "Workspaces"], ["tabs", "Tabs"], ["about", "About reference"]];
+    flatMatches = [];
+    let html = "";
+    order.forEach(([key, label]) => {
+      const list = groups[key];
+      if (!list.length) return;
+      html += `<div class="ui-search-group"><div class="ui-search-group-label">${label}</div>`;
+      list.forEach(m => {
+        const i = flatMatches.length;
+        flatMatches.push(m);
+        html += `<button class="ui-search-result" data-idx="${i}" type="button"><span class="ui-search-result-kind ${KIND_CLASS[m.kind]}">${KIND_LABELS[m.kind]}</span><span class="ui-search-result-main"><span class="ui-search-result-label">${highlight(m.label, q)}</span><span class="ui-search-result-hint">${escapeHtml(m.hint || "")}</span></span><span class="ui-search-result-arrow">&rarr;</span></button>`;
+      });
+      html += "</div>";
+    });
+    results.innerHTML = html;
+    results.querySelectorAll(".ui-search-result").forEach((el, i) => {
+      el.addEventListener("click", () => navigate(flatMatches[i]));
+      el.addEventListener("mouseenter", () => setActive(i));
+    });
+    setActive(0);
+  }
+
+  function setActive(i) {
+    const nodes = results.querySelectorAll(".ui-search-result");
+    if (!nodes.length) return;
+    activeIdx = ((i % nodes.length) + nodes.length) % nodes.length;
+    nodes.forEach((el, idx) => el.classList.toggle("active", idx === activeIdx));
+    const active = nodes[activeIdx];
+    if (active) active.scrollIntoView({ block: "nearest" });
+  }
+
+  function navigate(entry) {
+    if (!entry) return;
+    close();
+    if (entry.section) switchSection(entry.section);
+    if (entry.tab) switchTab(entry.tab);
+    if (entry.anchor) {
+      window.requestAnimationFrame(() => {
+        const el = document.getElementById(entry.anchor);
+        if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+      });
+    }
+  }
+
+  function open() {
+    overlay.removeAttribute("hidden");
+    input.value = "";
+    renderResults("");
+    window.requestAnimationFrame(() => { input.focus(); input.select(); });
+  }
+  function close() {
+    overlay.setAttribute("hidden", "");
+  }
+
+  button.addEventListener("click", open);
+  overlay.querySelectorAll("[data-search-close]").forEach(el => el.addEventListener("click", close));
+  input.addEventListener("input", () => renderResults(input.value));
+  input.addEventListener("keydown", e => {
+    if (e.key === "Escape") { e.preventDefault(); close(); }
+    else if (e.key === "ArrowDown") { e.preventDefault(); setActive(activeIdx + 1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive(activeIdx - 1); }
+    else if (e.key === "Enter") { e.preventDefault(); if (flatMatches[activeIdx]) navigate(flatMatches[activeIdx]); }
+  });
+  document.addEventListener("keydown", e => {
+    if ((e.key === "k" || e.key === "K") && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      if (overlay.hasAttribute("hidden")) open(); else close();
+    } else if (e.key === "Escape" && !overlay.hasAttribute("hidden")) {
+      close();
+    }
+  });
 }
 
 function bindControls() {

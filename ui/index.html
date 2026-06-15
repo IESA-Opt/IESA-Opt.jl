@@ -6,7 +6,7 @@
   <title>IESA-Opt Runner</title>
   <link rel="icon" type="image/png" href="/assets/iesa-opt-logo-rect.png">
   <link rel="apple-touch-icon" href="/assets/iesa-opt-logo-rect.png">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=topbar-search-20260615">
 </head>
 <body>
   <div id="connectionBanner" class="conn-banner" role="status" aria-live="polite" aria-hidden="true">
@@ -17,8 +17,13 @@
       <img src="/assets/iesa-opt-logo.png" alt="IESA-Opt">
       <div><h1>IESA-Opt Runner</h1><p id="connectionStatus">Starting local session</p></div>
     </div>
-    <div class="topbar-status">
-      <div id="juliaStatus" class="status-pill warming" title="Julia is starting up"><span class="status-dot"></span><span class="status-label">Starting Julia…</span></div>
+    <div class="topbar-tools" aria-label="App status and search">
+      <div id="juliaStatus" class="status-pill compact warming" title="Julia is starting up"><span class="status-dot"></span><span class="status-label">Starting Julia…</span></div>
+      <button id="uiSearchButton" class="topbar-search-button" type="button" aria-haspopup="dialog" aria-controls="uiSearchOverlay" title="Search the UI (Ctrl+K)">
+        <span class="topbar-search-icon" aria-hidden="true">&#9906;</span>
+        <span class="topbar-search-text">Search the UI&hellip;</span>
+        <kbd class="topbar-search-kbd">Ctrl K</kbd>
+      </button>
     </div>
   </header>
 
@@ -803,7 +808,12 @@
     </section>
 
     <section id="tab-about" class="tab-panel">
-      <section class="about-page panel">
+      <div class="about-layout">
+        <aside class="about-sidebar panel" aria-label="On this page">
+          <p class="about-sidebar-eyebrow">On this page</p>
+          <nav id="aboutToc" class="about-toc" aria-label="About contents"></nav>
+        </aside>
+        <section class="about-page panel">
         <img src="/assets/iesa-opt-logo.png" alt="IESA-Opt" class="about-logo">
         <h2>IESA-Opt.jl</h2>
         <p>IESA-Opt.jl is a Julia/JuMP implementation of the IESA-Opt integrated energy system model. It supports transition studies with annual investment decisions, hourly or representative time-slice operation, technology stock evolution, energy balances, policy constraints, and solver-backed optimization.</p>
@@ -1057,10 +1067,27 @@
         <h3>About tab</h3>
         <p>This page. Use the links above to reach the source code and the full documentation.</p>
       </section>
+      </div>
     </section>
   </main>
+  <div id="uiSearchOverlay" class="ui-search-overlay" hidden role="presentation">
+    <div class="ui-search-backdrop" data-search-close="true" aria-hidden="true"></div>
+    <div class="ui-search-modal" role="dialog" aria-modal="true" aria-label="Search the UI">
+      <div class="ui-search-input-row">
+        <span class="ui-search-modal-icon" aria-hidden="true">&#9906;</span>
+        <input id="uiSearchInput" type="search" placeholder="Search workspaces, tabs, and About reference&hellip;" autocomplete="off" spellcheck="false" aria-label="Search">
+        <button id="uiSearchClose" class="ui-search-close" type="button" data-search-close="true" aria-label="Close search">&times;</button>
+      </div>
+      <div id="uiSearchResults" class="ui-search-results" role="listbox" aria-label="Search results"></div>
+      <div class="ui-search-footer">
+        <span><kbd>&uarr;</kbd><kbd>&darr;</kbd> navigate</span>
+        <span><kbd>Enter</kbd> open</span>
+        <span><kbd>Esc</kbd> close</span>
+      </div>
+    </div>
+  </div>
   <script src="/vendor/plotly-full.min.js"></script>
-  <script src="/app.js"></script>
+  <script src="/app.js?v=topbar-search-20260615"></script>
   <script src="/app.scenario.js"></script>
   <script src="/app.explorer.js"></script>
   <script src="/app.mga.js?v=mga-investments-20260614"></script>
