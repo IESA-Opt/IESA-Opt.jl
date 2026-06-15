@@ -817,8 +817,8 @@
         <p>The dashboard is organised into <strong>sections</strong> along the very top &mdash; each section is its own workspace with its own set of tabs underneath:</p>
         <ul class="about-list">
           <li><strong>Single run</strong> &mdash; the default workspace. Tabs: <em>Setup</em>, <em>Progress</em>, <em>Results</em>. Used to launch one optimisation, watch it solve, and inspect the resulting output folder.</li>
-          <li><strong>Scenario Space</strong> &mdash; the campaign workspace. Tabs: <em>Parameter Space</em> (define the parameter space + sample variants), <em>Progress</em> (live campaign progress, Phase 3 hookup pending), <em>Results</em> (aggregated cross-variant analytics, Phase 4/5 hookup pending).</li>
-          <li><strong>Scenario explorer</strong> &mdash; workbook and generated-model inspection. Tabs: <em>Model browser</em> and <em>Technology dependencies</em>.</li>
+          <li><strong>Scenario Space</strong> &mdash; the campaign workspace for sampling-based uncertainty studies. Tabs: <em>Parameter Space</em> (define the parameter space + sample variants), <em>Progress</em> (live multi-worker campaign progress with pause / resume / stop controls), <em>Results</em> (aggregated cross-variant analytics with a campaigns sidebar), <em>Analysis</em> (Scenario Discovery + global sensitivity analysis).</li>
+          <li><strong>Scenario explorer</strong> &mdash; workbook and generated-model inspection. Tabs: <em>Input overview</em>, <em>Technology atlas</em>, <em>Cost assumptions</em>, <em>Activity map</em>, <em>Coupled Sectors</em>, <em>Flow details</em>, <em>Profiles 3D</em>, <em>Policy</em>, <em>Model browser</em>, <em>Technology dependencies</em>.</li>
           <li><strong>MGA</strong> &mdash; solver-backed modelling-to-generate-alternatives campaigns with near-optimal cost caps and ORACLE refinement. Tabs: <em>Configure</em>, <em>Progress</em>, <em>Results</em>.</li>
           <li><strong>About</strong> &mdash; this reference page.</li>
         </ul>
@@ -881,6 +881,131 @@
           <li><strong>Supply / Demand</strong> &mdash; positive flows above zero, negative flows mirrored below, with optional net line.</li>
         </ul>
         <p>In compare mode the System Costs and Solve Time charts switch to a multi-run stacked view, and the comparison panel shows side-by-side timing and cost-component tables. The single-run-only panels (CO<sub>2</sub> Price, Activity Prices, Power Capacities, Hourly Dispatch, Flexibility Analysis, Emissions, Supply/Demand) are hidden because they refer to one run only &mdash; click a single row in the sidebar to bring them back.</p>
+
+        <h3>Scenario Space workspace</h3>
+        <p>Scenario Space sweeps an entire parameter space rather than a single point. You define which workbook inputs are uncertain (and over what range), pick a sampling method, and the workspace launches one IESA-Opt solve per sampled variant in parallel. The four tabs split the lifecycle: <em>Parameter Space</em> (set up + validate the design), <em>Progress</em> (watch many workers solve), <em>Results</em> (browse the cross-variant outcome space), and <em>Analysis</em> (Scenario Discovery and global sensitivity analysis on the completed runs).</p>
+
+        <h4>Parameter Space tab</h4>
+        <p>The setup screen for a campaign. Mirrors Single Run for the model definition (workbook, periods, time-slicing, representative days, extreme periods, reporting flags, advanced settings) but adds the campaign-level controls.</p>
+        <ul class="about-list">
+          <li><strong>Solver and Solve method</strong> &mdash; same options as Single Run; whichever solver is picked here is used by every variant in the campaign.</li>
+          <li><strong>Total CPU threads</strong> + <strong>Threads per worker</strong> &mdash; the global thread budget is split across <em>Parallel workers</em> (one IESA-Opt solve per worker). Threads per worker is computed automatically as <code>floor(threads &divide; workers)</code>.</li>
+          <li><strong>Campaign name</strong> &mdash; folder name under <code>Output_Batch/</code> where every variant&apos;s output, the consolidated <code>campaign.json</code>, and the validated parameter space CSV are written.</li>
+          <li><strong>GSA method</strong> &mdash; selects the global sensitivity analysis pipeline that the <em>Analysis</em> tab will run on the completed campaign: <em>rank</em> (Spearman rank correlations, sampled with Latin hypercube), <em>moment_delta</em> (Borgonovo-style moment-independent delta indices, also LHS), <em>morris</em> (Morris elementary effects with mu / mu* / sigma metrics, requires Morris sampling), or <em>sobol</em> (first-order Sobol variance indices, requires Sobol sampling). The hint line under the dropdown explains the implied sampler.</li>
+          <li><strong>Sampling method</strong> &mdash; <em>Latin hypercube</em>, <em>Morris</em>, <em>Sobol</em>, or <em>Factorial</em>. Locked to a compatible choice when the GSA method requires a specific sampler.</li>
+          <li><strong>Number of variants</strong> + <strong>Random seed</strong> &mdash; controls how many points are drawn (and how many implied IESA-Opt evaluations the chosen GSA will perform &mdash; the read-only <em>Implied evaluations</em> field shows the actual count, which exceeds <em>Number of variants</em> for Morris and Sobol).</li>
+          <li><strong>Parallel workers</strong> &mdash; how many variants are solved concurrently. Each worker gets <em>Threads per worker</em> threads.</li>
+          <li><strong>Parameter Space table</strong> &mdash; one row per uncertain input, with sheet/row/column references, distribution type, lower/upper bounds (or list values), and an optional override label. Use <em>+ Add row</em> / <em>Duplicate</em> / <em>Remove selected</em> to edit, <em>Validate</em> to type-check the bounds against the workbook, and <em>Save / Load parameter space</em> to round-trip CSV definitions.</li>
+          <li><strong>Preview sample</strong> &mdash; renders the first 20 sampled variants in a table without solving anything &mdash; quick sanity check that bounds and distributions are correct.</li>
+          <li><strong>Run campaign</strong> &mdash; kicks off the campaign and switches to the Progress tab automatically.</li>
+        </ul>
+
+        <h4>Progress tab</h4>
+        <p>Live status for the campaign that is currently solving (or the last one started). Designed to handle dozens of variants finishing at different rates.</p>
+        <ul class="about-list">
+          <li><strong>Status pill + headline</strong> &mdash; campaign name, state (queued / running / paused / done / stopped / failed) and the projected finish time given current throughput.</li>
+          <li><strong>Campaign stats</strong> &mdash; Total / Done / Running / Failed / Queued / Workers counters that update in real time.</li>
+          <li><strong>Progress bar</strong> &mdash; green portion is variants that completed successfully; the red sliver to the right of it is variants that failed. Footer shows percent done and elapsed time.</li>
+          <li><strong>Pause / Resume / Stop</strong> &mdash; <em>Pause</em> finishes any variants that are already running but stops launching new ones; <em>Resume</em> picks up where Pause left off; <em>Stop</em> finishes running variants and ends the campaign (cannot be resumed). <em>Start demo</em> animates a fake campaign to preview the layout without solving.</li>
+          <li><strong>Campaign phases</strong> &mdash; per-phase tiles (sample, baseline, solve, finalize) showing what fraction of each phase is complete.</li>
+          <li><strong>Workers grid</strong> &mdash; one card per worker with a coloured dot (running / optimal / failed / idle) and the variant currently being solved on that worker.</li>
+          <li><strong>Campaign error</strong> &mdash; if the campaign task itself raised an exception, the full Julia backtrace is shown here. Hidden when the campaign succeeds.</li>
+          <li><strong>Recent failures</strong> &mdash; per-variant errors, most-recent first, click to copy. Hidden when no variants failed.</li>
+        </ul>
+
+        <h4>Results tab</h4>
+        <p>Browses the outcome space of every completed variant in a chosen campaign. The left sidebar lists every Scenario Space campaign captured by the server (newest first); click one to load its variants. The main panel shows the cross-variant outcome scatter:</p>
+        <ul class="about-list">
+          <li><strong>Cost &times; CO<sub>2</sub> price scatter</strong> &mdash; one marker per completed variant; X-axis is total system cost, Y-axis is the average CO<sub>2</sub> price. Hover for the variant ID and the sampled parameter values that produced that point.</li>
+          <li><strong>Refresh</strong> &mdash; rescans <code>Output_Batch/</code> for new campaigns without reloading the page.</li>
+        </ul>
+
+        <h4>Analysis tab</h4>
+        <p>Two complementary post-processing tools that run on the campaign selected in <em>Results</em>. Both need completed variants with sampled parameter values, so wait for the campaign to finish before opening this tab.</p>
+        <ul class="about-list">
+          <li><strong>Scenario Discovery</strong> &mdash; PRIM-style box discovery on the cost / CO<sub>2</sub>-price outcome of interest. The chart shows the discovered boxes (sub-regions of the parameter space with concentrated outcomes), and the table lists each box&apos;s constraints, density, coverage, and the parameters that bound it.</li>
+          <li><strong>Global sensitivity analysis</strong> &mdash; ranks input parameters by their association with system cost and CO<sub>2</sub> price using the GSA method that was chosen in <em>Parameter Space</em> (Spearman rank, moment-independent delta, Morris elementary effects, or first-order Sobol). The chart shows ranked metrics; the table provides the underlying numerical values per parameter.</li>
+        </ul>
+
+        <h3>Scenario Explorer workspace</h3>
+        <p>The Scenario Explorer is read-only. It does not solve anything &mdash; it is a structured way to inspect a workbook (the static inputs) and the JuMP model that IESA-Opt would build from it (the generated structure). Useful when debugging input data, comparing two workbooks, or understanding how the optimisation is wired together. The ten tabs are independent; switch between them freely. Most tabs offer a <em>Scenario database</em> + <em>Period</em> selector to scope the view.</p>
+
+        <h4>Input overview tab</h4>
+        <p>The starting point. Pick a workbook and a period, then click <em>Refresh overview</em> to summarise the workbook.</p>
+        <ul class="about-list">
+          <li><strong>Atlas metric cards</strong> &mdash; high-level counts (sheets, technologies, activities, sectors, time periods, etc.) in the chosen workbook.</li>
+          <li><strong>Workbook shape</strong> &mdash; bubble chart of every sheet, sized by row count, so you can spot which sheets carry most of the data.</li>
+          <li><strong>Model sets</strong> &mdash; counts of each loaded model dimension (technologies, activities, sectors, regions, periods, time slices).</li>
+          <li><strong>Sheets</strong> &mdash; full inventory table with row/column counts per sheet.</li>
+        </ul>
+
+        <h4>Technology atlas tab</h4>
+        <p>Population view of the technologies in the workbook.</p>
+        <ul class="about-list">
+          <li><strong>Sector / category composition</strong> &mdash; treemap-style breakdown of technologies by sector and category.</li>
+          <li><strong>Technology economics</strong> &mdash; scatter of technologies by investment cost vs. variable cost (or efficiency, depending on availability), giving a quick read on the cost frontier.</li>
+          <li><strong>Technology rows</strong> &mdash; sortable table of the highest-investment-cost technologies with the underlying numbers.</li>
+        </ul>
+
+        <h4>Cost assumptions tab</h4>
+        <p>Cost-side detail to complement the Technology atlas.</p>
+        <ul class="about-list">
+          <li><strong>Annualized cost stack</strong> &mdash; bar chart of annualized investment / fixed-O&amp;M / variable / fuel cost per technology or sector.</li>
+          <li><strong>Cost assumptions</strong> &mdash; full per-technology cost row table.</li>
+        </ul>
+
+        <h4>Activity map tab</h4>
+        <p>Activities are the energy / material flows the model balances (electricity, hydrogen, methane, freight tonne-km, etc.).</p>
+        <ul class="about-list">
+          <li><strong>Sector / activity balance</strong> &mdash; heatmap of which sectors produce or consume which activities, magnitude-coloured.</li>
+          <li><strong>Activity demand</strong> &mdash; bar chart of the largest net demands.</li>
+          <li><strong>Balance rows</strong> &mdash; the largest sector / activity coefficients with the technologies they come from.</li>
+        </ul>
+
+        <h4>Coupled Sectors tab</h4>
+        <p>Higher-level system view: which sectors are linked through shared activities. Renders the cross-sector activity graph, with a legend showing the activity classes and a table of the technology paths between sector pairs.</p>
+
+        <h4>Flow details tab</h4>
+        <p>Per-technology / per-activity drill-down. Type a search query in the sidebar; the search results list every match. Click one to see:</p>
+        <ul class="about-list">
+          <li><strong>Detail graph</strong> &mdash; a small directed graph centred on the selected entity, showing every input and every output with edge labels for the coefficients.</li>
+          <li><strong>Detail rows</strong> &mdash; the same information as a table (Side, Group, Kind, Name, Coefficient).</li>
+        </ul>
+
+        <h4>Profiles 3D tab</h4>
+        <p>Time-of-use behaviour of the hourly profiles in the workbook (demand profiles, renewables availability, EV charging, etc.).</p>
+        <ul class="about-list">
+          <li><strong>Hourly profile surface</strong> &mdash; 3D surface of one selected profile across hour-of-day &times; day-of-year, picked via the dropdown above the chart.</li>
+          <li><strong>Monthly profile fingerprint</strong> &mdash; heatmap fingerprint of every profile aggregated by month &times; hour-of-day, useful for spotting seasonal patterns.</li>
+          <li><strong>Profile rows</strong> &mdash; per-profile summary table with min / max / mean / variability.</li>
+        </ul>
+
+        <h4>Policy tab</h4>
+        <p>Policy and target inputs that shape the optimisation.</p>
+        <ul class="about-list">
+          <li><strong>Policy constraint catalog</strong> &mdash; every policy constraint defined in the workbook with its scope and bounds.</li>
+          <li><strong>Policy targets</strong> &mdash; bar chart of emission and policy targets across periods.</li>
+          <li><strong>Target rows</strong> &mdash; the same targets in tabular form.</li>
+        </ul>
+
+        <h4>Model browser tab</h4>
+        <p>Builds an IESA-Opt JuMP model from the chosen workbook (without solving) and shows what is inside.</p>
+        <ul class="about-list">
+          <li><strong>Model shape</strong> &mdash; <em>Time-slice preview</em> (representative days), <em>Annual</em>, or <em>Full-hourly</em>. Time-slice preview is the fastest way to inspect a representative model.</li>
+          <li><strong>Representative days</strong> + <strong>Hours per day</strong> &mdash; the temporal resolution used when the time-slice preview is selected.</li>
+          <li><strong>Generate browser</strong> &mdash; runs the model build and populates the right-hand stats (rows, columns, build time).</li>
+          <li><strong>Variables and constraints</strong> &mdash; table of every JuMP variable and constraint family with row counts. Use the <em>Show</em> filter to restrict to variables or constraints, and the <em>Search</em> field to find a family by name.</li>
+        </ul>
+
+        <h4>Technology dependencies tab</h4>
+        <p>Macro-level system flow diagram: which technologies feed which activities, and which activities feed which technologies.</p>
+        <ul class="about-list">
+          <li><strong>Diagram detail</strong> &mdash; <em>Sector / category groups</em> aggregates technologies into bundles for a system-level view, while <em>Individual technologies</em> shows every technology as its own node (use sparingly &mdash; the graph gets dense fast).</li>
+          <li><strong>Max activities</strong> &mdash; caps the number of activities included in the diagram, ranked by importance, so the graph stays readable.</li>
+          <li><strong>Sectors / Subsectors / Technology categories</strong> filters &mdash; restrict the diagram to a subset; uncheck what you do not need.</li>
+          <li><strong>Refresh graph</strong> &mdash; re-renders the diagram with the current filters.</li>
+          <li><strong>Activity rows</strong> &mdash; companion table listing each activity along with its producers, consumers, and edge counts.</li>
+        </ul>
 
         <h3>MGA workspace</h3>
         <p>Model-Generated Alternatives (MGA) explore <em>near-optimal</em> system designs &mdash; configurations whose total system cost stays within a user-chosen slack of the least-cost optimum, but whose technology mix differs. Useful when the least-cost objective alone cannot capture every political, environmental, siting, or implementation concern. The implementation is solver-backed: every alternative is a real LP over the original IESA-Opt constraints plus a system-cost cap, and ORACLE-style closest-point refinements target the largest unexplored gap in a reduced design space (see the <a href="https://iesa-opt.github.io/IESA-Opt.jl/v0.1/mga/" target="_blank" rel="noreferrer">MGA documentation</a> for the formulation).</p>
