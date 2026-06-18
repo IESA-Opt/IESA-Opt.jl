@@ -28,6 +28,55 @@
     return n.toLocaleString(undefined, { maximumFractionDigits: 4 });
   }
 
+  function explorerOpaqueStroke(color) {
+    const m = String(color || "").match(/rgba?\(([^)]+)\)/i);
+    if (!m) return color || "#1d5f8f";
+    const parts = m[1].split(",").map(part => Number(part.trim()));
+    return parts.length >= 3 && parts.slice(0, 3).every(Number.isFinite) ? `rgb(${parts[0]}, ${parts[1]}, ${parts[2]})` : color;
+  }
+
+  function applyExplorerFlowAnimation(container) {
+    if (!container) return;
+    container.querySelectorAll(".explorer-flow-pulse").forEach(path => path.remove());
+    const paths = Array.from(container.querySelectorAll(".scatterlayer .trace path.js-line"))
+      .filter(path => !path.closest(".explorer-flow-pulse") && path.getAttribute("d"));
+    const delay = "0s";
+    const duration = "3.2s";
+    paths.slice(0, 260).forEach(path => {
+      const style = getComputedStyle(path);
+      const pulse = path.cloneNode(false);
+      const width = Number.parseFloat(style.strokeWidth || path.getAttribute("stroke-width") || "2");
+      pulse.removeAttribute("style");
+      pulse.classList.add("explorer-flow-pulse", "animated");
+      pulse.setAttribute("pathLength", "100");
+      pulse.setAttribute("stroke", explorerOpaqueStroke(style.stroke || path.getAttribute("stroke") || "#1d5f8f"));
+      pulse.setAttribute("stroke-width", String(Math.max(1.2, Math.min(4.8, width * 0.72))));
+      pulse.setAttribute("stroke-opacity", "0.92");
+      pulse.setAttribute("stroke-dasharray", "16 84");
+      pulse.setAttribute("stroke-dashoffset", "100");
+      pulse.setAttribute("fill", "none");
+      pulse.style.strokeDasharray = "16 84";
+      pulse.style.strokeDashoffset = "100";
+      pulse.style.animation = `regional-flow-travel ${duration} linear infinite`;
+      pulse.style.animationDelay = delay;
+      path.parentNode && path.parentNode.appendChild(pulse);
+    });
+  }
+
+  function applyDetailFlowLineClasses(container, incomingCount, outgoingCount) {
+    if (!container) return;
+    container.querySelectorAll(".explorer-flow-pulse").forEach(path => path.remove());
+    const paths = Array.from(container.querySelectorAll(".scatterlayer .trace path.js-line"));
+    paths.forEach(path => {
+      path.classList.remove("detail-flow-in", "detail-flow-out");
+      path.style.removeProperty("stroke-dasharray");
+      path.style.removeProperty("stroke-dashoffset");
+      path.style.removeProperty("animation");
+    });
+    paths.slice(0, incomingCount).forEach(path => path.classList.add("detail-flow-in"));
+    paths.slice(incomingCount, incomingCount + outgoingCount).forEach(path => path.classList.add("detail-flow-out"));
+  }
+
   function populateForm(options) {
     state.options = options || {};
     bindOnce();
@@ -764,7 +813,8 @@
       yaxis: { visible: false, range: [1.02, -0.02], fixedrange: true, zeroline: false, showgrid: false },
       annotations: [...headingAnnotations, ...diagram.activityAnnotations],
     };
-    window.Plotly.react(el, diagram.traces, layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+    window.Plotly.react(el, diagram.traces, layout, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] })
+      .then(() => applyExplorerFlowAnimation(el));
     const summary = $("explorerGraphSummary");
     if (summary) summary.textContent = `${fmt(diagram.techCount)} technologies, ${fmt(diagram.activityCount)} carriers/activities, ${fmt(diagram.linkCount)} flow links in ${payload.selectedPeriod}.`;
     renderLegend(flow.nodes);
@@ -792,7 +842,8 @@
       yaxis: { visible: false, range: [-1.12, 1.12], fixedrange: false, zeroline: false, showgrid: false, scaleanchor: "x", scaleratio: 1 },
       annotations: diagram.annotations,
     };
-    window.Plotly.react(el, diagram.traces, layout, { responsive: true, displaylogo: false, scrollZoom: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+    window.Plotly.react(el, diagram.traces, layout, { responsive: true, displaylogo: false, scrollZoom: true, modeBarButtonsToRemove: ["lasso2d", "select2d"] })
+      .then(() => applyExplorerFlowAnimation(el));
     const summary = $("explorerActivityGraphSummary");
     if (summary) summary.textContent = `${fmt(diagram.activities.length)} activities connected by ${fmt(diagram.techCount)} technologies and ${fmt(diagram.paths.length)} paths in ${payload.selectedPeriod}.`;
     renderActivityDependencyLegend(diagram.groups);
@@ -1006,12 +1057,12 @@
     incoming.forEach(link => {
       const node = detail.byId.get(link.source), pos = leftPositions.get(link.source);
       if (!node || !pos) return;
-      traces.push(detailLineTrace(pos, centerPosition, link, node.id));
+      traces.push(detailLineTrace(pos, centerPosition, link, node.id, "in"));
     });
     outgoing.forEach(link => {
       const node = detail.byId.get(link.target), pos = rightPositions.get(link.target);
       if (!node || !pos) return;
-      traces.push(detailLineTrace(centerPosition, pos, link, node.id));
+      traces.push(detailLineTrace(centerPosition, pos, link, node.id, "out"));
     });
     traces.push(...detailNodeTrace(leftNodes, leftPositions, "left"));
     traces.push(detailCenterTrace(center, centerPosition));
@@ -1036,7 +1087,8 @@
       xaxis: { visible: false, range: [0, 1], fixedrange: true, zeroline: false, showgrid: false },
       yaxis: { visible: false, range: [1, 0], fixedrange: true, zeroline: false, showgrid: false },
       annotations,
-    }, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] });
+    }, { responsive: true, displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"] })
+      .then(() => applyDetailFlowLineClasses(graph, incoming.length, outgoing.length));
     graph.removeAllListeners && graph.removeAllListeners("plotly_click");
     graph.on && graph.on("plotly_click", event => {
       const point = event.points && event.points[0];
@@ -1057,11 +1109,11 @@
     return positions;
   }
 
-  function detailLineTrace(from, to, link, neighborId) {
+  function detailLineTrace(from, to, link, neighborId, direction) {
     const positive = Number(link.coefficient) > 0;
     const group = link.group || detailActivityGroupName(link.activity);
-    const color = withAlpha(detailGroupColor(group, "activity"), positive ? 0.58 : 0.48);
-    const hover = `${positive ? "Output from technology" : "Input to technology"}<br><b>${escapeHtml(link.activity)}</b><br>Group: ${escapeHtml(group)}<br>${escapeHtml(link.technology)}<br>Energy balance coefficient: ${fmt(link.coefficient)}`;
+    const color = direction === "out" ? "rgba(186,58,47,0.78)" : "rgba(90,159,63,0.78)";
+    const hover = `${positive ? "Output from technology" : "Input to technology"}<br><b>${escapeHtml(link.activity)}</b><br>Group: ${escapeHtml(group)}<br>${escapeHtml(link.technology)}<br>Flow value: ${fmt(Math.abs(Number(link.value) || 0))}<br>Energy balance coefficient: ${fmt(link.coefficient)}`;
     return { type: "scatter", mode: "lines", x: [from.x, to.x], y: [from.y, to.y], hoverinfo: "text", text: [hover, hover], customdata: [{ id: neighborId }, { id: neighborId }], line: { color, width: Math.max(1.2, Math.min(8, 1.2 + Math.log1p(Number(link.value) || 0) * 2.2)) }, showlegend: false };
   }
 

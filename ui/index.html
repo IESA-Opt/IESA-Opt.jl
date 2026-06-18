@@ -6,7 +6,8 @@
   <title>IESA-Opt Runner</title>
   <link rel="icon" type="image/png" href="/assets/iesa-opt-logo-rect.png">
   <link rel="apple-touch-icon" href="/assets/iesa-opt-logo-rect.png">
-  <link rel="stylesheet" href="/styles.css?v=help-toggle-switch-20260618">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/styles.css?v=map-node-anchor-20260619">
 </head>
 <body>
   <div id="connectionBanner" class="conn-banner" role="status" aria-live="polite" aria-hidden="true">
@@ -126,7 +127,7 @@
                 <label class="field checkbox" data-help="Requests infeasibility diagnostics when a run fails.\nUseful for debugging constraints and bounds." data-help-more="When enabled, the backend attempts violation reporting or IIS-style diagnostics depending on solver support. It can add post-solve time but is valuable when a model is infeasible or nearly infeasible."><input id="showViolations" type="checkbox"><span>Show violations</span></label>
                 <label class="field checkbox" data-help="Forces extreme periods into time slicing.\nIt keeps rare operating days from being missed." data-help-more="When supported by the workbook profiles, the clustering step reserves selected extreme days before filling the remaining representative-day set. This only affects representative-day time-slice runs."><input id="extremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
                 <label class="field checkbox" data-help="Links representative-day boundaries for ramping.\nIt reduces artificial jumps between day edges." data-help-more="Boundary ramping adds temporal consistency around representative-day transitions. It can improve operating realism in time-slice mode, with a modest increase in constraint count."><input id="boundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
-                <label class="field checkbox" data-help="Enables the MultiRegion regional-cap extension.\nOff leaves the core model unchanged." data-help-more="When on, Julia adds MultiRegion constraints: grouped regional techStock caps, interconnection export/import and HVNS caps, CCUS inside/outside caps, imported hydrogen/ammonia/natural-gas caps, ammonia wCCUS/eSMR caps, Power_to_EU and Power_from_EU techUse caps, plus special nuclear and geothermal stock caps. It also applies the MultiRegion stock-bound data convention where blank cells act as zero bounds and -1 disables a stock bound. When off, none of these constraints or stock-bound conventions are applied; md.params.extensions stays empty for this extension."><input id="multiRegionToggle" type="checkbox"><span>MultiRegion</span></label>
+                <label class="field checkbox" data-help="Enables the MultiRegion regional-cap extension.\nOff leaves the core model unchanged." data-help-more="When on, Julia adds MultiRegion constraints: grouped regional techStock caps, regional techUse caps discovered from the workbook, interconnection export/import and HVNS caps, CCUS inside/outside caps, imported hydrogen/ammonia/natural-gas caps, ammonia wCCUS/eSMR caps, plus special nuclear and geothermal stock caps. It also applies the MultiRegion stock-bound data convention where blank cells act as zero bounds and -1 disables a stock bound. When off, none of these constraints or stock-bound conventions are applied; md.params.extensions stays empty for this extension."><input id="multiRegionToggle" type="checkbox"><span>MultiRegion</span></label>
                 <label class="field" data-help="Chooses which constraint group to build or inspect.\nUsually leave this at the default group." data-help-more="Constraint groups are backend-defined model subsets or diagnostics scopes. The selected value is submitted with the run and can be used by the server to control generation or reporting behavior."><span>Constraint group</span><select id="constraintGroup"></select></label>
                 <label class="field" data-help="Controls the output folder name.\nAutomatic creates a timestamped run folder." data-help-more="Automatic names the output using the run configuration and current timestamp. Custom lets you type a folder-friendly name for easier comparison and later loading."><span>Output name</span><select id="outputMode"><option value="automatic">Automatic</option><option value="custom">Custom</option></select></label>
                 <label id="outputNameWrap" class="field hidden" data-help="Sets the custom output folder suffix.\nUse a short, filesystem-safe name." data-help-more="This value is sent to the backend when Output name is Custom. It should describe the run without relying on spaces or special characters."><span>Custom output folder</span><input id="outputName" type="text" placeholder="my_run_name"></label>
@@ -154,17 +155,36 @@
           <div id="outputList" class="output-list empty-state">Loading outputs.</div>
         </aside>
         <section class="results-main">
-          <section id="comparisonPanel" class="panel span-2 comparison-panel hidden">
+          <div class="results-subpage-nav span-2" role="tablist" aria-label="Results pages">
+            <button class="results-subpage-button active" type="button" data-results-subpage="summary">Costs &amp; solve</button>
+            <button class="results-subpage-button" type="button" data-results-subpage="map">Regional map</button>
+            <button class="results-subpage-button" type="button" data-results-subpage="figures">Other figures</button>
+          </div>
+          <section id="comparisonPanel" class="panel span-2 comparison-panel hidden" data-results-page="summary">
             <div class="panel-title"><h2>Comparison</h2><span id="compareStatus" class="subtle">Select outputs in the sidebar.</span></div>
             <div class="split-tables"><div id="compareTable" class="table-wrap"></div><div id="compareCostTable" class="table-wrap"></div></div>
           </section>
-          <div id="metricGrid" class="metric-grid span-2"></div>
-          <section class="panel"><div class="panel-title"><h2>System Costs</h2><div class="panel-toolbar"><span id="resultsOutput" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="systemCostsTable">Show table</button></div></div><div id="systemCostsChart" class="bar-chart empty-state">No results loaded.</div><div id="systemCostsTable" class="table-wrap hidden"></div></section>
-          <section class="panel"><div class="panel-title"><h2>Solve Time And Solver Stats</h2><div class="panel-toolbar"><button type="button" class="toggle-table-button secondary-button" data-target="solverSettingsTable">Show table</button></div></div><div id="timingChart" class="bar-chart empty-state">No results loaded.</div><div id="solverSettingsTable" class="table-wrap hidden"></div></section>
-          <section class="panel single-only"><div class="panel-title"><h2>CO<sub>2</sub> Price</h2><div class="panel-toolbar"><span class="subtle">Shadow price of the emission cap (EUR / tCO<sub>2</sub>eq)</span><button type="button" class="toggle-table-button secondary-button" data-target="co2PriceTable">Show table</button></div></div><div id="co2PriceChart" class="bar-chart empty-state">No CO<sub>2</sub> price available.</div><div id="co2PriceTable" class="table-wrap hidden"></div></section>
-          <section class="panel single-only"><div class="panel-title"><h2>Activity Prices</h2><div class="panel-toolbar"><span class="subtle">Shadow prices of balance constraints (EUR / unit)</span><button type="button" class="toggle-table-button secondary-button" data-target="activityPricesTable">Show table</button></div></div><div id="activityPricesTable" class="table-wrap hidden empty-state">No activity prices available.</div></section>
-          <section class="panel span-2 single-only"><div class="panel-title"><h2>Power System Capacities</h2><div class="panel-toolbar"><span class="subtle">techStock filtered to power-system technologies</span><button type="button" class="toggle-table-button secondary-button" data-target="powerCapacityTable">Show table</button></div></div><div id="powerCapacityChart" class="bar-chart empty-state">No results loaded.</div><div id="powerCapacityTable" class="table-wrap hidden"></div></section>
-          <section class="panel span-2 single-only">
+          <div id="metricGrid" class="metric-grid span-2" data-results-page="summary"></div>
+          <section class="panel" data-results-page="summary"><div class="panel-title"><h2>System Costs</h2><div class="panel-toolbar"><span id="resultsOutput" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="systemCostsTable">Show table</button></div></div><div id="systemCostsChart" class="bar-chart empty-state">No results loaded.</div><div id="systemCostsTable" class="table-wrap hidden"></div></section>
+          <section class="panel" data-results-page="summary"><div class="panel-title"><h2>Solve Time And Solver Stats</h2><div class="panel-toolbar"><button type="button" class="toggle-table-button secondary-button" data-target="solverSettingsTable">Show table</button></div></div><div id="timingChart" class="bar-chart empty-state">No results loaded.</div><div id="solverSettingsTable" class="table-wrap hidden"></div></section>
+          <section id="regionalTradePanel" class="panel span-2 single-only hidden" data-results-page="map">
+            <div class="panel-title"><h2>Regional Trade Map</h2>
+              <div class="panel-toolbar">
+                <label class="field inline"><span>Metric</span><select id="regionalMapMetric"><option value="stock">Tech stock capacity</option><option value="use" selected>Net tech use flow</option></select></label>
+                <label class="field inline"><span>Commodity</span><select id="regionalMapCommodity"><option value="all">All</option></select></label>
+                <label class="field inline"><span>Period</span><select id="regionalMapPeriod"></select></label>
+                <button id="regionalMapPlay" type="button" class="secondary-button">Play</button>
+                <span id="regionalMapStatus" class="subtle"></span>
+                <button type="button" class="toggle-table-button secondary-button" data-target="regionalMapTable">Show table</button>
+              </div>
+            </div>
+            <div id="regionalMapChart" class="map-chart empty-state">No regional trade map available.</div>
+            <div id="regionalMapTable" class="table-wrap hidden"></div>
+          </section>
+          <section class="panel single-only" data-results-page="figures"><div class="panel-title"><h2>CO<sub>2</sub> Price</h2><div class="panel-toolbar"><span class="subtle">Shadow price of the emission cap (EUR / tCO<sub>2</sub>eq)</span><button type="button" class="toggle-table-button secondary-button" data-target="co2PriceTable">Show table</button></div></div><div id="co2PriceChart" class="bar-chart empty-state">No CO<sub>2</sub> price available.</div><div id="co2PriceTable" class="table-wrap hidden"></div></section>
+          <section class="panel single-only" data-results-page="figures"><div class="panel-title"><h2>Activity Prices</h2><div class="panel-toolbar"><span class="subtle">Shadow prices of balance constraints (EUR / unit)</span><button type="button" class="toggle-table-button secondary-button" data-target="activityPricesTable">Show table</button></div></div><div id="activityPricesTable" class="table-wrap hidden empty-state">No activity prices available.</div></section>
+          <section class="panel span-2 single-only" data-results-page="figures"><div class="panel-title"><h2>Power System Capacities</h2><div class="panel-toolbar"><span class="subtle">techStock filtered to power-system technologies</span><button type="button" class="toggle-table-button secondary-button" data-target="powerCapacityTable">Show table</button></div></div><div id="powerCapacityChart" class="bar-chart empty-state">No results loaded.</div><div id="powerCapacityTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only" data-results-page="figures">
             <div class="panel-title"><h2>Hourly Dispatch</h2>
               <div class="panel-toolbar">
                 <label class="field inline"><span>Node</span><select id="hourlyDispatchNode"></select></label>
@@ -177,7 +197,7 @@
             </div>
             <div id="hourlyDispatchChart" class="profile-chart empty-state">No results loaded.</div>
           </section>
-          <section class="panel span-2 single-only">
+          <section class="panel span-2 single-only" data-results-page="figures">
             <div class="panel-title"><h2>Flexibility Analysis</h2>
               <div class="panel-toolbar">
                 <label class="field inline"><span>Technology</span><select id="flexTech"></select></label>
@@ -192,8 +212,8 @@
             <div id="flexChart" class="profile-chart empty-state">No results loaded.</div>
             <div id="flexIndicatorsTable" class="table-wrap hidden"></div>
           </section>
-          <section class="panel span-2 single-only"><div class="panel-title"><h2>Emissions</h2><div class="panel-toolbar"><label class="field inline"><span>Group by</span><select id="emissionsGroupBy"><option value="activity">Activity</option><option value="sector">Sector</option><option value="subsector">Subsector</option><option value="sector_kev">KEV Sector</option><option value="category">Category</option></select></label><label class="field inline"><span>Period</span><select id="emissionsPeriod"><option value="">All</option></select></label><span id="emissionsStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="emissionsTable">Show table</button></div></div><div id="emissionsChart" class="bar-chart empty-state">No emissions data.</div><div id="emissionsTable" class="table-wrap hidden"></div></section>
-          <section class="panel span-2 single-only"><div class="panel-title"><h2>Supply / Demand by Activity</h2><div class="panel-toolbar"><label class="field inline"><span>Activity</span><select id="supplyDemandActivity"></select></label><label class="field inline"><span>Period</span><select id="supplyDemandPeriod"><option value="">All</option></select></label><span id="supplyDemandStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="supplyDemandTable">Show table</button></div></div><div id="supplyDemandChart" class="bar-chart empty-state">Select an activity to view supply and demand.</div><div id="supplyDemandTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only" data-results-page="figures"><div class="panel-title"><h2>Emissions</h2><div class="panel-toolbar"><label class="field inline"><span>Group by</span><select id="emissionsGroupBy"><option value="activity">Activity</option><option value="sector">Sector</option><option value="subsector">Subsector</option><option value="sector_kev">KEV Sector</option><option value="category">Category</option></select></label><label class="field inline"><span>Period</span><select id="emissionsPeriod"><option value="">All</option></select></label><span id="emissionsStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="emissionsTable">Show table</button></div></div><div id="emissionsChart" class="bar-chart empty-state">No emissions data.</div><div id="emissionsTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only" data-results-page="figures"><div class="panel-title"><h2>Supply / Demand by Activity</h2><div class="panel-toolbar"><label class="field inline"><span>Activity</span><select id="supplyDemandActivity"></select></label><label class="field inline"><span>Period</span><select id="supplyDemandPeriod"><option value="">All</option></select></label><span id="supplyDemandStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="supplyDemandTable">Show table</button></div></div><div id="supplyDemandChart" class="bar-chart empty-state">Select an activity to view supply and demand.</div><div id="supplyDemandTable" class="table-wrap hidden"></div></section>
         </section>
       </section>
     </section>
@@ -1108,10 +1128,11 @@
       </div>
     </div>
   </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/vendor/plotly-full.min.js"></script>
-  <script src="/app.js?v=search-error-help-clean2-20260618"></script>
+  <script src="/app.js?v=map-node-anchor-20260619"></script>
   <script src="/app.scenario.js?v=error-help-20260618"></script>
-  <script src="/app.explorer.js?v=error-help-20260618"></script>
+  <script src="/app.explorer.js?v=flow-detail-hover-value-20260619"></script>
   <script src="/app.mga.js?v=error-help-20260618"></script>
 </body>
 </html>

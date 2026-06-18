@@ -15,6 +15,10 @@ end
     include("test_data_writing.jl")
 end
 
+@testset "Project-specific extensions" begin
+    include("test_multi_region.jl")
+end
+
 @testset "Scenario-space exploration (Phase 1)" begin
     include("test_scenario.jl")
 end

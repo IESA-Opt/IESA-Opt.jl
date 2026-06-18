@@ -1,4 +1,4 @@
-const state = { options: null, solvers: [], outputs: [], selectedOutputId: "", comparedOutputIds: [], currentJobId: null, pollTimer: null, resultsLoaded: false, statusTimer: null, statusPollIntervalMs: 1500, lastJobStatus: null, connectionLost: false, connRestoreTimer: null, connRestoreHide: null, latestResults: null, dispatchLegendOff: new Set(), customWorkbookPath: "", lastClickedOutputId: "", dispatchPayload: null, dispatchSelectedNode: "", dispatchSelectedPeriod: 0, dispatchFromHour: 1, dispatchToHour: 8760, dispatchLoading: false, flexPayload: null, flexSelectedTech: "", flexSelectedPeriod: 0, flexFromHour: 1, flexToHour: 168, flexLoading: false };
+const state = { options: null, solvers: [], outputs: [], selectedOutputId: "", comparedOutputIds: [], currentJobId: null, pollTimer: null, resultsLoaded: false, statusTimer: null, statusPollIntervalMs: 1500, lastJobStatus: null, connectionLost: false, connRestoreTimer: null, connRestoreHide: null, latestResults: null, dispatchLegendOff: new Set(), customWorkbookPath: "", lastClickedOutputId: "", dispatchPayload: null, dispatchSelectedNode: "", dispatchSelectedPeriod: 0, dispatchFromHour: 1, dispatchToHour: 8760, dispatchLoading: false, flexPayload: null, flexSelectedTech: "", flexSelectedPeriod: 0, flexFromHour: 1, flexToHour: 168, flexLoading: false, regionalMapPayload: null, regionalMapGeometry: new Map(), regionalMapMetric: "use", regionalMapCommodity: "all", regionalMapPeriod: 0, regionalMapLoading: false, regionalMapAnimationPaused: false, resultsSubpage: "summary" };
 const DAYS_PER_YEAR = 365;
 const stages = [["reading","Read"],["preparing","Prepare"],["clustering","Cluster"],["generation","Generate"],["solve","Solve"],["writing","Write"]];
 const stageDescriptions = { idle:"Start a run to see each stage and solver output.", reading:"Julia is opening the workbook and loading the input tables into model data.", preparing:"Sets and derived parameters are being built for the selected solve years.", clustering:"Representative days and time-slice profiles are being prepared, unless full-hourly mode skipped this step.", generation:"JuMP variables, objective terms, and constraints are being generated before the solver starts.", solve:"The optimizer is running. Native solver messages and iteration lines appear in the log below when the solver writes them.", writing:"Solved values are being converted into DuckDB result tables, one output file at a time.", done:"The run finished and result tables are ready in the Results tab.", failed:"The run stopped during the last active stage. The log below contains the error details.", cancelled:"The run was stopped by the user. No results were saved." };
@@ -894,6 +894,11 @@ function bindControls() {
   const flexFrom = $("flexFrom"); if (flexFrom) flexFrom.addEventListener("change", () => { state.flexFromHour = clampHour(flexFrom.value, 1, state.flexToHour); flexFrom.value = state.flexFromHour; renderFlexibility(state.flexPayload); });
   const flexTo = $("flexTo"); if (flexTo) flexTo.addEventListener("change", () => { state.flexToHour = clampHour(flexTo.value, state.flexFromHour, 8760); flexTo.value = state.flexToHour; renderFlexibility(state.flexPayload); });
   const flexReset = $("flexReset"); if (flexReset) flexReset.addEventListener("click", () => { state.flexFromHour = 1; state.flexToHour = 168; const f=$("flexFrom"); if (f) f.value = 1; const t=$("flexTo"); if (t) t.value = 168; renderFlexibility(state.flexPayload); });
+  const mapMetric = $("regionalMapMetric"); if (mapMetric) mapMetric.addEventListener("change", () => { state.regionalMapMetric = mapMetric.value || "use"; refreshRegionalMap(); });
+  const mapCommodity = $("regionalMapCommodity"); if (mapCommodity) mapCommodity.addEventListener("change", () => { state.regionalMapCommodity = mapCommodity.value || "all"; refreshRegionalMap(); });
+  const mapPeriod = $("regionalMapPeriod"); if (mapPeriod) mapPeriod.addEventListener("change", () => { state.regionalMapPeriod = Number(mapPeriod.value) || 0; refreshRegionalMap(); });
+  const mapPlay = $("regionalMapPlay"); if (mapPlay) mapPlay.addEventListener("click", playRegionalMapAnimation);
+  document.querySelectorAll(".results-subpage-button").forEach(btn => btn.addEventListener("click", () => switchResultsSubpage(btn.dataset.resultsSubpage || "summary")));
   const emGroup = $("emissionsGroupBy"); if (emGroup) emGroup.addEventListener("change", refreshEmissions);
   const emPeriod = $("emissionsPeriod"); if (emPeriod) emPeriod.addEventListener("change", refreshEmissions);
   const sdAct = $("supplyDemandActivity"); if (sdAct) sdAct.addEventListener("change", refreshSupplyDemand);
@@ -1065,7 +1070,7 @@ function resetRunButton() {
   setRunButtonMode("run");
   $("stopRunButtonProgress").classList.add("hidden");
 }
-function collectRunConfig() { return { inputWorkbook: currentWorkbook(), periods:[...document.querySelectorAll("#periods input:checked")].map(i=>Number(i.value)), mode:$("timeSlicingToggle").checked ? "timeslice" : "full_hourly", hoursPerDay:currentHoursPerDay(), representativeDays:Number($("representativeDays").value), solver:$("solver").value, solveMethod:document.querySelector("input[name='solveMethod']:checked").value, threads:Number($("threads").value), clusteringApproach:$("clusteringApproach").value, extremePeriods:$("extremePeriods").checked, extremeDays:Number($("extremeDays").value), boundaryRamping:$("boundaryRamping").checked, hourlyReports:$("hourlyReports").checked, showViolations:$("showViolations").checked, outputMode:$("outputMode").value, outputName:$("outputName").value, constraintGroup:$("constraintGroup").value }; }
+function collectRunConfig() { return { inputWorkbook: currentWorkbook(), periods:[...document.querySelectorAll("#periods input:checked")].map(i=>Number(i.value)), mode:$("timeSlicingToggle").checked ? "timeslice" : "full_hourly", hoursPerDay:currentHoursPerDay(), representativeDays:Number($("representativeDays").value), solver:$("solver").value, solveMethod:document.querySelector("input[name='solveMethod']:checked").value, threads:Number($("threads").value), clusteringApproach:$("clusteringApproach").value, extremePeriods:$("extremePeriods").checked, extremeDays:Number($("extremeDays").value), boundaryRamping:$("boundaryRamping").checked, hourlyReports:$("hourlyReports").checked, showViolations:$("showViolations").checked, multiRegion:$("multiRegionToggle").checked, outputMode:$("outputMode").value, outputName:$("outputName").value, constraintGroup:$("constraintGroup").value }; }
 function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer=setInterval(pollJob,800); pollJob(); }
 async function pollJob() {
   if(!state.currentJobId) return;
@@ -1237,7 +1242,6 @@ function autoCompareOrView() {
 
 function selectedOutputIds() { return [...state.comparedOutputIds]; }
 function setOutputStatus(message) { const el = $("outputStatus"); el.textContent = message; explainStatusMessage(el, message); }
-
 async function viewOutput(outputId) {
   state.selectedOutputId = outputId;
   setResultsLoadingState(`Loading ${outputId}…`);
@@ -1307,9 +1311,10 @@ function renderComponentComparison(id, rows, runs) { const c=$(id); if(!c) retur
 function renderComparisonProfilePlaceholder() {
   const msg = "Open one output run to inspect dispatch and supply/demand.";
   ["powerCapacityChart","emissionsChart","supplyDemandChart","co2PriceChart"].forEach(id => setEmptyChart(id, msg));
+  setEmptyChart("regionalMapChart", msg, "map-chart");
   setEmptyChart("hourlyDispatchChart", msg, "profile-chart");
   setEmptyChart("flexChart", msg, "profile-chart");
-  ["powerCapacityTable","emissionsTable","supplyDemandTable","co2PriceTable","flexIndicatorsTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
+  ["powerCapacityTable","emissionsTable","supplyDemandTable","co2PriceTable","flexIndicatorsTable","regionalMapTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
   const legend = $("hourlyDispatchLegend"); if (legend) legend.textContent="";
   const flexLegend = $("flexLegend"); if (flexLegend) flexLegend.textContent="";
   const sdStatus = $("supplyDemandStatus"); if (sdStatus) sdStatus.textContent="";
@@ -1362,30 +1367,33 @@ function renderResults(results) {
   // visible pause before each subsequent panel so the cascade reads as
   // top-to-bottom even when individual renders are fast.
   const stages = [
-    () => {
+    { page: "summary", run: () => {
       const costStacks = buildCostStacks(results.costByComponent || [], [], results.totalCosts || []);
       costStacks.length
         ? renderStackedBars("systemCostsChart", costStacks, "MEUR")
         : renderBars("systemCostsChart", results.totalCosts || [], r => `Period ${r.period}`, r => Number(r.value || 0), "MEUR");
       renderTable("systemCostsTable", results.totalCosts || []);
-    },
-    () => {
+    } },
+    { page: "summary", run: () => {
       renderStackedBars("timingChart", buildTimingStacks(results.timingSummary || []), "sec");
       renderTable("solverSettingsTable", results.solverSettings || [], 200);
-    },
-    () => { renderCO2Price(results.co2Price || []); },
-    () => { renderActivityPrices(results.activityPrices || []); },
-    () => { renderPowerCapacities(results.powerCapacities || { rows: [], periods: [] }); },
-    () => { renderHourlyDispatch(dispPayload); },
-    () => { renderFlexibility(flexPayload); },
-    () => { refreshEmissions(); },
-    () => { refreshSupplyDemand(); },
+    } },
+    { page: "map", run: () => { refreshRegionalMap(); } },
+    { page: "figures", run: () => { renderCO2Price(results.co2Price || []); } },
+    { page: "figures", run: () => { renderActivityPrices(results.activityPrices || []); } },
+    { page: "figures", run: () => { renderPowerCapacities(results.powerCapacities || { rows: [], periods: [] }); } },
+    { page: "figures", run: () => { renderHourlyDispatch(dispPayload); } },
+    { page: "figures", run: () => { renderFlexibility(flexPayload); } },
+    { page: "figures", run: () => { refreshEmissions(); } },
+    { page: "figures", run: () => { refreshSupplyDemand(); } },
   ];
 
   // Bump the render token so any stages still queued from a previous
   // selection short-circuit and never overwrite the current spinners.
   state.renderToken = (state.renderToken || 0) + 1;
   const myToken = state.renderToken;
+  state.resultStages = stages;
+  state.resultsRenderedPages = new Set();
   // Disconnect any IntersectionObserver from a previous render so it
   // cannot fire mid-cascade and force a panel to render out of order.
   if (state.lazyResultsObserver) { state.lazyResultsObserver.disconnect(); state.lazyResultsObserver = null; }
@@ -1395,19 +1403,10 @@ function renderResults(results) {
   // call and the timer guarantee Plotly has finished its layout pass
   // before the next stage starts working.
   const cascadeMs = 250;
-  const runStage = (i) => {
-    if (myToken !== state.renderToken) return;
-    if (i >= stages.length) return;
-    try { stages[i](); } catch (err) { console.error(`Render stage ${i} failed`, err); }
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (myToken !== state.renderToken) return;
-      setTimeout(() => runStage(i + 1), cascadeMs);
-    }));
-  };
   // Render the first stage on the next animation frame so the
   // metric-grid + sidebar paint we already issued can hit the screen
   // before Plotly starts reflowing the layout.
-  requestAnimationFrame(() => runStage(0));
+  requestAnimationFrame(() => renderResultsSubpage(state.resultsSubpage || "summary", myToken, cascadeMs));
 }
 function setComparisonMode(active) {
   $("comparisonPanel").classList.toggle("hidden", !active);
@@ -1416,8 +1415,49 @@ function setComparisonMode(active) {
   // meaningless because their data refers to one run; hide them so the
   // page only shows comparison content.
   document.querySelectorAll(".results-main .single-only").forEach(el => el.classList.toggle("hidden", active));
+  applyResultsSubpage();
 }
 function clearComparisonPanels() { setComparisonMode(false); $("compareStatus").textContent="Select outputs in the sidebar."; $("compareTable").innerHTML=""; $("compareCostTable").innerHTML=""; }
+function switchResultsSubpage(page) {
+  state.resultsSubpage = ["summary", "map", "figures"].includes(page) ? page : "summary";
+  applyResultsSubpage();
+  renderResultsSubpage(state.resultsSubpage);
+  if (state.resultsSubpage === "map") {
+    requestAnimationFrame(() => {
+      const map = $("regionalMapChart")?.__leafletMap;
+      if (map) map.invalidateSize();
+    });
+  }
+}
+function applyResultsSubpage() {
+  const page = state.resultsSubpage || "summary";
+  document.querySelectorAll(".results-subpage-button").forEach(btn => {
+    const active = (btn.dataset.resultsSubpage || "summary") === page;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll(".results-main [data-results-page]").forEach(el => {
+    el.classList.toggle("results-page-hidden", (el.dataset.resultsPage || "summary") !== page);
+  });
+}
+function renderResultsSubpage(page, token = state.renderToken, cascadeMs = 250) {
+  if (!state.resultStages || !state.resultStages.length) return;
+  if (!state.resultsRenderedPages) state.resultsRenderedPages = new Set();
+  if (state.resultsRenderedPages.has(page)) return;
+  const stages = state.resultStages.filter(stage => stage.page === page);
+  if (!stages.length) return;
+  state.resultsRenderedPages.add(page);
+  const runStage = i => {
+    if (token !== state.renderToken) return;
+    if (i >= stages.length) return;
+    try { stages[i].run(); } catch (err) { console.error(`Render ${page} stage ${i} failed`, err); }
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (token !== state.renderToken) return;
+      setTimeout(() => runStage(i + 1), cascadeMs);
+    }));
+  };
+  runStage(0);
+}
 function setEmptyChart(id, message, className="bar-chart") { const c=$(id); if (!c) return; if (window.Plotly && c._fullLayout) Plotly.purge(c); c.className=`${className} empty-state`; c.textContent=message; }
 function setLoadingChart(id, message="Loading…", className="bar-chart") {
   const c = $(id); if (!c) return;
@@ -1436,11 +1476,12 @@ function setResultsLoadingState(message="Loading results…") {
   setLoadingChart("systemCostsChart", message);
   setLoadingChart("co2PriceChart", message);
   setLoadingChart("powerCapacityChart", message);
+  setLoadingChart("regionalMapChart", message, "map-chart");
   setLoadingChart("hourlyDispatchChart", message, "profile-chart");
   setLoadingChart("flexChart", message, "profile-chart");
   setLoadingChart("emissionsChart", message);
   setLoadingChart("supplyDemandChart", message);
-  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => setLoadingTable(id));
+  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","regionalMapTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => setLoadingTable(id));
 }
 function setResultsErrorState(message) {
   const m = message || "Could not load results.";
@@ -1448,9 +1489,10 @@ function setResultsErrorState(message) {
   output.textContent = m;
   explainStatusMessage(output, m, "error");
   ["timingChart","systemCostsChart","co2PriceChart","powerCapacityChart","emissionsChart","supplyDemandChart"].forEach(id => setEmptyChart(id, m));
+  setEmptyChart("regionalMapChart", m, "map-chart");
   setEmptyChart("hourlyDispatchChart", m, "profile-chart");
   setEmptyChart("flexChart", m, "profile-chart");
-  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
+  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","regionalMapTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
 }
 function first(rows) { return rows && rows.length ? rows[0] : {}; }
 function renderMetrics(results) { const t=first(results.timingSummary), s=first(results.runStatistics), c=first(results.totalCosts); const solver = t.solver ? `${t.solver}${t.solverVersion ? ` (${t.solverVersion})` : ""}` : ""; const items=[["Objective",fmt(c.value||s.objective||t.objective)],["Status",s.termination_status||t.termination_status||""],["Solver",solver],["Total seconds",fmt(t.total_sec||s.total_seconds)],["Solve seconds",fmt(t.solve_sec||s.solve_seconds)],["Rows / columns",`${fmt(t.n_rows||s.n_rows)} / ${fmt(t.n_cols||s.n_cols)}`]]; $("metricGrid").innerHTML=items.map(([k,v])=>`<div class="metric"><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join(""); }
@@ -1544,6 +1586,494 @@ function renderPowerCapacities(payload) {
   if (!stacks.length) { setEmptyChart("powerCapacityChart", "No power-system technologies found."); const t=$("powerCapacityTable"); if (t) t.innerHTML=""; return; }
   renderStackedBars("powerCapacityChart", stacks, "");
   renderTable("powerCapacityTable", rows, 200);
+}
+function regionalCommodityColor(commodity) {
+  const key = String(commodity || "all");
+  if (key === "electricity") return "#1d5f8f";
+  if (key === "natural_gas") return "#5a9f3f";
+  if (key === "hydrogen") return "#00a3c7";
+  if (key === "ccus") return "#ba3a2f";
+  return "#b77800";
+}
+function populateRegionalMapControls(payload) {
+  const metric = $("regionalMapMetric"), commodity = $("regionalMapCommodity"), period = $("regionalMapPeriod"), play = $("regionalMapPlay");
+  if (metric) { metric.value = payload.metric || state.regionalMapMetric || "use"; state.regionalMapMetric = metric.value; }
+  if (commodity) {
+    const opts = payload.commodityOptions || [{ id:"all", label:"All" }];
+    const want = state.regionalMapCommodity || payload.commodity || "all";
+    commodity.innerHTML = opts.map(o => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.label || o.id)}</option>`).join("");
+    commodity.value = opts.some(o => o.id === want) ? want : (payload.commodity || "all");
+    state.regionalMapCommodity = commodity.value || "all";
+  }
+  if (period) {
+    const periods = (payload.periods || []).map(Number).filter(Number.isFinite);
+    period.innerHTML = periods.map(p => `<option value="${p}">${p}</option>`).join("");
+    const want = String(payload.selectedPeriod || state.regionalMapPeriod || periods[periods.length - 1] || "");
+    if (want && periods.map(String).includes(want)) period.value = want;
+    state.regionalMapPeriod = Number(period.value) || 0;
+  }
+  regionalToggleAnimationButton(payload);
+}
+async function refreshRegionalMap() {
+  const panel = $("regionalTradePanel");
+  if (!state.selectedOutputId || state.regionalMapLoading) return;
+  state.regionalMapLoading = true;
+  if (panel) panel.classList.remove("hidden");
+  setLoadingChart("regionalMapChart", "Loading regional trade map…", "map-chart");
+  setLoadingTable("regionalMapTable");
+  const status = $("regionalMapStatus"); if (status) status.textContent = "Loading…";
+  try {
+    const body = {
+      outputDir: state.selectedOutputId,
+      metric: $("regionalMapMetric")?.value || state.regionalMapMetric || "use",
+      commodity: $("regionalMapCommodity")?.value || state.regionalMapCommodity || "all",
+      period: Number($("regionalMapPeriod")?.value || state.regionalMapPeriod || 0) || undefined,
+    };
+    const payload = await fetchJson("/api/outputs/regionalMap", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    state.regionalMapPayload = payload;
+    state.regionalMapAnimationPaused = false;
+    populateRegionalMapControls(payload);
+    await renderRegionalMap(payload);
+  } catch (e) {
+    setEmptyChart("regionalMapChart", `Could not load regional map: ${e.message || e}`, "map-chart");
+    const table = $("regionalMapTable"); if (table) table.innerHTML = "";
+    if (status) status.textContent = "Error";
+  } finally {
+    state.regionalMapLoading = false;
+  }
+}
+async function regionalMapAsset(url) {
+  if (!url) return null;
+  const assetUrl = `${url}${url.includes("?") ? "&" : "?"}v=map-auto-nodes-units-20260619`;
+  if (state.regionalMapGeometry.has(assetUrl)) return state.regionalMapGeometry.get(assetUrl);
+  const payload = await fetchJson(assetUrl);
+  state.regionalMapGeometry.set(assetUrl, payload);
+  return payload;
+}
+function regionalCentroids(geojson) {
+  const out = new Map();
+  (geojson?.features || []).forEach(feature => {
+    const id = Number(feature?.properties?.cluster_id);
+    const coords = feature?.geometry?.coordinates || [];
+    if (Number.isFinite(id) && coords.length >= 2) out.set(`CL${id}`, { lon:Number(coords[0]), lat:Number(coords[1]), label:regionalClusterLabel(`CL${id}`), kind:"cluster" });
+  });
+  return out;
+}
+function regionalClusterLabel(id) {
+  const labels = {
+    CL1: "Noordzeekanaalgebied",
+    CL2: "Noord-Nederland",
+    CL3: "Chemelot",
+    CL4: "Zeeland/West Brabant",
+    CL5: "Rotterdam-Moerdijk",
+  };
+  return labels[String(id)] || String(id);
+}
+function regionalEndpointId(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return `CL${value}`;
+  const text = String(value ?? "").trim();
+  if (/^\d+$/.test(text)) return `CL${text}`;
+  const cl = text.match(/\bCL\s*(\d+)\b/i); if (cl) return `CL${cl[1]}`;
+  const ns = text.match(/\bNS\s*(\d+)\b/i); if (ns) return `NS${ns[1]}`;
+  const country = regionalCountryEndpointId(text); if (country) return country;
+  if (/\bEU\b/i.test(text)) return "DE";
+  return text;
+}
+function regionalCountryEndpointId(value) {
+  const text = String(value ?? "").trim();
+  if (/\b(?:DK|Denmark|Danish)\b/i.test(text)) return "DK";
+  if (/\b(?:UK|GB|United Kingdom|Great Britain|Britain)\b/i.test(text)) return "UK";
+  if (/\b(?:NO|Norway|Norwey|Norwegian)\b/i.test(text)) return "NO";
+  if (/\b(?:DE|Germany|German)\b/i.test(text)) return "DE";
+  if (/\b(?:BE|Belgium|Belgian)\b/i.test(text)) return "BE";
+  return "";
+}
+function regionalExternalPoints(geojson) {
+  const out = new Map();
+  (geojson?.features || []).forEach(feature => {
+    const coords = feature?.geometry?.coordinates || [];
+    if (coords.length < 2) return;
+    const rawId = String(feature?.properties?.id ?? "").trim();
+    const name = String(feature?.properties?.Name || feature?.properties?.name || rawId).trim();
+    const id = regionalCountryEndpointId(rawId) || regionalCountryEndpointId(name) || (/^NS\d+$/i.test(rawId) ? regionalEndpointId(rawId) : regionalEndpointId(name));
+    if (id) out.set(id, { lon:Number(coords[0]), lat:Number(coords[1]), label:id, name, kind:id.startsWith("NS") ? "offshore" : "external" });
+  });
+  return out;
+}
+function regionalEndpointPoints(centroids, hubs) {
+  const points = new Map(centroids || []);
+  for (const [id, point] of regionalExternalPoints(hubs)) points.set(id, point);
+  return points;
+}
+function regionalClusterColor(id) {
+  const colors = ["#d58b55", "#d9b75c", "#9bc58c", "#6eb4b8", "#6da5c8", "#d67770", "#8fc2a1", "#cfa35d"];
+  return colors[Math.abs(Number(id) || 0) % colors.length];
+}
+function regionalNodeMarkerHtml(id, point) {
+  const label = escapeHtml(point.label || id);
+  const nodeClass = point.kind === "cluster" ? "regional-node-cluster" : (point.kind === "offshore" ? "regional-node-offshore" : "regional-node-country");
+  return `<span class="regional-node-marker ${nodeClass}"><span class="regional-node-dot"></span><span class="regional-node-text">${label}</span></span>`;
+}
+function regionalMapLegendHtml(payload, links) {
+  const commodities = [...new Set((links || []).map(link => link.commodityLabel || link.commodity).filter(Boolean))].slice(0, 6);
+  const commodityRows = commodities.map(label => `<span class="regional-legend-row"><span class="regional-legend-line" style="background:${regionalCommodityColor(label)}"></span>${escapeHtml(label)}</span>`).join("");
+  const flowLabel = payload?.metric === "stock" ? "Capacity links" : "Net flow links";
+  const pulseRow = payload?.metric === "use" ? `<span class="regional-legend-row"><span class="regional-legend-pulse"></span>Moving flow pulse</span>` : "";
+  return `<div class="regional-map-legend" aria-label="Regional map legend">
+    <strong>Map legend</strong>
+    <span class="regional-legend-row"><span class="regional-legend-area"></span>Dutch municipality cluster</span>
+    <span class="regional-legend-row"><span class="regional-legend-selected"></span>Selected municipality</span>
+    <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-cluster"></span>Dutch cluster node</span>
+    <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-offshore"></span>North Sea hub</span>
+    <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-country"></span>Neighbouring country node</span>
+    <span class="regional-legend-row"><span class="regional-legend-flow"></span>${escapeHtml(flowLabel)}</span>
+    ${pulseRow}
+    ${commodityRows ? `<div class="regional-legend-group"><em>Commodities</em>${commodityRows}</div>` : ""}
+  </div>`;
+}
+function regionalRenderMapLegend(chart, payload, links) {
+  chart?.querySelector(".regional-map-legend")?.remove();
+  if (!chart) return;
+  chart.insertAdjacentHTML("beforeend", regionalMapLegendHtml(payload, links));
+}
+function regionalUnitLabel(item) {
+  const unit = item?.unit || {};
+  const raw = String(unit.label || unit.unit || "").trim();
+  const cleaned = raw.replace(/\s*\((?:UoA|UoC)\)\s*$/i, "").trim();
+  return /^(?:UoA|UoC)$/i.test(cleaned) ? "" : cleaned;
+}
+function regionalFlowText(link, fallbackUnit = "") {
+  const unit = regionalUnitLabel(link) || fallbackUnit;
+  return `${escapeHtml(link.sourceLabel || regionalClusterLabel(regionalEndpointId(link.source)))} → ${escapeHtml(link.targetLabel || regionalClusterLabel(regionalEndpointId(link.target)))}<br>${escapeHtml(link.commodityLabel || link.commodity || "")}: ${fmt(link.value)}${unit ? ` ${escapeHtml(unit)}` : ""}`;
+}
+function regionalLineWidth(link, maxValue) {
+  const ratio = Math.min(1, Math.max(0, Math.abs(Number(link.value || 0)) / Math.max(1e-9, maxValue)));
+  return 1.6 + Math.pow(ratio, 0.55) * 11.4;
+}
+function regionalFlowPulseAttrs(path) {
+  if (!path) return;
+  path.setAttribute("pathLength", "100");
+  const delay = "0s", duration = "3.0s";
+  path.setAttribute("stroke-dasharray", "18 82");
+  path.setAttribute("stroke-dashoffset", "100");
+  path.style.strokeDasharray = "18 82";
+  path.style.strokeDashoffset = "100";
+  path.style.animation = `regional-flow-travel ${duration} linear infinite`;
+  path.style.animationDelay = delay;
+  path.style.animationPlayState = state.regionalMapAnimationPaused ? "paused" : "running";
+  path.style.setProperty("--regional-flow-delay", delay);
+  path.style.setProperty("--regional-flow-duration", duration);
+}
+function regionalSetPulsePlayState(chart) {
+  chart?.querySelectorAll(".regional-flow-pulse.animated").forEach(path => {
+    path.style.animationPlayState = state.regionalMapAnimationPaused ? "paused" : "running";
+  });
+}
+function regionalPulseWidth(width) {
+  return Math.max(1.6, Math.min(6.2, Number(width || 0) * 0.72));
+}
+function regionalPreparedLinks(payload, centroidByCluster) {
+  return (payload.links || [])
+    .filter(link => centroidByCluster.has(regionalEndpointId(link.source)) && centroidByCluster.has(regionalEndpointId(link.target)))
+    .slice(0, 80);
+}
+function regionalTeardownMap(chart) {
+  if (chart?.__leafletMap) {
+    chart.__leafletMap.remove();
+    chart.__leafletMap = null;
+  }
+  if (window.Plotly && chart?._fullLayout) Plotly.purge(chart);
+}
+function regionalToggleAnimationButton(payload) {
+  const play = $("regionalMapPlay");
+  if (!play) return;
+  const canAnimate = payload && payload.metric === "use" && (payload.links || []).length;
+  play.disabled = !canAnimate;
+  play.textContent = !canAnimate ? "Animate" : (state.regionalMapAnimationPaused ? "Play" : "Pause");
+}
+function regionalLeafletArrowDefs(chart, colors) {
+  const svg = chart.querySelector(".leaflet-overlay-pane svg");
+  if (!svg) return;
+  let defs = svg.querySelector("defs.regional-flow-defs");
+  if (!defs) {
+    defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    defs.classList.add("regional-flow-defs");
+    svg.insertBefore(defs, svg.firstChild);
+  }
+  colors.forEach(color => {
+    const id = `regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")}`;
+    if (defs.querySelector(`#${id}`)) return;
+    const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+    marker.setAttribute("id", id);
+    marker.setAttribute("viewBox", "0 -5 10 10");
+    marker.setAttribute("refX", "10");
+    marker.setAttribute("refY", "0");
+    marker.setAttribute("markerWidth", "12");
+    marker.setAttribute("markerHeight", "12");
+    marker.setAttribute("orient", "auto");
+    marker.setAttribute("markerUnits", "userSpaceOnUse");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M0,-5L10,0L0,5Z");
+    path.setAttribute("fill", color);
+    marker.appendChild(path);
+    defs.appendChild(marker);
+  });
+}
+async function renderRegionalMap(payload) {
+  const chart = $("regionalMapChart"), table = $("regionalMapTable"), status = $("regionalMapStatus");
+  if (!chart) return;
+  if (!payload) {
+    setEmptyChart("regionalMapChart", "No regional trade data available.", "map-chart");
+    if (table) table.innerHTML = "";
+    if (status) status.textContent = "";
+    return;
+  }
+  const assets = payload.assets || {};
+  if (!assets.available) {
+    setEmptyChart("regionalMapChart", "Map geometry assets are unavailable.", "map-chart");
+    if (status) status.textContent = "Missing geometry";
+    return;
+  }
+  const [clusters, centroids, hubs] = await Promise.all([
+    regionalMapAsset(assets.clusters),
+    regionalMapAsset(assets.centroids),
+    assets.northSeaHubs ? regionalMapAsset(assets.northSeaHubs) : Promise.resolve(null),
+  ]);
+  const centroidByCluster = regionalEndpointPoints(regionalCentroids(centroids), hubs);
+  state.regionalMapCentroids = centroidByCluster;
+  const links = regionalPreparedLinks(payload, centroidByCluster);
+  if (!links.length && centroidByCluster.size === 0) {
+    setEmptyChart("regionalMapChart", "No regional nodes match the selected filters.", "map-chart");
+    if (table) table.innerHTML = "";
+    if (status) status.textContent = "0 links";
+    return;
+  }
+
+  regionalTeardownMap(chart);
+  if (window.L) renderRegionalMapLeaflet(chart, clusters, centroidByCluster, links, payload);
+  else renderRegionalMapSvg(chart, clusters, centroidByCluster, links, payload);
+  regionalRenderMapLegend(chart, payload, links);
+  const unit = regionalUnitLabel(payload);
+  if (table) {
+    if (links.length) renderTable("regionalMapTable", links.map(link => ({ source:link.sourceLabel, target:link.targetLabel, commodity:link.commodityLabel, value:link.value, unit:regionalUnitLabel(link) || unit, metric:link.metric, forwardValue:link.forwardValue, reverseValue:link.reverseValue })), 200, { valueShading: true });
+    else table.innerHTML = `<div class="empty-state">No regional trade links are readable yet.</div>`;
+  }
+  if (status) status.textContent = links.length
+    ? `${links.length} link(s) · ${payload.metric === "stock" ? "capacity" : "net flow"}${unit ? ` · ${unit}` : ""}`
+    : `${centroidByCluster.size} node(s) · waiting for readable result tables`;
+  regionalToggleAnimationButton(payload);
+}
+function renderRegionalMapLeaflet(chart, clusters, centroidByCluster, links, payload) {
+  chart.className = `map-chart ${payload.metric === "use" && !state.regionalMapAnimationPaused ? "" : "regional-flow-paused"}`;
+  chart.innerHTML = `<div class="regional-leaflet-map" aria-label="Regional trade flow map"></div>`;
+  const mapEl = chart.querySelector(".regional-leaflet-map");
+  const map = L.map(mapEl, { zoomControl: true, attributionControl: false, preferCanvas: false, scrollWheelZoom: true });
+  chart.__leafletMap = map;
+  const baseClusterStyle = feature => ({ color: "rgba(255,255,255,0.85)", weight: 0.6, fillColor: regionalClusterColor(feature?.properties?.cluster_id), fillOpacity: 0.72 });
+  const municipalityLabel = feature => `${escapeHtml(feature?.properties?.statnaam || "Municipality")}<br>Cluster ${escapeHtml(regionalClusterLabel(`CL${feature?.properties?.cluster_id || ""}`))}`;
+  let selectedClusterLayer = null;
+  const selectCluster = layer => {
+    if (selectedClusterLayer === layer) {
+      layer.setStyle(baseClusterStyle(layer.feature));
+      if (layer.bringToBack) layer.bringToBack();
+      layer.closePopup();
+      layer.unbindPopup();
+      selectedClusterLayer = null;
+      map.closePopup();
+      return;
+    }
+    if (selectedClusterLayer && selectedClusterLayer !== layer) {
+      selectedClusterLayer.setStyle(baseClusterStyle(selectedClusterLayer.feature));
+      if (selectedClusterLayer.bringToBack) selectedClusterLayer.bringToBack();
+      selectedClusterLayer.closePopup();
+      selectedClusterLayer.unbindPopup();
+    }
+    selectedClusterLayer = layer;
+    layer.setStyle({ color: "#123443", weight: 2.4, fillColor: regionalClusterColor(layer.feature?.properties?.cluster_id), fillOpacity: 0.9 });
+    layer.bringToFront();
+    layer.bindPopup(municipalityLabel(layer.feature), { closeButton: true, autoPan: false }).openPopup();
+  };
+  const clusterLayer = L.geoJSON(clusters, {
+    style: baseClusterStyle,
+    onEachFeature: (feature, layer) => {
+      layer.on("click", () => selectCluster(layer));
+    }
+  }).addTo(map);
+  const bounds = clusterLayer.getBounds();
+  [...centroidByCluster.values()].forEach(point => bounds.extend([point.lat, point.lon]));
+  if (bounds.isValid()) map.fitBounds(bounds.pad(0.06));
+  const maxValue = Math.max(1e-9, ...links.map(link => Math.abs(Number(link.value || 0))));
+  const unit = regionalUnitLabel(payload);
+  const arrowColors = new Set();
+  let selectedFlow = null;
+  const clearSelectedFlow = () => {
+    if (!selectedFlow) return;
+    selectedFlow.line.setStyle({ weight: selectedFlow.width, opacity: selectedFlow.opacity });
+    selectedFlow.line._path?.classList.remove("selected");
+    if (selectedFlow.pulse) {
+      selectedFlow.pulse.setStyle({ weight: regionalPulseWidth(selectedFlow.width), opacity: 0.98 });
+      selectedFlow.pulse._path?.classList.remove("selected");
+    }
+    selectedFlow = null;
+  };
+  const selectFlow = (line, pulse, width, opacity, event) => {
+    if (event) L.DomEvent.stopPropagation(event);
+    if (selectedFlow?.line === line) return;
+    clearSelectedFlow();
+    selectedFlow = { line, pulse, width, opacity };
+    line.setStyle({ weight: Math.min(18, width + 4), opacity: 1 });
+    line._path?.classList.add("selected");
+    if (pulse) {
+      pulse.setStyle({ weight: regionalPulseWidth(width + 4), opacity: 1 });
+      pulse._path?.classList.add("selected");
+      pulse.bringToFront();
+    }
+    line.bringToFront();
+  };
+  map.on("click", clearSelectedFlow);
+  clusterLayer.on("click", clearSelectedFlow);
+  links.forEach(link => {
+    const src = centroidByCluster.get(regionalEndpointId(link.source)), dst = centroidByCluster.get(regionalEndpointId(link.target));
+    const color = regionalCommodityColor(link.commodity);
+    const width = regionalLineWidth(link, maxValue);
+    const opacity = payload.metric === "stock" ? 0.62 : 0.9;
+    const line = L.polyline([[src.lat, src.lon], [dst.lat, dst.lon]], {
+      color, weight: width, opacity,
+      className: `regional-flow-line regional-flow-base ${payload.metric === "use" ? "animated" : ""}`
+    }).addTo(map);
+    line.bindTooltip(regionalFlowText(link, unit), { sticky: true });
+    if (payload.metric === "use") arrowColors.add(color);
+    const pulse = payload.metric === "use" ? L.polyline([[src.lat, src.lon], [dst.lat, dst.lon]], {
+      color, weight: regionalPulseWidth(width), opacity: 0.98, interactive: false,
+      className: "regional-flow-pulse animated"
+    }).addTo(map) : null;
+    requestAnimationFrame(() => {
+      if (payload.metric === "use" && line._path) line._path.setAttribute("marker-end", `url(#regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")})`);
+      if (pulse?._path) regionalFlowPulseAttrs(pulse._path);
+    });
+    line.on("click", event => selectFlow(line, pulse, width, opacity, event));
+  });
+  [...centroidByCluster.entries()].forEach(([id, point]) => {
+    L.marker([point.lat, point.lon], { interactive: true, keyboard: false, icon: L.divIcon({ className: `regional-node-icon ${point.kind === "cluster" ? "regional-cluster-label" : "regional-external-label"}`, html: regionalNodeMarkerHtml(id, point), iconSize: [1, 1], iconAnchor: [0, 0] }) })
+      .bindTooltip(escapeHtml(point.label || point.name || id), { sticky: true, direction: "top" })
+      .addTo(map);
+  });
+  requestAnimationFrame(() => regionalLeafletArrowDefs(chart, arrowColors));
+  setTimeout(() => map.invalidateSize(), 0);
+}
+function regionalGeometryBounds(features) {
+  const bounds = { minLon: Infinity, maxLon: -Infinity, minLat: Infinity, maxLat: -Infinity };
+  const visit = coords => {
+    if (!Array.isArray(coords)) return;
+    if (typeof coords[0] === "number" && typeof coords[1] === "number") {
+      bounds.minLon = Math.min(bounds.minLon, coords[0]); bounds.maxLon = Math.max(bounds.maxLon, coords[0]);
+      bounds.minLat = Math.min(bounds.minLat, coords[1]); bounds.maxLat = Math.max(bounds.maxLat, coords[1]);
+    } else coords.forEach(visit);
+  };
+  (features || []).forEach(feature => visit(feature?.geometry?.coordinates));
+  return bounds;
+}
+function regionalSvgProject(bounds, width, height) {
+  const pad = 30, lonSpan = Math.max(1e-9, bounds.maxLon - bounds.minLon), latSpan = Math.max(1e-9, bounds.maxLat - bounds.minLat);
+  return ([lon, lat]) => [pad + (lon - bounds.minLon) / lonSpan * (width - pad * 2), height - pad - (lat - bounds.minLat) / latSpan * (height - pad * 2)];
+}
+function regionalExpandBoundsWithPoints(bounds, points) {
+  for (const point of points || []) {
+    if (!Number.isFinite(point?.lon) || !Number.isFinite(point?.lat)) continue;
+    bounds.minLon = Math.min(bounds.minLon, point.lon);
+    bounds.maxLon = Math.max(bounds.maxLon, point.lon);
+    bounds.minLat = Math.min(bounds.minLat, point.lat);
+    bounds.maxLat = Math.max(bounds.maxLat, point.lat);
+  }
+  return bounds;
+}
+function regionalSvgPath(geometry, project) {
+  const ringPath = ring => ring.map((coord, i) => `${i ? "L" : "M"}${project(coord).map(v => v.toFixed(1)).join(",")}`).join("") + "Z";
+  if (!geometry) return "";
+  if (geometry.type === "Polygon") return (geometry.coordinates || []).map(ringPath).join("");
+  if (geometry.type === "MultiPolygon") return (geometry.coordinates || []).flatMap(poly => poly.map(ringPath)).join("");
+  return "";
+}
+function renderRegionalMapSvg(chart, clusters, centroidByCluster, links, payload) {
+  chart.className = `map-chart ${payload.metric === "use" && !state.regionalMapAnimationPaused ? "" : "regional-flow-paused"}`;
+  const width = 980, height = 720, features = clusters?.features || [];
+  const bounds = regionalExpandBoundsWithPoints(regionalGeometryBounds(features), centroidByCluster.values()), project = regionalSvgProject(bounds, width, height);
+  const maxValue = Math.max(1e-9, ...links.map(link => Math.abs(Number(link.value || 0))));
+  const unit = regionalUnitLabel(payload);
+  const arrowDefs = [...new Set(links.map(link => regionalCommodityColor(link.commodity)))].map(color => `<marker id="regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")}" viewBox="0 -5 10 10" refX="10" refY="0" markerWidth="12" markerHeight="12" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,-5L10,0L0,5Z" fill="${color}"></path></marker>`).join("");
+  const clusterPaths = features.map(feature => `<path class="regional-cluster-path" data-cluster-id="${escapeHtml(feature?.properties?.cluster_id || "")}" data-name="${escapeHtml(feature?.properties?.statnaam || "Municipality")}" data-cluster-label="${escapeHtml(regionalClusterLabel(`CL${feature?.properties?.cluster_id || ""}`))}" d="${regionalSvgPath(feature.geometry, project)}" fill="${regionalClusterColor(feature?.properties?.cluster_id)}" fill-opacity="0.72" stroke="#fff" stroke-opacity="0.85" stroke-width="0.6"></path>`).join("");
+  const flowPaths = links.map((link, index) => {
+    const src = centroidByCluster.get(regionalEndpointId(link.source)), dst = centroidByCluster.get(regionalEndpointId(link.target));
+    const [x1, y1] = project([src.lon, src.lat]), [x2, y2] = project([dst.lon, dst.lat]);
+    const color = regionalCommodityColor(link.commodity), width = regionalLineWidth(link, maxValue), animated = payload.metric === "use" ? "animated" : "";
+    const arrow = payload.metric === "use" ? ` marker-end="url(#regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")})"` : "";
+    const path = `M${x1.toFixed(1)},${y1.toFixed(1)}L${x2.toFixed(1)},${y2.toFixed(1)}`;
+    const flowIndex = `flow-${index}`;
+    const base = `<path class="regional-flow-line regional-flow-base ${animated}" data-flow-id="${flowIndex}" data-base-width="${width.toFixed(1)}" d="${path}" stroke="${color}" stroke-width="${width.toFixed(1)}" stroke-opacity="${payload.metric === "stock" ? "0.62" : "0.9"}" fill="none"${arrow}><title>${regionalFlowText(link, unit).replace(/<br>/g, " - ")}</title></path>`;
+    if (payload.metric !== "use") return base;
+    const delay = "0s", duration = "3.0s";
+    const playState = state.regionalMapAnimationPaused ? "paused" : "running";
+    const pulse = `<path class="regional-flow-pulse animated" data-flow-id="${flowIndex}" d="${path}" pathLength="100" stroke="${color}" stroke-width="${regionalPulseWidth(width).toFixed(1)}" stroke-opacity="0.98" stroke-dasharray="18 82" stroke-dashoffset="100" fill="none" style="stroke-dasharray:18 82;stroke-dashoffset:100;animation:regional-flow-travel ${duration} linear infinite;animation-delay:${delay};animation-play-state:${playState};--regional-flow-delay:${delay};--regional-flow-duration:${duration}"></path>`;
+    return base + pulse;
+  }).join("");
+  const labels = [...centroidByCluster.entries()].map(([id, point]) => {
+    const [x, y] = project([point.lon, point.lat]);
+    const cls = point.kind === "cluster" ? "regional-svg-node-cluster" : (point.kind === "offshore" ? "regional-svg-node-offshore" : "regional-svg-node-country");
+    return `<g class="regional-svg-node ${cls}"><title>${escapeHtml(point.label || point.name || id)}</title><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.3"></circle><text x="${(x + 7).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="start" dominant-baseline="central">${escapeHtml(point.label || id)}</text></g>`;
+  }).join("");
+  chart.innerHTML = `<svg class="regional-svg-map" viewBox="0 0 ${width} ${height}" role="img" aria-label="Regional trade flow map"><defs>${arrowDefs}</defs>${clusterPaths}${flowPaths}${labels}</svg>`;
+  const clearSelectedFlow = () => {
+    chart.querySelectorAll(".regional-flow-line.selected").forEach(path => {
+      path.classList.remove("selected");
+      const width = Number(path.dataset.baseWidth || path.getAttribute("stroke-width") || 2);
+      path.setAttribute("stroke-width", width.toFixed(1));
+    });
+    chart.querySelectorAll(".regional-flow-pulse.selected").forEach(path => {
+      path.classList.remove("selected");
+      const base = chart.querySelector(`.regional-flow-line[data-flow-id="${CSS.escape(path.dataset.flowId || "")}"]`);
+      const width = Number(base?.dataset.baseWidth || path.getAttribute("stroke-width") || 2);
+      path.setAttribute("stroke-width", regionalPulseWidth(width).toFixed(1));
+    });
+  };
+  chart.querySelector(".regional-svg-map")?.addEventListener("click", clearSelectedFlow);
+  chart.querySelectorAll(".regional-flow-line").forEach(path => path.addEventListener("click", event => {
+    event.stopPropagation();
+    if (path.classList.contains("selected")) return;
+    clearSelectedFlow();
+    const width = Number(path.dataset.baseWidth || path.getAttribute("stroke-width") || 2);
+    path.classList.add("selected");
+    path.setAttribute("stroke-width", Math.min(18, width + 4).toFixed(1));
+    const pulse = chart.querySelector(`.regional-flow-pulse[data-flow-id="${CSS.escape(path.dataset.flowId || "")}"]`);
+    if (pulse) {
+      pulse.classList.add("selected");
+      pulse.setAttribute("stroke-width", regionalPulseWidth(width + 4).toFixed(1));
+    }
+  }));
+  chart.querySelectorAll(".regional-cluster-path").forEach(path => path.addEventListener("click", () => {
+    clearSelectedFlow();
+    if (path.classList.contains("selected")) {
+      path.classList.remove("selected");
+      chart.querySelector(".regional-svg-selection-label")?.remove();
+      return;
+    }
+    chart.querySelectorAll(".regional-cluster-path.selected").forEach(el => el.classList.remove("selected"));
+    path.classList.add("selected");
+    let label = chart.querySelector(".regional-svg-selection-label");
+    if (!label) {
+      label = document.createElement("div");
+      label.className = "regional-svg-selection-label";
+      chart.appendChild(label);
+    }
+    label.innerHTML = `${escapeHtml(path.dataset.name || "Municipality")}<br><span>${escapeHtml(path.dataset.clusterLabel || "")}</span>`;
+  }));
+}
+function playRegionalMapAnimation() {
+  const chart = $("regionalMapChart"), payload = state.regionalMapPayload;
+  if (!chart || !payload || payload.metric !== "use" || !(payload.links || []).length) return;
+  state.regionalMapAnimationPaused = !state.regionalMapAnimationPaused;
+  chart.classList.toggle("regional-flow-paused", state.regionalMapAnimationPaused);
+  regionalSetPulsePlayState(chart);
+  regionalToggleAnimationButton(payload);
 }
 function populateDispatchPeriods(payload) {
   const sel = $("hourlyDispatchPeriod"); if (!sel) return;

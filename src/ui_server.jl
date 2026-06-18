@@ -187,6 +187,14 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         period_raw = _config_get(body, "period", nothing)
         period = period_raw === nothing ? nothing : (period_raw isa Integer ? Int(period_raw) : (period_raw isa AbstractString && !isempty(period_raw) ? parse(Int, period_raw) : nothing))
         return _json_response(_flexibility_payload(out_dir; tech = tech, period = period))
+    elseif method == "POST" && path == "/api/outputs/regionalMap"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        metric = String(_config_get(body, "metric", "stock"))
+        commodity = String(_config_get(body, "commodity", "all"))
+        period_raw = _config_get(body, "period", nothing)
+        period = period_raw === nothing ? nothing : (period_raw isa Integer ? Int(period_raw) : (period_raw isa AbstractString && !isempty(period_raw) ? parse(Int, period_raw) : nothing))
+        return _json_response(_regional_map_payload(out_dir; metric = metric, commodity = commodity, period = period))
     elseif method == "POST" && path == "/api/outputs/compare"
         body = _json_body(req)
         return _json_response(_compare_output_runs(_as_string_vector(_config_get(body, "outputDirs", String[]))))
@@ -316,6 +324,8 @@ function _mime_type(path::AbstractString)
     ext == ".html" && return "text/html; charset=utf-8"
     ext == ".css" && return "text/css; charset=utf-8"
     ext == ".js" && return "text/javascript; charset=utf-8"
+    ext == ".json" && return "application/json; charset=utf-8"
+    ext == ".geojson" && return "application/geo+json; charset=utf-8"
     ext == ".png" && return "image/png"
     ext == ".svg" && return "image/svg+xml"
     return "application/octet-stream"
@@ -3797,6 +3807,380 @@ function _to_int_safe(x)::Union{Nothing,Int}
         return f === nothing ? nothing : Int(round(f))
     end
     return nothing
+end
+
+function _to_float_safe(x)::Union{Nothing,Float64}
+    x === missing && return nothing
+    x === nothing && return nothing
+    x isa Real && return isfinite(Float64(x)) ? Float64(x) : nothing
+    if x isa AbstractString
+        s = strip(String(x))
+        isempty(s) && return nothing
+        v = tryparse(Float64, s)
+        return v === nothing || !isfinite(v) ? nothing : v
+    end
+    return nothing
+end
+
+function _xc_cluster_id(text)::Union{Nothing,Int}
+    value = strip(String(text))
+    m = match(r"\bCL\s*(\d+)\b"i, value)
+    m === nothing && (m = match(r"^(\d+)$", value))
+    m === nothing && return nothing
+    return tryparse(Int, m.captures[1])
+end
+
+function _xc_endpoint_id(text)::Union{Nothing,String}
+    value = String(text)
+    m = match(r"\bCL\s*(\d+)\b"i, value)
+    m !== nothing && return "CL$(m.captures[1])"
+    m = match(r"\bNS\s*(\d+)\b"i, value)
+    m !== nothing && return "NS$(m.captures[1])"
+    (occursin(r"\b(Denmark|Danish)\b"i, value) || occursin(r"\bDK\b", value)) && return "DK"
+    (occursin(r"\b(United Kingdom|Great Britain|Britain)\b"i, value) || occursin(r"\bUK\b", value) || occursin(r"\bGB\b", value)) && return "UK"
+    (occursin(r"\b(Norway|Norwey|Norwegian)\b"i, value) || occursin(r"\bNO\b", value)) && return "NO"
+    (occursin(r"\b(Germany|German)\b"i, value) || occursin(r"\bDE\b", value)) && return "DE"
+    (occursin(r"\b(Belgium|Belgian)\b"i, value) || occursin(r"\bBE\b", value)) && return "BE"
+    occursin(r"\bEU\b"i, value) && return "DE"
+    return nothing
+end
+
+function _xc_endpoint_label(id::AbstractString)
+    s = String(id)
+    s == "CL1" && return "Noordzeekanaalgebied"
+    s == "CL2" && return "Noord-Nederland"
+    s == "CL3" && return "Chemelot"
+    s == "CL4" && return "Zeeland/West Brabant"
+    s == "CL5" && return "Rotterdam-Moerdijk"
+    startswith(s, "CL") && return s
+    startswith(s, "NS") && return s
+    s in ("DK", "UK", "NO", "DE", "BE") && return s
+    return s
+end
+
+function _xc_endpoint_cluster(id::AbstractString)::Union{Nothing,Int}
+    m = match(r"^CL(\d+)$", String(id))
+    m === nothing && return nothing
+    return tryparse(Int, m.captures[1])
+end
+
+function _xc_trade_commodity(row::AbstractDict)
+    text = lowercase(join((
+        string(get(row, "tech", "")),
+        string(get(row, "name", "")),
+        string(get(row, "sector", "")),
+        string(get(row, "subsector", "")),
+        string(get(row, "activity", "")),
+        string(get(row, "label", "")),
+    ), " "))
+    if occursin("ccus", text) || occursin("_ccs_", text) || occursin(" ccs ", text) || occursin("- ccs", text)
+        return "ccus"
+    elseif occursin("hydrogen", text) || occursin("_hyd", text) || occursin(" hyd", text)
+        return "hydrogen"
+    elseif occursin("natural gas", text) || occursin(" gas ", text) || occursin("gas pool", text)
+        return "natural_gas"
+    elseif occursin("electricity", text) || occursin("power", text) || occursin("peu", text) || occursin("pnl", text)
+        return "electricity"
+    end
+    return "other"
+end
+
+function _regional_map_asset_paths(node_level::Int)
+    level = max(1, node_level)
+    assets = Dict{String,Any}(
+        "nodeLevel" => level,
+        "clusters" => "/assets/maps/clusters_$(level).geojson",
+        "centroids" => "/assets/maps/centroids_$(level).geojson",
+        "northSeaHubs" => "/assets/maps/north_sea_hubs.geojson",
+    )
+    assets["available"] = all(path -> isfile(joinpath(_ui_dir(), split(strip(path, ['/']), '/')...)), String[assets["clusters"], assets["centroids"]])
+    return assets
+end
+
+function _regional_map_inferred_node_level(out_dir::AbstractString, link_by_tech::Dict{String,Dict{String,Any}})
+    cluster_ids = Set{Int}()
+    path_hint = match(r"(\d+)\s*node"i, replace(String(out_dir), ['_', '-'] => " "))
+    path_hint === nothing || push!(cluster_ids, parse(Int, path_hint.captures[1]))
+    nodes_df = _read_result_df(out_dir, "nodes_meta")
+    if !isempty(nodes_df) && "node" in names(nodes_df)
+        for value in nodes_df.node
+            cluster = _xc_cluster_id(string(value))
+            cluster === nothing || push!(cluster_ids, cluster)
+        end
+    end
+    for link in values(link_by_tech)
+        src_cluster = _xc_endpoint_cluster(string(link["source"]))
+        dst_cluster = _xc_endpoint_cluster(string(link["target"]))
+        src_cluster === nothing || push!(cluster_ids, src_cluster)
+        dst_cluster === nothing || push!(cluster_ids, dst_cluster)
+    end
+    return isempty(cluster_ids) ? 15 : maximum(cluster_ids)
+end
+
+function _xc_trade_links(out_dir::AbstractString)
+    meta_df = _read_result_df(out_dir, "tech_meta")
+    isempty(meta_df) && return Dict{String,Dict{String,Any}}()
+    rows = _df_rows(meta_df, nrow(meta_df))
+    links = Dict{String,Dict{String,Any}}()
+    for row in rows
+        string(get(row, "category", "")) == "XC Trade" || continue
+        src = _xc_endpoint_id(get(row, "subsector", ""))
+        dst = _xc_endpoint_id(get(row, "sector", ""))
+        src === nothing && continue
+        dst === nothing && continue
+        src == dst && continue
+        tech = string(get(row, "tech", ""))
+        isempty(tech) && continue
+        commodity = _xc_trade_commodity(row)
+        links[tech] = Dict{String,Any}(
+            "tech" => tech,
+            "name" => string(get(row, "name", "")),
+            "source" => src,
+            "target" => dst,
+            "commodity" => commodity,
+            "sector" => string(get(row, "sector", "")),
+            "subsector" => string(get(row, "subsector", "")),
+        )
+    end
+    return links
+end
+
+function _commodity_label(id::AbstractString)
+    id == "electricity" && return "Electricity"
+    id == "natural_gas" && return "Natural gas"
+    id == "hydrogen" && return "Hydrogen"
+    id == "ccus" && return "CCUS"
+    id == "other" && return "Other"
+    id == "all" && return "All"
+    return String(id)
+end
+
+function _regional_map_periods(out_dir::AbstractString)
+    periods = Set{Int}()
+    for table in ("techStock", "tech_use_TS", "tech_use_h", "tech_use")
+        df = _read_result_df(out_dir, table)
+        isempty(df) && continue
+        "period" in names(df) || continue
+        for value in df.period
+            p = _to_int_safe(value)
+            p === nothing || push!(periods, p)
+        end
+    end
+    return sort!(collect(periods))
+end
+
+function _regional_map_input_workbook(out_dir::AbstractString)
+    settings = _read_result_df(out_dir, "solver_settings")
+    if !isempty(settings) && all(name in names(settings) for name in ("attribute", "value"))
+        for row in _df_rows(settings, nrow(settings))
+            string(get(row, "attribute", "")) == "inputWorkbook" || continue
+            workbook = strip(string(get(row, "value", "")))
+            isempty(workbook) || return workbook
+        end
+    end
+    return "Input/default_data.xlsx"
+end
+
+function _regional_map_unit_info(out_dir::AbstractString, link_by_tech::Dict{String,Dict{String,Any}}, metric_id::AbstractString)
+    kind = metric_id == "use" ? "UoA" : "UoC"
+    fallback = Dict{String,Any}("kind" => kind, "unit" => "", "label" => "")
+    isempty(link_by_tech) && return fallback
+    try
+        input_path, _ = _resolve_input_workbook(_regional_map_input_workbook(out_dir); require_exists = true)
+        md = _read_ui_data_cached(input_path)
+        counts = Dict{String,Float64}()
+        for tech in keys(link_by_tech)
+            t = Symbol(tech)
+            unit_sym = if metric_id == "use"
+                act = get(md.params.activityPer_tech, t, get(md.params.activityPer_techOrig, t, Symbol("")))
+                get(md.params.act_units, act, Symbol(kind))
+            else
+                get(md.params.tech_units, t, Symbol(kind))
+            end
+            unit = strip(string(unit_sym))
+            (isempty(unit) || unit == kind) && continue
+            counts[unit] = get(counts, unit, 0.0) + 1.0
+        end
+        isempty(counts) && return fallback
+        unit = first(sort!(collect(keys(counts)); by = u -> (-counts[u], u)))
+        return Dict{String,Any}("kind" => kind, "unit" => unit, "label" => unit)
+    catch err
+        @debug "Regional map unit lookup failed" err
+        return fallback
+    end
+end
+
+function _regional_map_payload(out_dir::AbstractString; metric::AbstractString = "stock", commodity::AbstractString = "all", period::Union{Nothing,Integer} = nothing)
+    link_by_tech = _xc_trade_links(out_dir)
+    periods = _regional_map_periods(out_dir)
+    sel_period = period === nothing ? (isempty(periods) ? 0 : periods[end]) : Int(period)
+    sel_period in periods || (sel_period = isempty(periods) ? 0 : periods[end])
+    metric_id = lowercase(strip(String(metric))) in ("use", "techuse", "flow", "flows") ? "use" : "stock"
+    commodity_id = lowercase(strip(String(commodity)))
+    commodity_id = commodity_id in ("all", "electricity", "natural_gas", "hydrogen", "ccus", "other") ? commodity_id : "all"
+
+    level = _regional_map_inferred_node_level(out_dir, link_by_tech)
+
+    all_commodities = sort!(collect(Set{String}(string(link["commodity"]) for link in values(link_by_tech))))
+    commodity_options = [Dict("id" => "all", "label" => "All")]
+    for id in ("electricity", "natural_gas", "hydrogen", "ccus", "other")
+        id in all_commodities && push!(commodity_options, Dict("id" => id, "label" => _commodity_label(id)))
+    end
+
+    unit_info = _regional_map_unit_info(out_dir, link_by_tech, metric_id)
+    links = metric_id == "use" ?
+        _regional_map_use_links(out_dir, link_by_tech, sel_period, commodity_id, unit_info) :
+        _regional_map_stock_links(out_dir, link_by_tech, sel_period, commodity_id, unit_info)
+
+    return Dict{String,Any}(
+        "available" => !isempty(link_by_tech),
+        "metric" => metric_id,
+        "commodity" => commodity_id,
+        "periods" => periods,
+        "selectedPeriod" => sel_period,
+        "nodeLevel" => level,
+        "assets" => _regional_map_asset_paths(level),
+        "commodityOptions" => commodity_options,
+        "unit" => unit_info,
+        "links" => links["links"],
+        "frames" => get(links, "frames", Vector{Dict{String,Any}}()),
+        "stats" => Dict(
+            "xcTechs" => length(link_by_tech),
+            "shownLinks" => length(links["links"]),
+            "commodities" => all_commodities,
+        ),
+    )
+end
+
+function _regional_map_stock_links(out_dir::AbstractString, link_by_tech::Dict{String,Dict{String,Any}}, period::Int, commodity::String, unit_info::Dict{String,Any})
+    stock_df = _read_result_df(out_dir, "techStock")
+    isempty(stock_df) && return Dict("links" => Vector{Dict{String,Any}}(), "unit" => unit_info)
+    directed = Dict{Tuple{String,String,String},Float64}()
+    for row in _df_rows(stock_df, nrow(stock_df))
+        p = _to_int_safe(get(row, "period", nothing))
+        p === period || continue
+        tech = string(get(row, "tech", ""))
+        link = get(link_by_tech, tech, nothing)
+        link === nothing && continue
+        comm = string(link["commodity"])
+        commodity == "all" || comm == commodity || continue
+        v = _to_float_safe(get(row, "value", nothing))
+        v === nothing && continue
+        abs(v) < 1e-9 && continue
+        key = (string(link["source"]), string(link["target"]), comm)
+        directed[key] = get(directed, key, 0.0) + v
+    end
+
+    pair_values = Dict{Tuple{String,String,String},Tuple{Float64,Float64}}()
+    for ((src, dst, comm), v) in directed
+        a, b = src <= dst ? (src, dst) : (dst, src)
+        prev = get(pair_values, (a, b, comm), (0.0, 0.0))
+        pair_values[(a, b, comm)] = src == a ? (max(prev[1], abs(v)), prev[2]) : (prev[1], max(prev[2], abs(v)))
+    end
+    rows = Vector{Dict{String,Any}}()
+    for ((a, b, comm), (ab, ba)) in pair_values
+        value = max(ab, ba)
+        value > 1e-9 || continue
+        push!(rows, Dict{String,Any}(
+            "source" => a,
+            "target" => b,
+            "sourceLabel" => _xc_endpoint_label(a),
+            "targetLabel" => _xc_endpoint_label(b),
+            "commodity" => comm,
+            "commodityLabel" => _commodity_label(comm),
+            "value" => value,
+            "unit" => unit_info,
+            "reverseValue" => ba,
+            "metric" => "stock",
+            "directional" => false,
+        ))
+    end
+    sort!(rows; by = row -> -Float64(row["value"]))
+    return Dict("links" => rows, "unit" => unit_info)
+end
+
+function _regional_map_use_links(out_dir::AbstractString, link_by_tech::Dict{String,Dict{String,Any}}, period::Int, commodity::String, unit_info::Dict{String,Any})
+    directed = Dict{Tuple{String,String,String},Float64}()
+    by_time = Dict{Tuple{Int,String,String,String},Float64}()
+    for (table, time_col) in (("tech_use_TS", "hc"), ("tech_use_h", "hour"), ("tech_use", ""))
+        use_df = _read_result_df(out_dir, table)
+        isempty(use_df) && continue
+        has_time = !isempty(time_col) && time_col in names(use_df)
+        for row in _df_rows(use_df, nrow(use_df))
+            p = _to_int_safe(get(row, "period", nothing))
+            p === period || continue
+            tech = string(get(row, "tech", ""))
+            link = get(link_by_tech, tech, nothing)
+            link === nothing && continue
+            comm = string(link["commodity"])
+            commodity == "all" || comm == commodity || continue
+            v = _to_float_safe(get(row, "value", nothing))
+            v === nothing && continue
+            abs(v) < 1e-12 && continue
+            src, dst = string(link["source"]), string(link["target"])
+            key = (src, dst, comm)
+            directed[key] = get(directed, key, 0.0) + v
+            if has_time
+                t = _to_int_safe(get(row, time_col, nothing))
+                t === nothing || (by_time[(t, src, dst, comm)] = get(by_time, (t, src, dst, comm), 0.0) + v)
+            end
+        end
+    end
+    links = _regional_map_net_links(directed, "use", unit_info)
+    frames = _regional_map_net_frames(by_time, unit_info)
+    return Dict("links" => links, "frames" => frames, "unit" => unit_info)
+end
+
+function _regional_map_net_links(directed::Dict{Tuple{String,String,String},Float64}, metric::AbstractString, unit_info::Dict{String,Any})
+    pair_keys = Set{Tuple{String,String,String}}()
+    for (src, dst, comm) in keys(directed)
+        a, b = src <= dst ? (src, dst) : (dst, src)
+        push!(pair_keys, (a, b, comm))
+    end
+    rows = Vector{Dict{String,Any}}()
+    for (a, b, comm) in pair_keys
+        ab = get(directed, (a, b, comm), 0.0)
+        ba = get(directed, (b, a, comm), 0.0)
+        net = ab - ba
+        abs(net) > 1e-9 || continue
+        src, dst = net >= 0 ? (a, b) : (b, a)
+        push!(rows, Dict{String,Any}(
+            "source" => src,
+            "target" => dst,
+            "sourceLabel" => _xc_endpoint_label(src),
+            "targetLabel" => _xc_endpoint_label(dst),
+            "commodity" => comm,
+            "commodityLabel" => _commodity_label(comm),
+            "value" => abs(net),
+            "unit" => unit_info,
+            "forwardValue" => ab,
+            "reverseValue" => ba,
+            "signedNet" => net,
+            "metric" => String(metric),
+            "directional" => true,
+        ))
+    end
+    sort!(rows; by = row -> -Float64(row["value"]))
+    return rows
+end
+
+function _regional_map_net_frames(by_time::Dict{Tuple{Int,String,String,String},Float64}, unit_info::Dict{String,Any})
+    isempty(by_time) && return Vector{Dict{String,Any}}()
+    times = sort!(collect(Set{Int}(t for (t, _, _, _) in keys(by_time))))
+    frames = Vector{Dict{String,Any}}()
+    max_frames = 80
+    step = max(1, cld(length(times), max_frames))
+    for t in times[1:step:end]
+        directed = Dict{Tuple{String,String,String},Float64}()
+        for ((tt, src, dst, comm), v) in by_time
+            tt == t || continue
+            directed[(src, dst, comm)] = get(directed, (src, dst, comm), 0.0) + v
+        end
+        links = _regional_map_net_links(directed, "use", unit_info)
+        shown = isempty(links) ? links : links[1:min(length(links), 60)]
+        push!(frames, Dict{String,Any}("time" => t, "links" => shown))
+    end
+    return frames
 end
 
 function _power_capacities(out_dir::AbstractString)

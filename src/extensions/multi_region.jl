@@ -20,8 +20,8 @@
 #     across all regional siblings sharing the family substring and bound
 #     the total by the carrier's cap.
 #
-# Active constraint families (15 total):
-#   Stock-cap, FIRST-carrier, single-substring:
+# Active constraint families:
+#   Stock-cap, exact repeated regional cap:
 #     • Comulative_Interconnection_Exports         (PEU01_03)
 #     • Comulative_Interconnection_Imports         (PNL04_01)
 #     • Comulative_HVNS                            (PNL04_02)
@@ -32,11 +32,12 @@
 #     • Imported_NG                                (Gas01_03)
 #     • Ammonia_wCCUS                              (Amm01_02)
 #     • Ammonia_eSMR                               (Amm01_08)
-#   Stock-cap, FIRST-carrier, looped over s_TechGroups (130-tech list):
+#   Stock-cap, exact repeated regional cap over s_TechGroups candidates:
 #     • c_TechStock_Limit                          (s_TechGroups)
-#   Use-cap, FIRST-carrier, single-substring:
-#     • Power_to_EU                                (PEU01_03)
-#     • Power_from_EU                              (PNL04_01)
+#   Use-cap, exact repeated regional cap:
+#     • all regional `CL{n}_{TechFamily}` families with an exact repeated
+#       positive techUse_max in the workbook; PEU01_03 and PNL04_01 are kept
+#       as explicit AIMMS-compatible seed candidates.
 #   Stock-cap, special:
 #     • Comulative_Nuclear   (LHS: tech_name contains "Nuclear" but not
 #                             "Borssele"; RHS: techStock_max of FIRST
@@ -91,7 +92,9 @@ const _MR_EXTRA_FIRST_STOCK = String[
     "Emi01_03","Emi01_02","PNL04_02","PNL04_01","PEU01_03",
 ]
 
-# Single-substring use caps (Power_to_EU = PEU01_03, Power_from_EU = PNL04_01).
+# AIMMS seed candidates for use caps (Power_to_EU = PEU01_03,
+# Power_from_EU = PNL04_01). A seed still needs repeated regional members with
+# the exact same positive cap; it is not a bypass around the data rule.
 const _MR_FIRST_USE = String["PEU01_03", "PNL04_01"]
 
 # Comulative_Nuclear: LHS = tech_name(t) contains "Nuclear" AND not "Borssele".
@@ -116,6 +119,46 @@ const _MR_GEO_FAMILY = String["LTN01_05", "Agr05_03", "LTI01_04"]
 @inline _mr_cluster_prefix(t::Symbol) = first(split(String(t), '_'; limit = 2))
 
 @inline _mr_id_contains(t::Symbol, sub::AbstractString) = occursin(sub, String(t))
+
+function _mr_regional_family(t::Symbol)
+    m = match(r"^CL\d+_(.+)$", String(t))
+    return m === nothing ? nothing : String(m.captures[1])
+end
+
+function _mr_members_with_substring(techs::Vector{Symbol}, sub::AbstractString)
+    return [t for t in techs if _mr_id_contains(t, sub)]
+end
+
+function _mr_exact_cap_groups(sets::ModelSets,
+                              cap_dict::Dict{Tuple{Symbol,Int},Float64},
+                              periods::Vector{Int};
+                              balancers_only::Bool = false,
+                              seed_families::Vector{String} = String[])
+    allowed = balancers_only ? Set(sets.tech_balancers) : Set(sets.technologies)
+    members_by_family = Dict{String, Vector{Symbol}}()
+    candidate_families = Set(seed_families)
+
+    for t in sets.technologies
+        t in allowed || continue
+        family = _mr_regional_family(t)
+        family === nothing && continue
+        push!(get!(members_by_family, family, Symbol[]), t)
+        push!(candidate_families, family)
+    end
+
+    groups = NamedTuple{(:family, :ps, :members, :cap), Tuple{String, Int, Vector{Symbol}, Float64}}[]
+    for family in sort!(collect(candidate_families))
+        members = get(members_by_family, family, Symbol[])
+        length(members) > 1 || continue
+        for ps in periods
+            cap = get(cap_dict, (first(members), ps), 0.0)
+            cap > 0 || continue
+            all(get(cap_dict, (t, ps), 0.0) == cap for t in members) || continue
+            push!(groups, (family = family, ps = ps, members = members, cap = cap))
+        end
+    end
+    return groups
+end
 
 # AIMMS `First({ t | techStock_max(t, p) and FindString(...) > 0 })` —
 # returns the first tech in iteration order whose name contains `sub` AND
@@ -233,32 +276,21 @@ function apply_multi_region!(m::JuMP.Model, vars, md::ModelData; mode::Symbol = 
 
     n_added = 0
 
-    # --- Stock caps with FIRST-carrier (s_TechGroups + extras) ----------------
-    for sub in vcat(_MR_S_TECH_GROUPS, _MR_EXTRA_FIRST_STOCK)
-        members = [t for t in techs if _mr_id_contains(t, sub)]
-        isempty(members) && continue
-        for ps in periods
-            carrier = _mr_first_carrier(techs, sub, params.techStock_max, ps)
-            carrier === nothing && continue
-            cap = params.techStock_max[(carrier, ps)]
-            @constraint(m, sum(techStock[t, ps] for t in members) <= cap,
-                        base_name = "mr_stockCap_$(sub)_$(ps)")
-            n_added += 1
-        end
+    # --- Stock caps with exact repeated regional caps -------------------------
+    for group in _mr_exact_cap_groups(sets, params.techStock_max, periods;
+                                      seed_families = vcat(_MR_S_TECH_GROUPS, _MR_EXTRA_FIRST_STOCK))
+        @constraint(m, sum(techStock[t, group.ps] for t in group.members) <= group.cap,
+                    base_name = "mr_stockCap_$(group.family)_$(group.ps)")
+        n_added += 1
     end
 
-    # --- Use caps with FIRST-carrier (PEU01_03, PNL04_01) ---------------------
-    for sub in _MR_FIRST_USE
-        members = [t for t in techs if _mr_id_contains(t, sub)]
-        isempty(members) && continue
-        for ps in periods
-            carrier = _mr_first_carrier(techs, sub, params.techUse_max, ps)
-            carrier === nothing && continue
-            cap = params.techUse_max[(carrier, ps)]
-            @constraint(m, sum(tech_use[t, ps] for t in members) <= cap,
-                        base_name = "mr_useCap_$(sub)_$(ps)")
-            n_added += 1
-        end
+    # --- Use caps with exact repeated regional caps ---------------------------
+    for group in _mr_exact_cap_groups(sets, params.techUse_max, periods;
+                                      balancers_only = true,
+                                      seed_families = _MR_FIRST_USE)
+        @constraint(m, sum(tech_use[t, group.ps] for t in group.members) <= group.cap,
+                    base_name = "mr_useCap_$(group.family)_$(group.ps)")
+        n_added += 1
     end
 
     # --- Comulative_Nuclear: tech_name "Nuclear" but not "Borssele" -----------
