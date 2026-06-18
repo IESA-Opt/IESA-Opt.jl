@@ -181,6 +181,7 @@
     if (!el) return;
     el.textContent = message || "";
     el.classList.toggle("error-text", !!isError);
+    if (window.IESAExplainStatus) window.IESAExplainStatus(el, message, isError ? "error" : "");
   }
 
   async function loadAtlas() {

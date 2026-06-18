@@ -253,12 +253,14 @@
     const rows = state.campaigns || [];
     if (summary) {
       summary.textContent = error ? "Could not load campaigns." : `${rows.length} campaign${rows.length === 1 ? "" : "s"} available.`;
+      if (window.IESAExplainStatus) window.IESAExplainStatus(summary, error || summary.textContent, error ? "error" : "");
     }
     if (!list) return;
     list.innerHTML = "";
     if (error) {
       list.className = "scenario-campaign-list empty-state";
       list.textContent = String(error);
+      if (window.IESAExplainStatus) window.IESAExplainStatus(list, error, "error");
       return;
     }
     if (!rows.length) {
@@ -705,7 +707,10 @@
     const completed = Number(campaign.completed || 0);
     const total = Number(campaign.total || directions.length || 0);
     if (subtitle) subtitle.textContent = campaign.name ? `${campaign.name} - ${stateText}` : "Hybrid ORACLE design previewed.";
-    if (detail) detail.textContent = campaign.stage || `Estimated max error ${formatMaybe(certificate.estimatedMaxError)} against target ${formatMaybe(certificate.targetTolerance)}.`;
+    if (detail) {
+      detail.textContent = campaign.stage || `Estimated max error ${formatMaybe(certificate.estimatedMaxError)} against target ${formatMaybe(certificate.targetTolerance)}.`;
+      if (window.IESAExplainStatus) window.IESAExplainStatus(detail, detail.textContent, stateText === "failed" ? "error" : "");
+    }
     if (status) {
       status.textContent = stateText === "completed" ? "Complete" : stateText === "running" ? "Running" : stateText === "failed" ? "Failed" : "Ready";
       status.className = `status-pill ${stateText === "completed" ? "ready" : stateText === "running" ? "warming" : stateText === "failed" ? "failed" : "muted"}`;
@@ -879,6 +884,12 @@
         <tbody>${rows}</tbody>
       </table>
     `;
+    if (window.IESAExplainStatus) {
+      el.querySelectorAll(".mga-direction-status.failed").forEach((node, idx) => {
+        const failed = fallback.filter((s) => String(s.status || "") === "failed")[idx];
+        window.IESAExplainStatus(node, failed && failed.errorMessage ? failed.errorMessage : "MGA direction failed.", "error");
+      });
+    }
   }
 
   function prettifyPhase(phase) {
@@ -991,8 +1002,8 @@
     setTitle("MGA error", message);
     const detail = $("mgaProgressDetail");
     const log = $("mgaProgressLog");
-    if (detail) detail.textContent = message;
-    if (log) log.textContent = message;
+    if (detail) { detail.textContent = message; if (window.IESAExplainStatus) window.IESAExplainStatus(detail, message, "error"); }
+    if (log) { log.textContent = message; if (window.IESAExplainStatus) window.IESAExplainStatus(log, message, "error"); }
   }
 
   function bindStandalone() {

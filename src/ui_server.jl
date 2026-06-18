@@ -392,6 +392,42 @@ function _list_workbooks()
     return files
 end
 
+function _rewrite_legacy_input_workbook(value::AbstractString)
+    text = strip(String(value))
+    isempty(text) && return "Input/default_data.xlsx"
+    root = _repo_root()
+    as_posix = replace(text, '\\' => '/')
+    if !isabspath(text) && startswith(lowercase(as_posix), "data/")
+        migrated = "Input/" * as_posix[6:end]
+        old_path = normpath(joinpath(root, text))
+        new_path = normpath(joinpath(root, migrated))
+        !isfile(old_path) && isfile(new_path) && return migrated
+    elseif isabspath(text)
+        old_root = replace(normpath(joinpath(root, "data")), '\\' => '/')
+        abs_path = replace(normpath(text), '\\' => '/')
+        old_root_lc = lowercase(old_root)
+        abs_path_lc = lowercase(abs_path)
+        if abs_path_lc == old_root_lc || startswith(abs_path_lc, old_root_lc * "/")
+            suffix = relpath(normpath(text), normpath(joinpath(root, "data")))
+            migrated = suffix == "." ? normpath(joinpath(root, "Input")) : normpath(joinpath(root, "Input", suffix))
+            !isfile(normpath(text)) && isfile(migrated) && return migrated
+        end
+    end
+    return text
+end
+
+function _resolve_input_workbook(value::AbstractString; require_exists::Bool = true)
+    input_value = _rewrite_legacy_input_workbook(value)
+    input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
+    require_exists && !isfile(input_path) && error("Input workbook not found: $(input_value)")
+    rel = try
+        replace(relpath(input_path, _repo_root()), '\\' => '/')
+    catch
+        input_path
+    end
+    return input_path, rel
+end
+
 # Opens a native OS file-open dialog and returns the absolute path that the user
 # picked, or an empty string if the dialog was cancelled or the platform is not
 # supported. Windows-only for now (PowerShell + System.Windows.Forms). The dialog
@@ -616,6 +652,8 @@ function _mga_config(body)
     boundary_ramping = _as_bool(_config_get(body, "boundaryRamping", true), true)
     solver = lowercase(String(_config_get(body, "solver", _preferred_default_solver_id())))
     solve_method = lowercase(String(_config_get(body, "solveMethod", "barrier_crossover")))
+    input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
+    _, input_rel = _resolve_input_workbook(input_value; require_exists = false)
     return Dict{String,Any}(
         "name" => isempty(strip(name)) ? "mga_campaign" : strip(name),
         "directions" => n_directions,
@@ -625,7 +663,7 @@ function _mga_config(body)
         "oracleIterations" => oracle_iterations,
         "oracleBatch" => oracle_batch,
         "tolerance" => tolerance,
-        "inputWorkbook" => String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx")),
+        "inputWorkbook" => input_rel,
         "periods" => _as_int_vector(_config_get(body, "periods", [2050])),
         "mode" => mode,
         "representativeDays" => rep_days,
@@ -1210,13 +1248,7 @@ end
 
 function _resolve_explorer_input(body)
     input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
-    input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
-    isfile(input_path) || error("Input workbook not found: $(input_value)")
-    rel = try
-        replace(relpath(input_path, _repo_root()), '\\' => '/')
-    catch
-        input_path
-    end
+    input_path, rel = _resolve_input_workbook(input_value)
     return input_path, rel
 end
 
@@ -2410,8 +2442,7 @@ end
 
 function _normalize_run_config(raw_config)
     input_value = String(_config_get(raw_config, "inputWorkbook", "Input/default_data.xlsx"))
-    input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
-    isfile(input_path) || error("Input workbook not found: $input_value")
+    input_path, input_rel = _resolve_input_workbook(input_value)
 
     mode_raw = lowercase(String(_config_get(raw_config, "mode", "timeslice")))
     mode = mode_raw in ("full_hourly", "fh", "full-hourly") ? "full_hourly" : "timeslice"
@@ -2433,7 +2464,7 @@ function _normalize_run_config(raw_config)
     end
 
     return Dict{String,Any}(
-        "inputWorkbook" => replace(relpath(input_path, _repo_root()), '\\' => '/'),
+        "inputWorkbook" => input_rel,
         "inputPath" => input_path,
         "scenario" => scenario_name,
         "periods" => periods,
@@ -4708,7 +4739,8 @@ end
 
     function _scenario_input_path(body)::String
         input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
-        return isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
+        input_path, _ = _resolve_input_workbook(input_value; require_exists = false)
+        return input_path
     end
 
     function _parse_excel_cell_ref(cell::AbstractString)

@@ -107,7 +107,11 @@ function safeRun(label, fn) {
   catch (error) {
     console.error(`init: ${label} threw`, error);
     const status = document.getElementById("connectionStatus");
-    if (status) status.textContent = `UI init error in ${label}: ${error.message || error}`;
+    if (status) {
+      const message = `UI init error in ${label}: ${error.message || error}`;
+      status.textContent = message;
+      explainStatusMessage(status, message, "error");
+    }
   }
 }
 
@@ -170,6 +174,90 @@ function solverMethodHelp(method) {
   };
 }
 window.IESASolverMethodHelp = solverMethodHelp;
+
+function errorMessageHelp(message, kind = "") {
+  const text = String(message || "").trim();
+  const isError = kind === "error" || /\b(error|failed|failure|exception|traceback|not found|missing|unreachable|infeasible|unbounded|timeout|time limit|out of memory|denied|license|could not)\b/i.test(text);
+  if (!text || !isError) return null;
+  if (/workbook.*not found|not found.*workbook|input workbook not found|missing.*workbook/i.test(text)) {
+    return {
+      title: "Workbook not found",
+      short: ["Julia could not open the selected workbook.", "Check the path or choose a workbook from Input/."],
+      more: "The UI submits the workbook path to the local Julia server. For bundled examples, use a workbook listed from Input/. For a custom file, use Browse again and confirm the file still exists, has an Excel extension, and is readable by the Julia process. Reload the UI after adding a new workbook under Input/ so the dropdown is refreshed."
+    };
+  }
+  if (/server unreachable|failed to fetch|networkerror|connection lost|could not load local ui options/i.test(text)) {
+    return {
+      title: "Julia server unreachable",
+      short: ["The browser could not reach the local Julia server.", "Check the launcher terminal and port 8123."],
+      more: "This usually means the Julia UI process is still starting, crashed, or is not listening on the expected local port. Keep the launcher window open, check it for errors, and refresh once the status pill says Julia ready. If another process owns port 8123, restart the UI on a free port."
+    };
+  }
+  if (/infeasible/i.test(text)) {
+    return {
+      title: "Model infeasible",
+      short: ["The solver could not satisfy all constraints.", "Enable diagnostics or inspect recent input changes."],
+      more: "An infeasible run means some combination of workbook data, bounds, policy targets, stock limits, temporal settings, or enabled extensions leaves no valid solution. Re-run with Show violations enabled when available, compare against a known-good workbook, and narrow the change by relaxing the newest bounds or constraints first."
+    };
+  }
+  if (/unbounded/i.test(text)) {
+    return {
+      title: "Model unbounded",
+      short: ["The objective can improve without a finite limit.", "Look for missing bounds or free activities."],
+      more: "An unbounded LP often points to a missing capacity, stock, activity, import/export, or slack bound. Check technologies and activities introduced by the selected workbook or extension, especially any variable with negative cost or revenue-like objective terms."
+    };
+  }
+  if (/outofmemory|out of memory|memory|allocation/i.test(text)) {
+    return {
+      title: "Memory limit reached",
+      short: ["The run likely exceeded available RAM.", "Reduce threads, temporal detail, or campaign parallelism."],
+      more: "Large LP generation and barrier solves can consume a lot of memory, especially with many solver threads or parallel campaign workers. Try fewer representative days, a coarser hours-per-day setting, fewer workers, or a lower solver thread count before increasing model detail again."
+    };
+  }
+  if (/gurobi|license/i.test(text)) {
+    return {
+      title: "Solver or license issue",
+      short: ["The selected solver could not run as configured.", "Check solver availability and license setup."],
+      more: "For Gurobi, confirm the license is valid in this Julia environment and that Gurobi.jl can initialize. You can switch to HiGHS for a sanity check, or restart Julia after changing solver environment variables."
+    };
+  }
+  if (/timeout|time limit/i.test(text)) {
+    return {
+      title: "Time limit reached",
+      short: ["The solve or campaign exceeded its time limit.", "Use a smaller run or increase the limit."],
+      more: "This does not always mean the model is wrong. Try a coarser temporal setting, fewer representative days, lower campaign parallelism, or a different solver method. If the run is expected to be large, increase the configured time limit and monitor progress."
+    };
+  }
+  if (/permission|access.*denied|denied/i.test(text)) {
+    return {
+      title: "File access denied",
+      short: ["Julia could not read or write the requested file.", "Close locking programs and check permissions."],
+      more: "Excel, DuckDB, or Parquet files can be locked by another process. Close any open workbook or database viewer, check that the output folder is writable, and avoid writing into protected system folders."
+    };
+  }
+  return {
+    title: "Error message",
+    short: ["This message came from the local UI or Julia backend.", "Read the exact text before changing settings."],
+    more: "Use the message text to identify the failing stage or file. If it mentions a workbook, check the Input/ path or Browse selection. If it mentions solver status, inspect the Progress log and try diagnostics, a smaller temporal setting, or a known-good workbook to isolate the cause."
+  };
+}
+
+function explainStatusMessage(el, message, kind = "") {
+  if (!el) return;
+  const help = errorMessageHelp(message, kind);
+  if (help) {
+    el.dataset.helpTitle = help.title;
+    el.dataset.help = help.short.join("\n");
+    el.dataset.helpMore = help.more;
+  } else if (el.dataset.helpTitle || el.dataset.help || el.dataset.helpMore) {
+    el.dataset.helpTitle = "Status message";
+    el.dataset.help = "Shows the latest UI or backend status.\nNo action is needed unless it reports an error.";
+    el.dataset.helpMore = "Status text updates as the UI talks to the local Julia server. If a later message turns red or says failed, its help icon explains the likely cause and next checks.";
+  }
+  if (window.IESARefreshHelp) window.IESARefreshHelp(el.parentElement || el);
+}
+window.IESAErrorMessageHelp = errorMessageHelp;
+window.IESAExplainStatus = explainStatusMessage;
 
 function bindUiHelp() {
   let activeAnchor = null;
@@ -318,6 +406,7 @@ function bindUiHelp() {
   const shouldAttachAnchor = target => {
     if (!target || !target.matches || target === document.body) return false;
     if (target.id === "uiHelpToggle" || target.closest("#uiHelpToggle")) return false;
+    if (target.closest("#uiSearchOverlay")) return false;
     if (target.classList.contains("ui-help-anchor") || target.closest(".ui-help-anchor,#uiHelpPopover,.modebar")) return false;
     if (/^(SCRIPT|STYLE|OPTION)$/i.test(target.tagName)) return false;
     if (target.tagName === "INPUT" && ["hidden", "file"].includes((target.type || "").toLowerCase())) return false;
@@ -328,6 +417,7 @@ function bindUiHelp() {
     return !(ancestorHelp && ancestorHelp.matches("label,.toggle-field"));
   };
   const insertionHostFor = target => {
+    if (target.tagName === "LI") return { node: target, mode: "append" };
     if (target.classList.contains("section-button") || target.classList.contains("tab-button") || target.tagName === "BUTTON") return { node: target, mode: "append" };
     if (target.matches("h2,summary")) return { node: target, mode: "append" };
     if (target.matches("label,.field,.toggle-field")) {
@@ -345,7 +435,10 @@ function bindUiHelp() {
     return target.parentElement ? { node: target, mode: "after" } : null;
   };
   const attachAnchor = target => {
-    if (!shouldAttachAnchor(target) || anchorForTarget.has(target)) return;
+    if (!shouldAttachAnchor(target)) return;
+    const existing = anchorForTarget.get(target);
+    if (existing && existing.isConnected) return;
+    if (existing) anchorForTarget.delete(target);
     const placement = insertionHostFor(target);
     if (!placement || !placement.node || !placement.node.isConnected) return;
     if (placement.node.querySelector(":scope > .ui-help-anchor")) return;
@@ -397,6 +490,7 @@ function bindUiHelp() {
   };
 
   attachAnchors(document);
+  window.IESARefreshHelp = attachAnchors;
   if (toggle) toggle.addEventListener("click", () => setHelpEnabled(toggle.getAttribute("aria-pressed") !== "true"));
   setHelpEnabled(false);
   new MutationObserver(queueAttachAnchors).observe(document.body, { childList: true, subtree: true });
@@ -485,6 +579,7 @@ function renderJuliaStatus(status) {
   else { el.classList.add("muted"); label = `Julia: ${status.state}`; }
   el.innerHTML = `<span class="status-dot"></span><span class="status-label">${escapeHtml(label)}</span>`;
   el.title = status && status.message ? status.message : "";
+  explainStatusMessage(el, status && status.message ? status.message : label, status && (status.state === "failed" || status.state === "missing") ? "error" : "");
 }
 
 async function fetchJson(url, options) { const r = await fetch(url, options); const p = await r.json(); if (!r.ok) throw new Error(p.error || r.statusText); return p; }
@@ -563,39 +658,96 @@ function bindUiSearch() {
   const results = $("uiSearchResults");
   if (!button || !overlay || !input || !results) return;
 
-  const sectionLabels = {};
-  document.querySelectorAll(".section-button").forEach(b => { sectionLabels[b.dataset.section] = (b.textContent || "").trim(); });
+  function readableText(el) {
+    if (!el) return "";
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll(".ui-help-anchor").forEach(node => node.remove());
+    return (clone.textContent || "").replace(/\s+/g, " ").trim();
+  }
 
-  const index = [];
-  document.querySelectorAll(".section-button").forEach(b => {
-    index.push({ kind: "section", label: (b.textContent || "").trim(), hint: "Workspace", section: b.dataset.section });
-  });
-  document.querySelectorAll(".tab-button").forEach(b => {
-    const section = b.dataset.section;
-    const sectionLabel = sectionLabels[section] || section;
-    index.push({ kind: "tab", label: (b.textContent || "").trim(), hint: sectionLabel + " workspace", section, tab: b.dataset.tab });
-  });
-  const aboutPage = document.querySelector("#tab-about .about-page");
-  if (aboutPage) {
-    let currentH3 = null, currentH4 = null;
-    aboutPage.querySelectorAll("h3, h4, li").forEach(el => {
-      if (el.tagName === "H3") { currentH3 = el; currentH4 = null; index.push({ kind: "about-section", label: (el.textContent || "").trim(), hint: "About > Section", section: "about", tab: "about", anchor: el.id }); }
-      else if (el.tagName === "H4") { currentH4 = el; const ctx = currentH3 ? (currentH3.textContent || "").trim() : "About"; index.push({ kind: "about-subsection", label: (el.textContent || "").trim(), hint: "About > " + ctx, section: "about", tab: "about", anchor: el.id }); }
-      else if (el.tagName === "LI" && el.closest(".about-list")) {
-        const strong = el.querySelector("strong");
-        if (!strong) return;
-        const heading = currentH4 || currentH3;
-        const ctx = heading ? (heading.textContent || "").trim() : "About";
-        const detail = (el.textContent || "").trim().replace(/\s+/g, " ");
-        index.push({ kind: "about-item", label: (strong.textContent || "").trim(), hint: "About > " + ctx, section: "about", tab: "about", anchor: heading ? heading.id : "", detail });
-      }
+  const sectionLabels = {};
+  document.querySelectorAll(".section-button").forEach(b => { sectionLabels[b.dataset.section] = readableText(b); });
+
+  let index = [];
+
+  function controlLabel(el) {
+    const field = el.closest(".field");
+    const direct = field && field.querySelector(":scope > span");
+    if (direct && readableText(direct)) return readableText(direct);
+    const label = el.closest("label");
+    if (label) return readableText(label);
+    return el.id || "Control";
+  }
+
+  function controlLocation(el) {
+    const panel = el.closest(".tab-panel");
+    const tab = panel && panel.id ? panel.id.replace(/^tab-/, "") : "";
+    const tabButton = tab ? document.querySelector(`.tab-button[data-tab="${CSS.escape(tab)}"]`) : null;
+    const section = tabButton ? tabButton.dataset.section : "";
+    const tabLabel = tabButton ? readableText(tabButton) : "";
+    const sectionLabel = sectionLabels[section] || section || "UI";
+    return { section, tab, hint: tabLabel ? `${sectionLabel} > ${tabLabel}` : sectionLabel };
+  }
+
+  function addSelectOptionsToIndex() {
+    document.querySelectorAll("select[id]").forEach(select => {
+      const label = controlLabel(select);
+      const location = controlLocation(select);
+      const seen = new Set();
+      Array.from(select.options || []).forEach(option => {
+        const value = (option.value || "").trim();
+        const text = (option.textContent || "").trim();
+        const optionLabel = text || value;
+        const key = (value || optionLabel).toLowerCase();
+        if (!optionLabel || seen.has(key)) return;
+        seen.add(key);
+        index.push({
+          kind: "control",
+          label: `${label}: ${optionLabel}`,
+          hint: location.hint,
+          section: location.section,
+          tab: location.tab,
+          focusId: select.id,
+          detail: [label, optionLabel, value, text].filter(Boolean).join(" "),
+        });
+      });
     });
   }
 
+  function buildSearchIndex() {
+    index = [];
+    document.querySelectorAll(".section-button").forEach(b => {
+      index.push({ kind: "section", label: readableText(b), hint: "Workspace", section: b.dataset.section });
+    });
+    document.querySelectorAll(".tab-button").forEach(b => {
+      const section = b.dataset.section;
+      const sectionLabel = sectionLabels[section] || section;
+      index.push({ kind: "tab", label: readableText(b), hint: sectionLabel + " workspace", section, tab: b.dataset.tab });
+    });
+    addSelectOptionsToIndex();
+    const aboutPage = document.querySelector("#tab-about .about-page");
+    if (aboutPage) {
+      let currentH3 = null, currentH4 = null;
+      aboutPage.querySelectorAll("h3, h4, li").forEach(el => {
+        if (el.tagName === "H3") { currentH3 = el; currentH4 = null; index.push({ kind: "about-section", label: readableText(el), hint: "About > Section", section: "about", tab: "about", anchor: el.id }); }
+        else if (el.tagName === "H4") { currentH4 = el; const ctx = currentH3 ? readableText(currentH3) : "About"; index.push({ kind: "about-subsection", label: readableText(el), hint: "About > " + ctx, section: "about", tab: "about", anchor: el.id }); }
+        else if (el.tagName === "LI" && el.closest(".about-list")) {
+          const strong = el.querySelector("strong");
+          if (!strong) return;
+          const heading = currentH4 || currentH3;
+          const ctx = heading ? readableText(heading) : "About";
+          const detail = readableText(el);
+          index.push({ kind: "about-item", label: readableText(strong), hint: "About > " + ctx, section: "about", tab: "about", anchor: heading ? heading.id : "", detail });
+        }
+      });
+    }
+  }
+  buildSearchIndex();
+
   let activeIdx = 0, flatMatches = [];
 
-  const KIND_LABELS = { section: "Workspace", tab: "Tab", "about-section": "About", "about-subsection": "About", "about-item": "About" };
-  const KIND_CLASS = { section: "section", tab: "tab", "about-section": "about", "about-subsection": "about", "about-item": "about" };
+  const KIND_LABELS = { section: "Workspace", tab: "Tab", control: "Control", "about-section": "About", "about-subsection": "About", "about-item": "About" };
+  const KIND_CLASS = { section: "section", tab: "tab", control: "tab", "about-section": "about", "about-subsection": "about", "about-item": "about" };
 
   function highlight(text, q) {
     if (!q) return escapeHtml(text);
@@ -629,13 +781,14 @@ function bindUiSearch() {
       flatMatches = [];
       return;
     }
-    const groups = { workspaces: [], tabs: [], about: [] };
+    const groups = { workspaces: [], tabs: [], controls: [], about: [] };
     matches.forEach(m => {
       if (m.kind === "section") groups.workspaces.push(m);
       else if (m.kind === "tab") groups.tabs.push(m);
+      else if (m.kind === "control") groups.controls.push(m);
       else groups.about.push(m);
     });
-    const order = [["workspaces", "Workspaces"], ["tabs", "Tabs"], ["about", "About reference"]];
+    const order = [["workspaces", "Workspaces"], ["tabs", "Tabs"], ["controls", "Controls and choices"], ["about", "About reference"]];
     flatMatches = [];
     let html = "";
     order.forEach(([key, label]) => {
@@ -677,8 +830,18 @@ function bindUiSearch() {
         if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     }
+    if (entry.focusId) {
+      window.requestAnimationFrame(() => {
+        const el = document.getElementById(entry.focusId);
+        if (!el) return;
+        const field = el.closest(".field") || el;
+        field.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.focus({ preventScroll: true });
+      });
+    }
   }
   function open() {
+    buildSearchIndex();
     overlay.removeAttribute("hidden");
     input.value = "";
     renderResults("");
@@ -929,7 +1092,7 @@ async function pollJob() {
       $("runTitle").textContent="Run stopped";
       setRunHint("The run was stopped before results were saved.", "warning");
     }
-  } catch(error) { $("jobStatus").textContent=error.message; }
+  } catch(error) { const el = $("jobStatus"); el.textContent=error.message; explainStatusMessage(el, error.message, "error"); }
 }
 function renderJob(job) {
   const status = job && job.status ? job.status : "Idle";
@@ -969,6 +1132,7 @@ function setRunHint(text, kind) {
   if (kind === "error") el.classList.add("error-text");
   else if (kind === "warning") el.classList.add("warning-text");
   else if (kind === "success") el.classList.add("success-text");
+  explainStatusMessage(el, text, kind);
 }
 function jobDescription(job) { if(!job||!job.status) return stageDescriptions.idle; if(job.status==="completed") return stageDescriptions.done; if(job.status==="failed") return stageDescriptions.failed; return stageDescriptions[job.stage] || "Julia is working on the current stage."; }
 function updateActivityLights(job) { const node=$("activityLights"), status=job&&job.status?job.status:"", current=job&&job.stage?job.stage:"", idx=stages.findIndex(([id])=>id===current), completed=status==="completed", failed=status==="failed"; node.classList.toggle("running", status==="queued"||status==="running"); node.classList.toggle("idle", !job||!status); node.innerHTML=stages.map(([id,label],i)=>{ let cls="future"; if(completed||i<idx) cls="done"; else if(failed&&id===current) cls="failed"; else if(i===idx&&(status==="queued"||status==="running")) cls="active"; return `<span class="${cls}" title="${escapeHtml(label)}"></span>`; }).join(""); }
@@ -1072,7 +1236,7 @@ function autoCompareOrView() {
 }
 
 function selectedOutputIds() { return [...state.comparedOutputIds]; }
-function setOutputStatus(message) { $("outputStatus").textContent = message; }
+function setOutputStatus(message) { const el = $("outputStatus"); el.textContent = message; explainStatusMessage(el, message); }
 
 async function viewOutput(outputId) {
   state.selectedOutputId = outputId;
@@ -1280,7 +1444,9 @@ function setResultsLoadingState(message="Loading results…") {
 }
 function setResultsErrorState(message) {
   const m = message || "Could not load results.";
-  $("resultsOutput").textContent = m;
+  const output = $("resultsOutput");
+  output.textContent = m;
+  explainStatusMessage(output, m, "error");
   ["timingChart","systemCostsChart","co2PriceChart","powerCapacityChart","emissionsChart","supplyDemandChart"].forEach(id => setEmptyChart(id, m));
   setEmptyChart("hourlyDispatchChart", m, "profile-chart");
   setEmptyChart("flexChart", m, "profile-chart");

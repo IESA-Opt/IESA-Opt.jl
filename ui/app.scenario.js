@@ -797,7 +797,9 @@
       const p = await r.json();
       renderPreview(p);
     } catch (e) {
-      $("scPreviewStatus").textContent = "Server unreachable: " + (e.message || e);
+      const status = $("scPreviewStatus");
+      status.textContent = "Server unreachable: " + (e.message || e);
+      if (window.IESAExplainStatus) window.IESAExplainStatus(status, status.textContent, "error");
     }
   }
 
@@ -831,7 +833,12 @@
     if (payload.errors && payload.errors.length) {
       const ul = document.createElement("ul");
       ul.className = "sc-errors";
-      payload.errors.forEach((e) => { const li = document.createElement("li"); li.textContent = e; ul.appendChild(li); });
+      payload.errors.forEach((e) => {
+        const li = document.createElement("li");
+        li.textContent = e;
+        if (window.IESAExplainStatus) window.IESAExplainStatus(li, e, "error");
+        ul.appendChild(li);
+      });
       msgEl.appendChild(ul);
     }
     if (payload.warnings && payload.warnings.length) {
@@ -855,10 +862,15 @@
     const wrap = $("scPreviewWrap");
     wrap.innerHTML = "";
     if (!payload.ok) {
-      $("scPreviewStatus").textContent = (payload.errors || ["Preview failed."])[0];
+      const msg = (payload.errors || ["Preview failed."])[0];
+      const status = $("scPreviewStatus");
+      status.textContent = msg;
+      if (window.IESAExplainStatus) window.IESAExplainStatus(status, msg, "error");
       return;
     }
-    $("scPreviewStatus").textContent = "Showing " + payload.shown + " of " + payload.impliedSampleSize.toLocaleString() + " variants.";
+    const previewStatus = $("scPreviewStatus");
+    previewStatus.textContent = "Showing " + payload.shown + " of " + payload.impliedSampleSize.toLocaleString() + " variants.";
+    if (window.IESAExplainStatus) window.IESAExplainStatus(previewStatus, previewStatus.textContent, "");
     const tbl = document.createElement("table");
     const thead = document.createElement("thead");
     const trh = document.createElement("tr");
@@ -888,6 +900,7 @@
     el.classList.remove("sc-status-ok", "sc-status-error");
     if (kind === "ok") el.classList.add("sc-status-ok");
     else if (kind === "error") el.classList.add("sc-status-error");
+    if (window.IESAExplainStatus) window.IESAExplainStatus(el, text, kind);
   }
 
   // ===========================================================================
@@ -2020,9 +2033,11 @@
       if (ce && String(ce).trim()) {
         errPanel.classList.remove("hidden");
         errMsg.textContent = String(ce);
+        if (window.IESAExplainStatus) window.IESAExplainStatus(errMsg, ce, "error");
       } else {
         errPanel.classList.add("hidden");
         errMsg.textContent = "";
+        if (window.IESAExplainStatus) window.IESAExplainStatus(errMsg, "", "");
       }
     }
 
@@ -2061,6 +2076,7 @@
     const pre = document.createElement("pre");
     pre.className = "failure-msg";
     pre.textContent = f.error || "(no message)";
+    if (window.IESAExplainStatus) window.IESAExplainStatus(pre, pre.textContent, "error");
     pre.title = "Click to copy";
     pre.addEventListener("click", () => {
       try { navigator.clipboard.writeText(f.error || ""); } catch (_) {}
@@ -2161,6 +2177,7 @@
         const pre = document.createElement("pre");
         pre.className = "worker-error-msg";
         pre.textContent = w.last_error;
+        if (window.IESAExplainStatus) window.IESAExplainStatus(pre, w.last_error, "error");
         pre.title = "Click to copy";
         pre.addEventListener("click", () => {
           try { navigator.clipboard.writeText(w.last_error); } catch (_) {}
