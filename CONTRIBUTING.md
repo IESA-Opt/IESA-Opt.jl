@@ -29,6 +29,6 @@ When opening an issue, include:
 - solver and solver version;
 - command or script that was run;
 - relevant error message or output summary;
-- whether the problem occurs with `data/default_data.xlsx` or only with a private workbook.
+- whether the problem occurs with `Input/default_data.xlsx` or only with a private workbook.
 
 Do not attach confidential scenario data to public issues. If a private workbook is needed to reproduce a problem, describe its structure and the failing sheet or field instead.

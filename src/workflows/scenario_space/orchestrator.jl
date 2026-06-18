@@ -1,5 +1,5 @@
 # =============================================================================
-# scenario/orchestrator.jl -- Phase 4: high-level run_scenario_space() entry
+# workflows/scenario_space/orchestrator.jl -- Phase 4: high-level run_scenario_space() entry
 #
 # Phases 1-3 give us:
 #   * Phase 1: spec parsing + sampling (CampaignSpec/SSDashboard xlsx format,
@@ -146,7 +146,7 @@ end
 
 # -----------------------------------------------------------------------------
 # Sampling — operates directly on bounds (lighter than `sample_campaign`,
-# which needs a CampaignSpec). Mirrors the logic in `scenario/sampling.jl`.
+# which needs a CampaignSpec). Mirrors the logic in `workflows/scenario_space/sampling.jl`.
 # -----------------------------------------------------------------------------
 
 """

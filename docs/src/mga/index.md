@@ -21,7 +21,7 @@ The reason for choosing this hybrid is practical: pure directional MGA is easy t
 
 ## Implementation In IESA-Opt
 
-The MGA implementation lives in a separate helper file, `src/mga/hybrid_oracle.jl`, and is only called from the UI server's MGA API routes. It does not add work to ordinary single runs.
+The MGA implementation lives in the workflow helper file `src/workflows/mga/hybrid_oracle.jl`, and is only called from the UI server's MGA API routes. It does not add work to ordinary single runs.
 
 The current implementation is solver-backed:
 
@@ -51,13 +51,13 @@ s.t. original IESA-Opt constraints
      z = Sx
 ```
 
-Here `x` is the full IESA-Opt decision vector and `Sx` is the reduced design projection, currently represented by technology-sector stock and investment aggregates. The formulation lives in `src/mga/hybrid_oracle.jl`, so the single-run and Scenario Space model builders remain unchanged.
+Here `x` is the full IESA-Opt decision vector and `Sx` is the reduced design projection, currently represented by technology-sector stock and investment aggregates. The formulation lives in `src/workflows/mga/hybrid_oracle.jl`, so the single-run and Scenario Space model builders remain unchanged.
 
 ## UI Workflow
 
 Open the local UI and choose **MGA**.
 
-- **Configure**: choose workbook, model shape, representative days, solver, solve method, cost slack, number of directions, workers, ORACLE tolerance, ORACLE iterations, and batch candidate count.
+- **Configure**: choose workbook, model shape, representative days, solver, solve method, cost slack, number of directions, workers, ORACLE tolerance, ORACLE iterations, and candidate count.
 - **Preview design**: inspect the VMM seed directions, parallel seed directions, and ORACLE refinement directions.
 - **Run MGA campaign**: solve the baseline LP, apply the cost cap, and solve the alternatives.
 - **Progress**: follow baseline solve, seed solves, ORACLE closest-point solves, and result preparation. The progress page shows a live stage strip, a workers card with the alternative currently being solved, and a directions table that updates row-by-row as each LP terminates.

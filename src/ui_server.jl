@@ -112,7 +112,7 @@ function serve_ui!(; host::AbstractString = "127.0.0.1",
     end
     # Start warming the default workbook in the background so that JIT for the
     # DuckDB-cache deserialize path is paid before the user clicks Run.
-    _warm_default_workbook_cache!("data/default_data.xlsx")
+    _warm_default_workbook_cache!("Input/default_data.xlsx")
     @info "IESA-Opt UI serving" url julia_threads = Base.Threads.nthreads()
     HTTP.serve(_ui_handler, host, port; verbose = false)
 end
@@ -354,7 +354,7 @@ function _ui_options()
         "clusteringApproaches" => ["kmeans_avg", "kmeans_shape", "kmedoids_shape", "maxdiss", "maxdiss_shape", "hull_convex", "hull_conical"],
         "constraintGroups" => ["Base", "Base + Bunkers", "Base + Scope3", "Base + Bunkers + Scope3", "ADAPT", "TRANSFORM", "ADAPT + bunker aviation & navigation policy", "ADAPT with bunkers in single constraint", "Base + RFNBO targets", "Linking scenario", "Linking scenario + Scope3"],
         "defaults" => Dict(
-            "inputWorkbook" => "data/default_data.xlsx",
+            "inputWorkbook" => "Input/default_data.xlsx",
             "periods" => [2050],
             "mode" => "timeslice",
             "hoursPerDay" => 24,
@@ -378,7 +378,7 @@ end
 
 function _list_workbooks()
     root = _repo_root()
-    dirs = [joinpath(root, "data"), joinpath(root, "data_Batch")]
+    dirs = [joinpath(root, "Input")]
     files = String[]
     for dir in dirs
         isdir(dir) || continue
@@ -409,7 +409,7 @@ const _COMDLG_OFN_SIZE  = 152  # x64 OPENFILENAMEW size in bytes
 const _COMDLG_OFN_FLAGS = UInt32(0x00001000 | 0x00000800 | 0x00080000 | 0x00000008)
 function _browse_for_input_file_native()
     (Sys.iswindows() && Sys.WORD_SIZE == 64) || return nothing
-    initial_dir = joinpath(_repo_root(), "data")
+    initial_dir = joinpath(_repo_root(), "Input")
     isdir(initial_dir) || (initial_dir = _repo_root())
     # OPENFILENAMEW filter format: "<label>\0<patterns>\0…\0\0"
     filter_w  = transcode(UInt16,
@@ -449,7 +449,7 @@ function _browse_for_input_file()
     Sys.iswindows() || return ""
     native = _browse_for_input_file_native()
     native === nothing || return native
-    initial_dir = joinpath(_repo_root(), "data")
+    initial_dir = joinpath(_repo_root(), "Input")
     if !isdir(initial_dir)
         initial_dir = _repo_root()
     end
@@ -529,7 +529,7 @@ function _warm_default_workbook_cache!(input_workbook::AbstractString)
     input_path = isabspath(input_workbook) ? normpath(input_workbook) : normpath(joinpath(_repo_root(), input_workbook))
     if !isfile(input_path)
         _ui_warmup_status_update!(state = "missing", workbook = input_workbook,
-                                  message = "Workbook not found at $(input_workbook). Place the file under data/ and reload.",
+                                  message = "Workbook not found at $(input_workbook). Place the file under Input/ and reload.",
                                   error = "", elapsedSec = 0.0, readyAt = "")
         return nothing
     end
@@ -625,7 +625,7 @@ function _mga_config(body)
         "oracleIterations" => oracle_iterations,
         "oracleBatch" => oracle_batch,
         "tolerance" => tolerance,
-        "inputWorkbook" => String(_config_get(body, "inputWorkbook", "data/default_data.xlsx")),
+        "inputWorkbook" => String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx")),
         "periods" => _as_int_vector(_config_get(body, "periods", [2050])),
         "mode" => mode,
         "representativeDays" => rep_days,
@@ -1209,7 +1209,7 @@ function _ui_data_cache_path(input_path::AbstractString)
 end
 
 function _resolve_explorer_input(body)
-    input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
+    input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
     input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
     isfile(input_path) || error("Input workbook not found: $(input_value)")
     rel = try
@@ -2409,7 +2409,7 @@ function _start_ui_job!(raw_config)
 end
 
 function _normalize_run_config(raw_config)
-    input_value = String(_config_get(raw_config, "inputWorkbook", "data/default_data.xlsx"))
+    input_value = String(_config_get(raw_config, "inputWorkbook", "Input/default_data.xlsx"))
     input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
     isfile(input_path) || error("Input workbook not found: $input_value")
 
@@ -2449,6 +2449,7 @@ function _normalize_run_config(raw_config)
         "boundaryRamping" => _as_bool(_config_get(raw_config, "boundaryRamping", true), true),
         "hourlyReports" => _as_bool(_config_get(raw_config, "hourlyReports", true), true),
         "showViolations" => _as_bool(_config_get(raw_config, "showViolations", false), false),
+        "multiRegion" => _as_bool(_config_get(raw_config, "multiRegion", false), false),
         "constraintGroup" => String(_config_get(raw_config, "constraintGroup", "Base + Bunkers + Scope3")),
         "outputMode" => output_mode,
         "outputName" => out_name,
@@ -2608,6 +2609,14 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         md.params.ts_capacityProfile_envelopeMode = 0
         md.params.dayMix_softness = 0.0
         md.params.dayMix_weightType = :auto
+        # ---- Project-specific extensions (opt-in) -------------------------
+        # Each toggle in the UI maps to a Symbol in md.params.extensions.
+        # An empty set leaves the core model unchanged.
+        md.params.extensions = Set{Symbol}()
+        if get(config, "multiRegion", false) === true
+            push!(md.params.extensions, :multi_region)
+            _job_update!(job_id; stage = "reading", message = "MultiRegion extension is ENABLED for this run")
+        end
         _job_update!(job_id; stage = "reading", message = "Selected solve periods: $(join(string.(selected_periods), ", "))")
 
         _job_update!(job_id; stage = "preparing", message = "Deriving sets and parameters for periods $(selected_periods)")
@@ -2643,13 +2652,9 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
             model_label = mode == :ts ? "time-slice" : "full-hourly"
             _job_update!(job_id; stage = "generation", message = "Generating $(model_label) model with $(effective_solver)", extra = Dict("effectiveSolver" => effective_solver))
             model = Model(optimizer)
-            # Disable JuMP string-name creation by default — large IESA-Opt
-            # LPs spend a non-trivial fraction of generation time / RAM on
-            # interpolating and storing constraint base_names. Keep names
-            # only when violation diagnostics are requested (slack report
-            # and IIS labels need them).
-            apply_lp_generation_speedups!(model;
-                keep_names = config["showViolations"] === true)
+            # Result reporting extracts commodity shadow prices by constraint
+            # name, and diagnostics also need readable constraint labels.
+            apply_lp_generation_speedups!(model; keep_names = true)
             _set_job_model!(job_id, model)
         end
         stage_times["optimizer_init_sec"] = optimizer_init_seconds
@@ -3299,7 +3304,7 @@ end
 
 function _output_roots()
     root = _repo_root()
-    return [joinpath(root, "Output"), joinpath(root, "Output_Batch")]
+    return [joinpath(root, "Output")]
 end
 
 function _is_child_path(path::AbstractString, root::AbstractString)
@@ -3313,7 +3318,7 @@ function _resolve_output_dir(output_id::AbstractString)
     isempty(cleaned) && error("No output folder was selected")
     parts = [part for part in split(cleaned, '/') if !isempty(part)]
     candidate = isabspath(cleaned) ? normpath(cleaned) : normpath(joinpath(_repo_root(), parts...))
-    any(root -> _is_child_path(candidate, root), _output_roots()) || error("Output folder is outside Output/ or Output_Batch/: $output_id")
+    any(root -> _is_child_path(candidate, root), _output_roots()) || error("Output folder is outside Output/: $output_id")
     isdir(candidate) || error("Output folder does not exist: $output_id")
     return candidate
 end
@@ -4702,7 +4707,7 @@ function _parse_indices_cell(s::AbstractString)
 end
 
     function _scenario_input_path(body)::String
-        input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
+        input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
         return isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
     end
 
@@ -4990,7 +4995,7 @@ function _scenario_leaf_validation(spec::CampaignSpec, input_path::AbstractStrin
     return (; errors, warnings)
 end
 
-function _validate_scenario_direct_run_spec(spec::CampaignSpec, input_path::AbstractString = normpath(joinpath(_repo_root(), "data/default_data.xlsx")))
+function _validate_scenario_direct_run_spec(spec::CampaignSpec, input_path::AbstractString = normpath(joinpath(_repo_root(), "Input", "default_data.xlsx")))
     v = validate_spec(spec)
     errors = String.(v.errors)
     warnings = String.(v.warnings)
@@ -5011,7 +5016,7 @@ field/indices rows are also accepted for backward compatibility. The
 validation path must reject rows without per-row bounds before this function
 is called.
 """
-function _row_to_leaf_target(row, input_path::AbstractString = normpath(joinpath(_repo_root(), "data/default_data.xlsx")))
+function _row_to_leaf_target(row, input_path::AbstractString = normpath(joinpath(_repo_root(), "Input", "default_data.xlsx")))
     if row.min === nothing || row.max === nothing
         throw(ArgumentError("Live-run rows require Min and Max on every row."))
     end
@@ -5136,7 +5141,7 @@ function _scenario_run(body)
         )
 
         # Workbook + solver settings
-        input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
+        input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
         isfile(input_path) || return Dict{String,Any}(
             "ok" => false,
             "errors" => ["Input workbook not found: $input_value"],

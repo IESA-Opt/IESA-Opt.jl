@@ -8,7 +8,7 @@ Excel workbook
     v
 read_data_cached(xlsx_path)
     |
-    +--> data/.iesa_cache/*.iesa_input.duckdb is reused until the workbook changes
+    +--> Input/.iesa_cache/*.iesa_input.duckdb is reused until the workbook changes
     |
     v
 read_data(xlsx_path) when cache is missing or stale
@@ -45,7 +45,7 @@ write_duckdb_results(...)
 ## Core Julia Entry Points
 
 ```julia
-md = read_data("data/default_data.xlsx")
+md = read_data("Input/default_data.xlsx")
 derive_sets!(md)
 compute_derived_params!(md)
 ```

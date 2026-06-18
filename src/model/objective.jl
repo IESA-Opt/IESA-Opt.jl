@@ -74,7 +74,9 @@ function add_objective!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
         # ── Retrofit CAPEX: sum[(t,jp), InvMat_lifeTime(t,jp,ps) *
         #     sum[it, retrofitting(it,t,ps) * CRF(t) * (retrofit_cost(it,t,ps) + p_eps)]]
         # Note: IESA-Opt 1.0 uses retrofitting(it,t,ps) (current period ps), not jp.
-        for it_ in tech, t_ in tech
+        # `rt` is now sparse over `p.retrofit_pairs` (only entries where
+        # `retrofit_relations(it,t)==true`); skip pairs with no entry.
+        for (it_, t_) in p.retrofit_pairs
             crf = get(p.CRF, t_, 0.0)
             crf == 0.0 && continue
             rc = get(p.retrofit_cost, (it_, t_, ps), 0.0)
@@ -84,7 +86,7 @@ function add_objective!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
             w_lifetime = get(lifetime_weight, (t_, ps), 0.0)
             w_lifetime == 0.0 && continue
             coef = sdf * w_lifetime * crf * (rc + p_eps)
-            coef == 0.0 || add_to_expression!(obj, coef, rt[it_, t_, ps])
+            coef == 0.0 || add_to_expression!(obj, coef, rt[(it_, t_, ps)])
         end
 
         # ── Salvage value (negative cost):

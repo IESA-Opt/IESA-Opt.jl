@@ -2,10 +2,8 @@ using Test
 using IESAOpt
 using IESAOpt: _sample_lhs_targets, _sample_sobol_targets, _sample_morris_targets,
                _sample_factorial_targets, _spec_to_dict, _dict_to_spec,
-               _target_to_dict, _dict_to_target, _csv_paths,
+               _target_to_dict, _dict_to_target,
                _indices_to_str, _str_to_indices
-using DataFrames
-using CSV
 
 @testset "LeafTarget construction" begin
     t = LeafTarget(:emissionTargetBunker, (:NL, 2050); type = :multiply, min = 0.5, max = 1.5)
@@ -143,57 +141,6 @@ end
     @test _str_to_indices(_indices_to_str(()))          == ()
 end
 
-@testset "save_scenario_results / load_scenario_results — CSV" begin
-    targets = [LeafTarget(:emissionTargetBunker, (:NL, 2050); type = :multiply, min = 0.5, max = 1.5, label = "bunker_NL_2050")]
-    spec = ScenarioSpec(name = "persist_csv", method = :lhs, n_variants = 3, seed = 0, targets = targets)
-    samples = reshape([0.5, 1.0, 1.5], 3, 1)
-    variants = [
-        VariantResult(variant_id = 1, objective = 100.0, term_status = "OPTIMAL", primal_status = "FEASIBLE_POINT",
-                      worker_pid = 1, build_seconds = 2.0, apply_seconds = 0.1, solve_seconds = 1.0),
-        VariantResult(variant_id = 2, objective = 80.0,  term_status = "OPTIMAL", primal_status = "FEASIBLE_POINT",
-                      worker_pid = 2, build_seconds = 2.0, apply_seconds = 0.1, solve_seconds = 0.5),
-        VariantResult(variant_id = 3, objective = 60.0,  term_status = "OPTIMAL", primal_status = "FEASIBLE_POINT",
-                      worker_pid = 2, build_seconds = 0.0, apply_seconds = 0.1, solve_seconds = 0.6),
-    ]
-    result = ScenarioResult(spec, samples, variants, 12.34)
-
-    dir = mktempdir()
-    try
-        save_scenario_results(dir, result; format = :csv)
-        p = _csv_paths(dir)
-        @test isfile(p.spec)
-        @test isfile(p.samples)
-        @test isfile(p.results)
-        @test isfile(p.combined)
-
-        # Refuses to overwrite without flag.
-        @test_throws ArgumentError save_scenario_results(dir, result; format = :csv)
-        # Overwrites cleanly with flag.
-        save_scenario_results(dir, result; format = :csv, overwrite = true)
-
-        r2 = load_scenario_results(dir; format = :csv)
-        @test r2.spec.name       == spec.name
-        @test r2.spec.method     == :lhs
-        @test r2.spec.n_variants == 3
-        @test length(r2.spec.targets) == 1
-        @test r2.spec.targets[1].indices == (:NL, 2050)
-        @test r2.samples == samples
-        @test length(r2.variants) == 3
-        @test r2.variants[2].objective  == 80.0
-        @test r2.variants[2].worker_pid == 2
-        @test r2.variants[2].error      === nothing
-        @test r2.runtime_seconds == 12.34
-
-        # combined.csv should have the joined columns.
-        combined = CSV.read(p.combined, DataFrame)
-        @test "bunker_NL_2050" in names(combined)
-        @test "objective"      in names(combined)
-        @test nrow(combined) == 3
-    finally
-        rm(dir; recursive = true, force = true)
-    end
-end
-
 @testset "save_scenario_results / load_scenario_results — DuckDB" begin
     targets = [LeafTarget(:emissionTargetBunker, (:NL, 2050); type = :multiply, min = 0.5, max = 1.5, label = "bunker"),
                LeafTarget(:co2price, (:NL,); type = :set, min = 50.0, max = 200.0, label = "co2_NL")]
@@ -210,14 +157,14 @@ end
 
     dir = mktempdir()
     try
-        save_scenario_results(dir, result; format = :duckdb)
+        save_scenario_results(dir, result)
         @test isfile(joinpath(dir, "scenario_results.duckdb"))
 
         # Refuses to overwrite without flag.
-        @test_throws ArgumentError save_scenario_results(dir, result; format = :duckdb)
-        save_scenario_results(dir, result; format = :duckdb, overwrite = true)
+        @test_throws ArgumentError save_scenario_results(dir, result)
+        save_scenario_results(dir, result; overwrite = true)
 
-        r2 = load_scenario_results(dir; format = :duckdb)
+        r2 = load_scenario_results(dir)
         @test r2.spec.name == "persist_duckdb"
         @test r2.spec.method == :sobol
         @test length(r2.spec.targets) == 2
@@ -241,6 +188,8 @@ end
                             [VariantResult(variant_id = 1)], 1.0)
     dir = mktempdir()
     try
+        @test_throws ArgumentError save_scenario_results(dir, result; format = :csv)
+        @test_throws ArgumentError load_scenario_results(dir; format = :csv)
         @test_throws ArgumentError save_scenario_results(dir, result; format = :parquet)
         @test_throws ArgumentError load_scenario_results(dir; format = :parquet)
     finally

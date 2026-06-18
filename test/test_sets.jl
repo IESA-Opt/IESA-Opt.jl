@@ -1,7 +1,7 @@
 using Test
 using IESAOpt
 
-const XLSX_PATH = joinpath(@__DIR__, "..", "data", "default_data.xlsx")
+const XLSX_PATH = joinpath(@__DIR__, "..", "Input", "default_data.xlsx")
 
 @testset "Phase 1: derive_sets! produces consistent subsets" begin
     if !isfile(XLSX_PATH)

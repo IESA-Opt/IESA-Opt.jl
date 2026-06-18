@@ -3,7 +3,7 @@ using IESAOpt
 using Random
 using Statistics
 
-@testset "scenario/spec.jl" begin
+@testset "workflows/scenario_space/spec.jl" begin
     @testset "parse_sampling_method" begin
         @test parse_sampling_method("LHS")              == :lhs
         @test parse_sampling_method("Latin hypercube")  == :lhs
@@ -106,7 +106,7 @@ using Statistics
         @test direct["valid"] == true
 
         workbook_body = deepcopy(direct_body)
-        workbook_body["inputWorkbook"] = "data/default_data.xlsx"
+        workbook_body["inputWorkbook"] = "Input/default_data.xlsx"
         workbook_body["rows"][1]["sheet"] = "NodeParameters"
         workbook_body["rows"][1]["cell"] = "AE5"
         workbook = IESAOpt._scenario_validate(workbook_body)
@@ -123,7 +123,7 @@ using Statistics
         @test any(occursin("NodeParameters!AL5 -> ModelParams.emissionTargetFS", w) for w in feedstock["warnings"])
 
         unsupported = deepcopy(direct_body)
-        unsupported["inputWorkbook"] = "data/default_data.xlsx"
+        unsupported["inputWorkbook"] = "Input/default_data.xlsx"
         unsupported["rows"][1]["sheet"] = "Technologies"
         unsupported["rows"][1]["cell"] = "AA10"
         invalid = IESAOpt._scenario_validate(unsupported)
@@ -186,7 +186,7 @@ using Statistics
     end
 end
 
-@testset "scenario/sampling.jl" begin
+@testset "workflows/scenario_space/sampling.jl" begin
     base_rows = [
         ParameterRow(parameter = "P1", sheet = "S", cell = "A1",
                      type = :set, min = 0.0, max = 10.0),

@@ -111,7 +111,7 @@ Example:
 
 ```powershell
 # local/run-study-a.ps1
-$env:IESA_DATA_XLSX = "data\study_a.xlsx"
+$env:IESA_DATA_XLSX = "Input\study_a.xlsx"
 $env:IESA_REPDAYS = "40"
 $env:IESA_THREADS = "8"
 $env:IESA_OUT_DIR = "Output\study_a_rd40"

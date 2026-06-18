@@ -118,6 +118,12 @@
     methods.forEach((m) => {
       const l = document.createElement("label");
       const safe = String(m.label || "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+      const help = window.IESASolverMethodHelp ? window.IESASolverMethodHelp(m) : null;
+      if (help) {
+        l.dataset.helpTitle = help.title;
+        l.dataset.help = help.short.join("\n");
+        l.dataset.helpMore = help.more;
+      }
       l.innerHTML = `<input type="radio" name="mgaSolveMethod" value="${m.id}"><span>${safe}</span>`;
       l.querySelector("input").checked = m.id === selected;
       w.appendChild(l);
@@ -329,7 +335,7 @@
     const ts = ($("mgaTimeSlicingToggle") || {}).checked !== false;
     return {
       name: ($("mgaName") && $("mgaName").value) || "mga_campaign",
-      inputWorkbook: ($("mgaInputWorkbook") && $("mgaInputWorkbook").value) || "data/default_data.xlsx",
+      inputWorkbook: ($("mgaInputWorkbook") && $("mgaInputWorkbook").value) || "Input/default_data.xlsx",
       mode: ts ? "timeslice" : "full_hourly",
       periods: [...document.querySelectorAll("#mgaPeriods input:checked")].map((i) => Number(i.value)),
       representativeDays: Number(($("mgaRepresentativeDays") && $("mgaRepresentativeDays").value) || 15),

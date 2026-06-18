@@ -46,6 +46,9 @@ function compute_derived_params!(md::ModelData)
     compute_emission_target_aggregates!(md)
     compute_tech_activity!(md)
     init_policy_targets!(md)
+    # Extension data conventions (no-op unless extension is enabled).
+    # Komar AIMMS convention for techStock_min/max — see multi_region.jl.
+    apply_multi_region_data_convention!(md)
     return md
 end
 
@@ -169,16 +172,25 @@ end
     compute_temporal_helpers!(md)
 
 Build `dayPer_hour`, `hoursindayPer_hour`, `firstHourOfDay`, `lastHourOfDay`,
-`prev_hour`, `next_hour` (cyclic) from `hours_orig` and `hoursPer_day`.
+`prev_hour`, `next_hour` (cyclic) from `s.hours` (FH-resolution set,
+length = 365 × hoursPer_day) and `hoursPer_day`.
+
+Must be called AFTER `derive_sets!` populates `s.hours`.
 """
 function compute_temporal_helpers!(md::ModelData)
     s = md.sets
     p = md.params
 
+    # Skip if either no data was loaded (s.hours_orig empty → can't derive)
+    # or hoursPer_day is non-positive.
     isempty(s.hours_orig) && return md
     p.hoursPer_day <= 0 && return md
 
-    n_hours = length(s.hours_orig)
+    # Use the FH-resolution hour set, NOT the raw 8760 set. `s.hours` is
+    # populated by `derive_sets!` to `1..(365 * hoursPer_day)`.
+    isempty(s.hours) && return md
+
+    n_hours = length(s.hours)
     n_days  = div(n_hours, p.hoursPer_day)
 
     empty!(p.dayPer_hour)
@@ -208,13 +220,13 @@ function compute_temporal_helpers!(md::ModelData)
     days_per_range = max(1, p.daysPer_range)
     hours_per_quarter = max(1, p.hoursPer_quarter_cluster)
 
-    for h in s.hours_orig
+    for h in s.hours
         d  = div(h - 1, p.hoursPer_day) + 1
         hd = mod(h - 1, p.hoursPer_day) + 1
         p.dayPer_hour[h] = d
         p.hoursindayPer_hour[h] = hd
         # slice_width_hours = how many actual clock-hours this slice represents.
-        # For FH 24h: 1.0; for FH 12h: 2.0; for FH 8h: 3.0; for AS: variable
+        # For FH 24h: 1.0; for FH 12h: 2.0; for FH 8h: 3.0; for FH 1h: 24.0
         p.slice_width_hours[h] = 24.0 / p.hoursPer_day
         p.hoursPerDayEffective[h] = Float64(p.hoursPer_day)
         # quarter-hour window: (h-1) ÷ hours_per_quarter + 1
@@ -227,11 +239,14 @@ function compute_temporal_helpers!(md::ModelData)
     for d in 1:n_days
         # week (1..53): 1-based 7-day buckets, day 365 → week 53
         wk = min(53, div(d - 1, 7) + 1)
-        # month (1..12): try to pull from monthPer_hourOrig at first hour of day,
-        # else fall back to even 12-month split (365/12 ≈ 30.42 days/month)
-        first_h_of_d = (d - 1) * p.hoursPer_day + 1
+        # month (1..12): try to pull from monthPer_hourOrig at first RAW hour of day,
+        # else fall back to even 12-month split (365/12 ≈ 30.42 days/month).
+        # NB: monthPer_hourOrig is keyed on RAW 1..8760 indices, so we must use
+        # the raw 24-hour-resolution first-hour-of-day index, not the FH one.
+        first_h_of_d_fh  = (d - 1) * p.hoursPer_day + 1
+        first_h_of_d_raw = (d - 1) * 24 + 1
         mo = if !isempty(p.monthPer_hourOrig)
-            get(p.monthPer_hourOrig, first_h_of_d, max(1, min(12, div(d - 1, 31) + 1)))
+            get(p.monthPer_hourOrig, first_h_of_d_raw, max(1, min(12, div(d - 1, 31) + 1)))
         else
             max(1, min(12, div(d - 1, 31) + 1))
         end
@@ -244,12 +259,12 @@ function compute_temporal_helpers!(md::ModelData)
         p.semesterPer_day[d] = sem
         p.rangePer_day[d]    = div(d - 1, days_per_range) + 1
 
-        p.firstHourOfDay[d] = first_h_of_d
+        p.firstHourOfDay[d] = first_h_of_d_fh
         p.lastHourOfDay[d]  = d * p.hoursPer_day
     end
 
     # Per-hour week/month/season/semester (propagate from day)
-    for h in s.hours_orig
+    for h in s.hours
         d = p.dayPer_hour[h]
         p.weekPer_hour[h]     = get(p.weekPer_day, d, 1)
         p.monthPer_hour[h]    = get(p.monthPer_day, d, 1)
@@ -257,9 +272,9 @@ function compute_temporal_helpers!(md::ModelData)
         p.semesterPer_hour[h] = get(p.semesterPer_day, d, 1)
     end
 
-    first_h = first(s.hours_orig)
-    last_h  = last(s.hours_orig)
-    for h in s.hours_orig
+    first_h = first(s.hours)
+    last_h  = last(s.hours)
+    for h in s.hours
         p.prev_hour[h] = h == first_h ? last_h  : h - 1
         p.next_hour[h] = h == last_h  ? first_h : h + 1
     end
@@ -946,7 +961,10 @@ function compute_flex_capacity!(md::ModelData)
     #     sum[itb | activity_balances(itb,yp,base_year) < 0,
     #         hourly_profilesRead(h, profileType_techRead(itb)) * activity_balances(itb,yp,base_year)]
     #     / sum[itb | activity_balances(itb,yp,base_year) < 0, activity_balances(itb,yp,base_year)]
-    # The peak over h then matters for flex_capacity. Compute resolved peak for indirect activities.
+    # The peak over h then matters for flex_capacity. If `hourly_profiles` already
+    # contains the resolved indirect profile (including FH hpd aggregation), keep
+    # that AIMMS solve-resolution peak. Otherwise fall back to reconstructing the
+    # indirect profile from raw inputs.
     ind_set = isempty(s.activities_indirect) ? Set{Symbol}() : Set(s.activities_indirect)
     if !isempty(ind_set) && !isempty(p.hourly_profilesReadOrig) &&
        !isempty(p.profileType_techRead) && !isempty(p.activity_balances)
@@ -965,6 +983,7 @@ function compute_flex_capacity!(md::ModelData)
             push!(h_orig_set, h_orig)
         end
         for (yp, cs) in consumers_for
+            haskey(peak_by_profile, yp) && continue
             denom = sum(ab for (_, ab) in cs)
             denom == 0.0 && continue
             local_peak = -Inf

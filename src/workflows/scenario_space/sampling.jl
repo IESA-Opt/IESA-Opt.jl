@@ -1,5 +1,5 @@
 # =============================================================================
-# scenario/sampling.jl -- parameter-space samplers (LHS, Morris, Sobol, Factorial)
+# workflows/scenario_space/sampling.jl -- parameter-space samplers (LHS, Morris, Sobol, Factorial)
 #
 # All samplers consume a `CampaignSpec` and return a `SampleMatrix`:
 #   * `parameters` :: Vector{String}        (unique parameter names, columns of `values`)

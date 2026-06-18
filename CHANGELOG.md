@@ -14,7 +14,7 @@ All notable changes to IESA-Opt.jl are recorded here. The format follows
   timing runs, and sweep entry points.
 - Unit and smoke tests for package loading, data reading, derived parameters,
   data writing, solver factories, and model helpers.
-- Default input workbook at `data/default_data.xlsx`.
+- Default input workbook at `Input/default_data.xlsx`.
 - MGA Results tab now includes an *Investments across alternatives* panel with
   a min/max envelope chart per technology (color-coded by category, with a
   baseline diamond marker) and ranked low-regret + high-volatility tables. The

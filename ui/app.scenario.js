@@ -626,6 +626,12 @@
     methods.forEach((m) => {
       const l = document.createElement("label");
       const safe = (m.label || "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+      const help = window.IESASolverMethodHelp ? window.IESASolverMethodHelp(m) : null;
+      if (help) {
+        l.dataset.helpTitle = help.title;
+        l.dataset.help = help.short.join("\n");
+        l.dataset.helpMore = help.more;
+      }
       l.innerHTML = `<input type="radio" name="scSolveMethod" value="${m.id}"><span>${safe}</span>`;
       l.querySelector("input").checked = m.id === selected;
       w.appendChild(l);
@@ -804,7 +810,7 @@
       seed: Number($("scSeed").value) || 0,
       inputWorkbook: state.customWorkbookPath
         || (($("scInputWorkbook") || {}).value)
-        || "data/default_data.xlsx",
+        || "Input/default_data.xlsx",
       rows: state.rows.map((r) => ({
         parameter: r.parameter || "",
         subparameter: r.subparameter || "",
@@ -992,7 +998,7 @@
     // Prefer a user-browsed file over the dropdown selection.
     spec.inputWorkbook = state.customWorkbookPath
       || (($("scInputWorkbook") || {}).value)
-      || "data/default_data.xlsx";
+      || "Input/default_data.xlsx";
     spec.n_workers = Number(($("scWorkers") || {}).value) || 1;
     spec.threads_per_worker = computeThreadsPerWorker();
     spec.solver = ($("scSolver") || {}).value || "highs";

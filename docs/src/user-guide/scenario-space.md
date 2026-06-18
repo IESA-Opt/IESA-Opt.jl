@@ -4,7 +4,7 @@ The scenario-space subsystem lets you take one base [`ModelData`](@ref) and
 sweep, sample, or grid-search over many variants of it in a single
 campaign. Each variant solves a slightly different LP; the runner returns a
 table of objectives + leaf values + solver diagnostics that you can save to
-DuckDB or CSV and post-process with the bundled analysis helpers.
+DuckDB and post-process with the bundled analysis helpers.
 
 The local UI adds an **Analysis** sheet to Scenario Space campaigns. In the
 setup page, choose a **GSA method** before launching the campaign. The UI then
@@ -65,7 +65,7 @@ There are five layers, in order from highest to lowest abstraction:
 | 2. *Samples* | matrix returned by [`sample_scenario_space`](@ref) | Numeric values that come out of the sampler — one row per variant. |
 | 3. *Changes* | `Vector{Vector{LeafChange}}` from [`samples_to_changes`](@ref) | Sample rows reshaped into per-variant `LeafChange` lists. |
 | 4. *Campaign* | [`run_campaign`](@ref) | Group, build, mutate, solve, collect. Where all the speed is. |
-| 5. *Results* | `ScenarioResult` ↔ DuckDB/CSV | Persist, reload, analyse with [`objective_table`](@ref), [`sensitivity_scan`](@ref), [`pareto_front`](@ref). |
+| 5. *Results* | `ScenarioResult` ↔ DuckDB | Persist, reload, analyse with [`objective_table`](@ref), [`sensitivity_scan`](@ref), [`pareto_front`](@ref). |
 
 `run_scenario_space` glues layers 1-5 together with one call.
 
@@ -78,7 +78,7 @@ single bunker-fuels emission target.
 using IESAOpt
 
 # 1. Read base data
-md = read_model_data("data/IESA_NL_24h_2050.xlsx")
+md = read_model_data("Input/IESA_NL_24h_2050.xlsx")
 derive_sets!(md)
 compute_derived_params!(md)
 build_temporal_clusters!(md)   # required for :ts mode
@@ -104,7 +104,6 @@ result = run_scenario_space(
 )
 
 save_scenario_results("Output/my_campaign.duckdb", result)   # DuckDB
-# save_scenario_results("Output/my_campaign", result; format = :csv)  # CSV alt.
 
 # 4. Analyse
 df_obj = objective_table(result)         # variant_id | objective | term_status | …
@@ -230,9 +229,7 @@ precedence for experiments that need explicit solver settings.
 | `0` or `1` | Serial | One LP build, in-process. Best for ≤ ~10 variants or when you want easy debugging. |
 | `≥ 2` | Distributed | `addprocs(n_workers)` once, each worker loads the package + keeps a per-process cluster cache, master dispatches variants over a bounded `RemoteChannel`. |
 
-Distributed mode pays a fixed cost (`addprocs` + `@everywhere using IESAOpt` ~10–20 s) and one LP build per worker per cluster group. Crossover happens when `n_variants × build_time_share` exceeds that startup cost — typically around 6–8 variants on the 24-hour fixture.
-
-The benchmark script `scripts/scenario_benchmark.jl` runs WORKER_COUNTS ∈ {0, 2, 4} on a deterministic 12-variant LHS and writes `Output/scenario_benchmark.csv` so you can pick a sensible default for your hardware.
+Distributed mode pays a fixed cost (`addprocs` + `@everywhere using IESAOpt` ~10–20 s) and one LP build per worker per cluster group. Crossover happens when `n_variants × build_time_share` exceeds that startup cost — typically around 6–8 variants on the 24-hour fixture. For production studies, pick `n_workers` from a small local timing sweep on the same workbook and solver settings.
 
 ### Cancellation + progress callbacks
 
@@ -381,17 +378,14 @@ message.
 
 ## Persistence
 
-Two formats, same content. DuckDB is faster to query and round-trips
-without quoting issues; CSV is git-friendly.
+DuckDB is the default campaign persistence format. It is fast to query,
+round-trips without quoting issues, and keeps campaign reporting aligned with
+the model-output database format.
 
 ```julia
-# DuckDB — one file, 4 tables (spec, targets, samples, variants)
-save_scenario_results("Output/sweep.duckdb", result)
-result2 = load_scenario_results("Output/sweep.duckdb")
-
-# CSV — one directory with spec.json + samples.csv + variants.csv
-save_scenario_results("Output/sweep_csv", result; format = :csv)
-result3 = load_scenario_results("Output/sweep_csv"; format = :csv)
+# DuckDB — Output/sweep_campaign/scenario_results.duckdb
+save_scenario_results("Output/sweep_campaign", result)
+result2 = load_scenario_results("Output/sweep_campaign")
 ```
 
 Round-trip is lossless. On Windows the writer explicitly `finalize`s and
@@ -401,7 +395,7 @@ immediately in the same Julia session.
 
 ## Analysis helpers
 
-All three helpers live in `src/scenario/analysis.jl` and filter to
+All three helpers live in `src/workflows/scenario_space/analysis.jl` and filter to
 `term_status == "OPTIMAL"` first; rows with errors or infeasibility are
 dropped silently. If `sensitivity_scan` has fewer than
 `min_optimal` (default `3`) optimal rows it returns an empty DataFrame.
@@ -413,7 +407,7 @@ df = objective_table(result)
 # variant_id | objective | term_status | primal_status | build_seconds | apply_seconds | solve_seconds
 ```
 
-A flat DataFrame ready for `CSV.write` or `Plots.plot(:variant_id, :objective)`.
+A flat DataFrame ready for plotting or writing to a non-CSV analysis format.
 
 ### `sensitivity_scan(result; min_optimal = 3)`
 
@@ -457,7 +451,7 @@ front = pareto_front(result, :price_carbon, :objective; minimize = (false, true)
 1. **Strip JuMP variable bounds you don't need before campaign start.** They are part of the LP build cost. The default fixtures are already tuned.
 2. **Group your profile mutations onto a small discrete grid** if you want Phase 3.5's cache to pay off. Continuous sampling of a profile leaf → one cluster build per variant.
 3. **Use the barrier-no-crossover Gurobi preset** (`Dict("Method"=>2, "Crossover"=>0)`) for sensitivity scans where you don't need the basis. Cuts solve time on big LPs by ~30 %.
-4. **Pick `n_workers` from the benchmark sweep**, not by gut feel. `scripts/scenario_benchmark.jl` writes `Output/scenario_benchmark.csv` with per-N timings.
+4. **Pick `n_workers` from a local timing sweep**, not by gut feel. Use the same workbook, representative-day count, solver, and threads-per-worker as the intended campaign.
 5. **Skip precompile + warmup** when iterating in the REPL:
    ```powershell
    $env:IESA_OPT_SKIP_PRECOMPILE = '1'
@@ -468,10 +462,9 @@ front = pareto_front(result, :price_carbon, :objective; minimize = (false, true)
 ## See also
 
 - [API Reference](../reference/api.md) — full docstrings for every exported symbol.
-- `src/scenario/runner.jl` — the campaign runner internals.
-- `src/scenario/manifest.jl` — mutation + clustering registries.
-- `src/scenario/orchestrator.jl` — high-level `run_scenario_space`.
-- `src/scenario/persistence.jl` — DuckDB + CSV save/load.
-- `src/scenario/analysis.jl` — `objective_table` / `sensitivity_scan` / `pareto_front`.
-- `scripts/scenario_benchmark.jl` — sweep `n_workers ∈ {0,2,4}` for your hardware.
+- `src/workflows/scenario_space/runner.jl` — the campaign runner internals.
+- `src/workflows/scenario_space/manifest.jl` — mutation + clustering registries.
+- `src/workflows/scenario_space/orchestrator.jl` — high-level `run_scenario_space`.
+- `src/workflows/scenario_space/persistence.jl` — DuckDB save/load.
+- `src/workflows/scenario_space/analysis.jl` — `objective_table` / `sensitivity_scan` / `pareto_front`.
 - `test/test_scenario_clustering.jl` — Phase 3.5 partition + cache key tests.

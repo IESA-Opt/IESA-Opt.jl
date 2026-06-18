@@ -1,9 +1,9 @@
 # =============================================================================
-# scenario/variant.jl — Apply a CampaignSpec row to ModelData + a built model
+# workflows/scenario_space/variant.jl — Apply a CampaignSpec row to ModelData + a built model
 #
 # Phase 2: bridges spec rows (Parameter / Type / value) to leaf-parameter
 # mutations + already-built JuMP model. Uses `MUTATION_REGISTRY` from
-# `scenario/manifest.jl` to know which constraints to touch.
+# `workflows/scenario_space/manifest.jl` to know which constraints to touch.
 #
 # Lifecycle (per variant):
 #   1. Caller deep-copies the base `ModelData` (or clones the leaf params it

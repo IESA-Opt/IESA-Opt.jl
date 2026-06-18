@@ -65,6 +65,7 @@ async function init() {
   safeRun("bindTabs", bindTabs);
   safeRun("bindSections", bindSections);
   safeRun("bindControls", bindControls);
+  safeRun("bindUiHelp", bindUiHelp);
   safeRun("bindAboutToc", bindAboutToc);
   safeRun("bindUiSearch", bindUiSearch);
   safeRun("renderJob(null)", () => renderJob(null));
@@ -108,6 +109,312 @@ function safeRun(label, fn) {
     const status = document.getElementById("connectionStatus");
     if (status) status.textContent = `UI init error in ${label}: ${error.message || error}`;
   }
+}
+
+function solverMethodHelp(method) {
+  const id = String(method && method.id || "").toLowerCase();
+  const label = String(method && method.label || id || "Solve method");
+  if (id.includes("barrier") && id.includes("crossover")) {
+    return {
+      title: label,
+      short: ["Uses barrier, then crossover.", "Good for large LPs and parallel CPUs."],
+      more: "Barrier is an interior-point method: it moves through the inside of the feasible region instead of walking from vertex to vertex. It usually scales well on large linear programs and can use multiple CPU threads during the factorization work. Crossover then converts the interior-point solution into a simplex-style basic solution, which can improve basis quality and some dual/reporting behaviour but adds extra solve time."
+    };
+  }
+  if (id.includes("barrier")) {
+    return {
+      title: label,
+      short: ["Uses the barrier interior-point method.", "Often strong for large LPs and parallel CPUs."],
+      more: "Barrier solves the LP from the interior of the feasible region, using linear algebra steps that can be parallelized across CPU threads. It is often a good choice for very large energy-system LPs because it can be faster than simplex on broad, sparse models. Without crossover, the solver usually stops at the interior-point solution, which can be faster but may not provide a simplex basis."
+    };
+  }
+  if (id.includes("concurrent")) {
+    return {
+      title: label,
+      short: ["Runs several solver strategies at once.", "Uses more CPU to find the fastest path."],
+      more: "Concurrent mode lets the solver try multiple algorithms in parallel, such as barrier and simplex variants, then keeps the result from the method that finishes first. It can be robust when you do not know which method fits a model best, but it may use more CPU threads and memory than a single fixed algorithm."
+    };
+  }
+  if (id.includes("dual") && id.includes("simplex")) {
+    return {
+      title: label,
+      short: ["Uses the dual simplex algorithm.", "Good when re-solving related LPs."],
+      more: "Dual simplex moves along the edges of the LP polytope while maintaining dual feasibility. It is often effective for warm starts, model variants, and cases where presolve or bound changes make the dual path attractive. It is usually less parallel than barrier but can be very reliable."
+    };
+  }
+  if (id.includes("primal") && id.includes("simplex")) {
+    return {
+      title: label,
+      short: ["Uses the primal simplex algorithm.", "Reliable edge-walking LP method."],
+      more: "Primal simplex walks from one basic feasible solution to another along the LP edges. It can be useful for some smaller or well-conditioned LPs and gives a natural simplex basis, but it usually does not exploit parallel CPU threads as strongly as barrier on very large models."
+    };
+  }
+  if (id.includes("simplex")) {
+    return {
+      title: label,
+      short: ["Uses a simplex-family method.", "Reliable, basis-oriented LP solving."],
+      more: "Simplex methods move between corner points of the feasible region and return a simplex basis. They are often reliable and useful for diagnostics or re-solves, but their core work is typically less parallel than barrier on large LPs."
+    };
+  }
+  if (id.includes("auto")) {
+    return {
+      title: label,
+      short: ["Lets the solver choose the algorithm.", "Good when no method is clearly best."],
+      more: "Auto mode leaves the algorithm choice to the solver. The backend may use presolve information, model structure, and solver defaults to pick barrier, simplex, concurrent, or another internal strategy. This is convenient, but fixed methods are better when you want repeatable benchmark comparisons."
+    };
+  }
+  return {
+    title: label,
+    short: [`Selects ${label}.`, "The selected method is passed to the solver."],
+    more: `This solve method is sent to the selected optimizer as an algorithm preference. Its exact behaviour depends on the solver backend and the options supported by this Julia environment.`
+  };
+}
+window.IESASolverMethodHelp = solverMethodHelp;
+
+function bindUiHelp() {
+  let activeAnchor = null;
+  let activeTarget = null;
+  let expandedHelp = false;
+  let hideTimer = null;
+  let installQueued = false;
+  const targetForAnchor = new WeakMap();
+  const anchorForTarget = new WeakMap();
+  const controlSelector = "button, select, input, textarea, summary, .section-button, .tab-button, [role='button']";
+  const candidateSelector = `[data-help], ${controlSelector}`;
+  const pop = document.createElement("div");
+  const toggle = $("uiHelpToggle");
+  pop.id = "uiHelpPopover";
+  pop.className = "ui-help-popover hidden";
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-modal", "false");
+  pop.setAttribute("aria-label", "UI help");
+  document.body.appendChild(pop);
+
+  const clearHideTimer = () => {
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+  };
+  const cleanText = node => {
+    if (!node) return "";
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll(".ui-help-anchor,input,select,textarea").forEach(el => el.remove());
+    return clone.textContent.replace(/\s+/g, " ").trim();
+  };
+  const directChild = (target, selector) => Array.from(target.children || []).find(child => child.matches(selector));
+  const isHelpTarget = node => !!(node && activeAnchor && (activeAnchor.contains(node) || pop.contains(node)));
+
+  const labelFor = target => {
+    if (!target) return "this control";
+    const aria = target.getAttribute && (target.getAttribute("data-help-title") || target.getAttribute("aria-label"));
+    if (aria) return aria.trim();
+    if (target.id) {
+      const explicit = document.querySelector(`label[for="${CSS.escape(target.id)}"]`);
+      if (explicit && cleanText(explicit)) return cleanText(explicit);
+    }
+    const label = target.closest && target.closest("label");
+    if (label) {
+      const span = directChild(label, "span");
+      const text = span ? cleanText(span) : cleanText(label);
+      if (text) return text;
+    }
+    const heading = target.querySelector && target.querySelector("h2, summary, .field > span, span");
+    if (heading && cleanText(heading)) return cleanText(heading);
+    if (cleanText(target)) return cleanText(target);
+    if (target.placeholder) return target.placeholder;
+    return "this control";
+  };
+  const fallbackHelp = target => {
+    const label = labelFor(target);
+    const tag = target.tagName ? target.tagName.toLowerCase() : "";
+    const type = (target.getAttribute && target.getAttribute("type") || "").toLowerCase();
+    if (target.classList && target.classList.contains("section-button")) return [`Opens the ${label} workspace.`, "The workspace tabs below switch to that workflow."];
+    if (target.classList && target.classList.contains("tab-button")) return [`Opens the ${label} tab.`, "The current workspace state stays on the page."];
+    if (tag === "button") return [`Runs the ${label} action.`, "The page updates the related view or asks Julia to do the work."];
+    if (tag === "select") return [`Changes ${label}.`, "The selected value is submitted with this workspace."];
+    if (type === "checkbox") return [`Turns ${label} on or off.`, "The choice is applied when the current action runs."];
+    if (type === "radio") return [`Selects ${label}.`, "Only one option in this group can be active."];
+    if (type === "range" || type === "number") return [`Sets ${label}.`, "Use it to tune the numeric value for this run."];
+    if (tag === "input" || tag === "textarea") return [`Edits ${label}.`, "The entered text is used by the current workflow."];
+    if (tag === "summary") return [`Opens or closes ${label}.`, "The settings inside remain part of the page state."];
+    return [`Controls ${label}.`, "The value is used by the active workflow or result view."];
+  };
+  const fallbackMore = target => {
+    const label = labelFor(target);
+    const tag = target.tagName ? target.tagName.toLowerCase() : "";
+    const type = (target.getAttribute && target.getAttribute("type") || "").toLowerCase();
+    if (tag === "button" || target.classList.contains("section-button") || target.classList.contains("tab-button")) return `This action changes the visible UI state or sends a request to the local Julia server, depending on the button. The label "${label}" names the action.`;
+    if (tag === "select") return `This menu changes the value for "${label}". The selected option is read by the UI JavaScript when you start a run, load results, or perform the current workspace action.`;
+    if (type === "checkbox" || type === "radio") return `This option controls "${label}". Its checked state is preserved on the page and is included in the relevant run, campaign, or view configuration.`;
+    return `This field controls "${label}" for the current workspace. It is kept local until you run, load, save, or refresh the related view.`;
+  };
+  const titleFor = target => {
+    if (!target) return "Help";
+    const direct = target.dataset.helpTitle;
+    return direct ? direct : labelFor(target);
+  };
+  const shortLines = target => {
+    const explicit = String(target.dataset.help || "").replace(/\\n/g, "\n").split("\n").map(s => s.trim()).filter(Boolean).slice(0, 2);
+    return explicit.length ? explicit : fallbackHelp(target);
+  };
+  const render = (target, showMore = expandedHelp) => {
+    expandedHelp = showMore;
+    const lines = shortLines(target);
+    const more = String(target.dataset.helpMore || "").trim() || fallbackMore(target);
+    pop.innerHTML = `<p class="ui-help-title">${escapeHtml(titleFor(target))}</p>`
+      + `<div class="ui-help-short">${lines.map(line => `<div>${escapeHtml(line)}</div>`).join("")}</div>`
+      + (showMore && more ? `<div class="ui-help-more">${escapeHtml(more)}</div>` : "")
+      + (more && !showMore ? `<button class="ui-help-readmore" type="button">Read more</button>` : "");
+    const readmore = pop.querySelector(".ui-help-readmore");
+    if (readmore) readmore.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      clearHideTimer();
+      render(target, true);
+      position(activeAnchor);
+    });
+  };
+  const position = anchor => {
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    pop.classList.remove("hidden");
+    const margin = 12;
+    const width = pop.offsetWidth || 360;
+    const height = pop.offsetHeight || 120;
+    let left = Math.min(window.innerWidth - width - margin, Math.max(margin, rect.left + rect.width / 2 - 32));
+    let top = rect.bottom + 10;
+    const above = top + height + margin > window.innerHeight;
+    if (above) top = Math.max(margin, rect.top - height - 10);
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+    pop.dataset.placement = above ? "top" : "bottom";
+    const arrow = Math.max(18, Math.min(width - 24, rect.left + rect.width / 2 - left - 6));
+    pop.style.setProperty("--ui-help-arrow", `${arrow}px`);
+  };
+  const hideNow = () => {
+    clearHideTimer();
+    pop.classList.add("hidden");
+    activeAnchor = null;
+    activeTarget = null;
+    expandedHelp = false;
+  };
+  const scheduleHide = (delay = expandedHelp ? 1000 : 180, keepExisting = false) => {
+    if (keepExisting && hideTimer) return;
+    clearHideTimer();
+    hideTimer = setTimeout(() => {
+      if (document.activeElement && pop.contains(document.activeElement)) return;
+      hideNow();
+    }, delay);
+  };
+  const show = anchor => {
+    if (!document.body.classList.contains("ui-help-enabled")) return;
+    const target = targetForAnchor.get(anchor);
+    if (!anchor || !target) return;
+    clearHideTimer();
+    if (anchor !== activeAnchor) expandedHelp = false;
+    activeAnchor = anchor;
+    activeTarget = target;
+    render(target, expandedHelp);
+    position(anchor);
+  };
+  const shouldAttachAnchor = target => {
+    if (!target || !target.matches || target === document.body) return false;
+    if (target.id === "uiHelpToggle" || target.closest("#uiHelpToggle")) return false;
+    if (target.classList.contains("ui-help-anchor") || target.closest(".ui-help-anchor,#uiHelpPopover,.modebar")) return false;
+    if (/^(SCRIPT|STYLE|OPTION)$/i.test(target.tagName)) return false;
+    if (target.tagName === "INPUT" && ["hidden", "file"].includes((target.type || "").toLowerCase())) return false;
+    if (target.classList.contains("panel") && target.querySelector(":scope > details > summary[data-help]")) return false;
+    if (target.hasAttribute("data-help")) return true;
+    if (!target.matches(controlSelector)) return false;
+    const ancestorHelp = target.closest("[data-help]");
+    return !(ancestorHelp && ancestorHelp.matches("label,.toggle-field"));
+  };
+  const insertionHostFor = target => {
+    if (target.classList.contains("section-button") || target.classList.contains("tab-button") || target.tagName === "BUTTON") return { node: target, mode: "append" };
+    if (target.matches("h2,summary")) return { node: target, mode: "append" };
+    if (target.matches("label,.field,.toggle-field")) {
+      const span = directChild(target, "span");
+      if (span) return { node: span, mode: "append" };
+    }
+    if (target.id) {
+      const label = document.querySelector(`label[for="${CSS.escape(target.id)}"]`);
+      if (label) return { node: directChild(label, "span") || label, mode: "append" };
+    }
+    const label = target.closest("label");
+    if (label) return { node: directChild(label, "span") || label, mode: "append" };
+    const heading = target.querySelector && target.querySelector(":scope > .panel-title h2, :scope > h2, :scope > details > summary, :scope > span");
+    if (heading) return { node: heading, mode: "append" };
+    return target.parentElement ? { node: target, mode: "after" } : null;
+  };
+  const attachAnchor = target => {
+    if (!shouldAttachAnchor(target) || anchorForTarget.has(target)) return;
+    const placement = insertionHostFor(target);
+    if (!placement || !placement.node || !placement.node.isConnected) return;
+    if (placement.node.querySelector(":scope > .ui-help-anchor")) return;
+    const anchor = document.createElement("span");
+    anchor.className = "ui-help-anchor";
+    anchor.textContent = "i";
+    anchor.setAttribute("role", "button");
+    anchor.setAttribute("tabindex", "0");
+    anchor.setAttribute("aria-label", `Explain ${titleFor(target)}`);
+    anchor.setAttribute("aria-haspopup", "dialog");
+    anchor.setAttribute("aria-controls", "uiHelpPopover");
+    targetForAnchor.set(anchor, target);
+    anchorForTarget.set(target, anchor);
+    anchor.addEventListener("mouseenter", () => show(anchor));
+    anchor.addEventListener("focus", () => show(anchor));
+    anchor.addEventListener("mouseleave", event => { if (!isHelpTarget(event.relatedTarget)) scheduleHide(); });
+    anchor.addEventListener("blur", event => { if (!isHelpTarget(event.relatedTarget)) scheduleHide(); });
+    anchor.addEventListener("pointerdown", event => { event.preventDefault(); event.stopPropagation(); });
+    anchor.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); show(anchor); });
+    anchor.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(anchor); }
+      if (event.key === "Escape") hideNow();
+    });
+    placement.node.classList.add("ui-help-slot");
+    if (placement.mode === "after") placement.node.insertAdjacentElement("afterend", anchor);
+    else placement.node.appendChild(anchor);
+  };
+  const attachAnchors = (root = document) => {
+    const targets = [];
+    if (root.matches && root.matches(candidateSelector)) targets.push(root);
+    if (root.querySelectorAll) targets.push(...root.querySelectorAll(candidateSelector));
+    targets.forEach(attachAnchor);
+  };
+  const queueAttachAnchors = () => {
+    if (installQueued) return;
+    installQueued = true;
+    requestAnimationFrame(() => { installQueued = false; attachAnchors(document); });
+  };
+
+  const setHelpEnabled = enabled => {
+    document.body.classList.toggle("ui-help-enabled", enabled);
+    if (toggle) {
+      toggle.setAttribute("aria-pressed", String(enabled));
+      const stateLabel = toggle.querySelector(".topbar-help-state");
+      if (stateLabel) stateLabel.textContent = enabled ? "On" : "Off";
+      toggle.title = enabled ? "Hide contextual help icons" : "Show contextual help icons";
+    }
+    if (!enabled) hideNow();
+  };
+
+  attachAnchors(document);
+  if (toggle) toggle.addEventListener("click", () => setHelpEnabled(toggle.getAttribute("aria-pressed") !== "true"));
+  setHelpEnabled(false);
+  new MutationObserver(queueAttachAnchors).observe(document.body, { childList: true, subtree: true });
+  pop.addEventListener("mouseenter", clearHideTimer);
+  pop.addEventListener("mouseleave", () => scheduleHide());
+  document.addEventListener("mousemove", event => {
+    if (!activeAnchor || !expandedHelp) return;
+    if (isHelpTarget(event.target)) clearHideTimer();
+    else scheduleHide(1000, true);
+  });
+  document.addEventListener("pointerdown", event => {
+    if (!activeTarget || pop.classList.contains("hidden")) return;
+    if (isHelpTarget(event.target)) return;
+    hideNow();
+  }, true);
+  window.addEventListener("scroll", () => { if (activeAnchor && !pop.classList.contains("hidden")) position(activeAnchor); }, true);
+  window.addEventListener("resize", () => { if (activeAnchor && !pop.classList.contains("hidden")) position(activeAnchor); });
+  document.addEventListener("keydown", event => { if (event.key === "Escape") hideNow(); });
 }
 
 function startStatusPolling() {
@@ -194,7 +501,11 @@ function bindSections() {
 }
 function switchSection(section) {
   document.querySelectorAll(".section-button").forEach(b => b.classList.toggle("active", b.dataset.section === section));
-  document.querySelectorAll(".tab-button").forEach(b => { b.hidden = b.dataset.section !== section; });
+  document.querySelectorAll(".tab-button").forEach(b => {
+    const hidden = b.dataset.section !== section;
+    b.hidden = hidden;
+    b.setAttribute("aria-hidden", String(hidden));
+  });
   // After filtering, ensure exactly one visible tab is active. If the previously-active tab
   // belongs to the new section, leave it; otherwise activate the first visible one.
   const visibleActive = document.querySelector(".tab-button.active:not([hidden])");
@@ -367,7 +678,6 @@ function bindUiSearch() {
       });
     }
   }
-
   function open() {
     overlay.removeAttribute("hidden");
     input.value = "";
@@ -467,7 +777,20 @@ function renderHours(hours, selected) {
     w.appendChild(l);
   });
 }
-function renderSolveMethods(methods, selected) { const w=$("solveMethod"); w.innerHTML=""; methods.forEach(m=>{ const l=document.createElement("label"); l.innerHTML=`<input type="radio" name="solveMethod" value="${m.id}"><span>${escapeHtml(m.label)}</span>`; l.querySelector("input").checked=m.id===selected; w.appendChild(l); }); }
+function renderSolveMethods(methods, selected) {
+  const w = $("solveMethod");
+  w.innerHTML = "";
+  methods.forEach(m => {
+    const l = document.createElement("label");
+    const help = solverMethodHelp(m);
+    l.dataset.helpTitle = help.title;
+    l.dataset.help = help.short.join("\n");
+    l.dataset.helpMore = help.more;
+    l.innerHTML = `<input type="radio" name="solveMethod" value="${m.id}"><span>${escapeHtml(m.label)}</span>`;
+    l.querySelector("input").checked = m.id === selected;
+    w.appendChild(l);
+  });
+}
 function currentHoursPerDay() {
   const checked = document.querySelector("input[name='hoursPerDay']:checked");
   return checked ? Number(checked.value) : 24;

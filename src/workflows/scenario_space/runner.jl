@@ -1,5 +1,5 @@
 # =============================================================================
-# scenario/runner.jl — Per-variant runner (serial + Distributed.jl)
+# workflows/scenario_space/runner.jl — Per-variant runner (serial + Distributed.jl)
 #
 # Phase 3 of scenario-space exploration. Takes a base `ModelData` that has
 # already been derived + clustered, a list of `LeafChange` lists (one per

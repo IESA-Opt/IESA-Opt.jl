@@ -1,13 +1,11 @@
 # =============================================================================
 # writers.jl — result table writers
 #
-# Mirrors IESA-Opt 1.0 Mapping XML files in `Mappings/`:
-#   BatchSolve_<varname>_Parquet.xml  → write_<varname>_parquet
-#   BatchSolve_<varname>_CSV.xml      → write_<varname>_csv
+# Result-table writers used by single runs and campaign variants.
 #
 # Output schema convention (long format, one row per indexed value):
 #   - Columns: index names + "value" (Float64)
-#   - File names match IESA-Opt 1.0 for direct diff
+#   - Table/file names follow IESA-Opt 1.0 result naming where possible
 #
 # Top-level entry points:
 #   - `write_duckdb_results(...)` stores all result tables in `results.duckdb`
@@ -60,6 +58,7 @@ function write_parquet_results(rr::RunResult, vars::AnnualVars, md::ModelData,
     # Annual writers (always)
     annual_writers = Dict{Symbol,Function}(
         :tech_use            => write_tech_use_parquet,
+        :variable_values     => write_variable_values_parquet,
         :techStock           => write_techStock_parquet,
         :totalCosts          => write_totalCosts_parquet,
         :CO2_price           => write_CO2_price_parquet,
@@ -163,6 +162,7 @@ function write_duckdb_results(rr::RunResult, vars::AnnualVars, md::ModelData,
     _with_duckdb_write_connection(db_path) do
         annual_writers = Dict{Symbol,Function}(
             :tech_use            => write_tech_use_parquet,
+            :variable_values     => write_variable_values_parquet,
             :techStock           => write_techStock_parquet,
             :totalCosts          => write_totalCosts_parquet,
             :CO2_price           => write_CO2_price_parquet,
@@ -749,6 +749,55 @@ function write_cluster_map_parquet(vars::AnnualVars, md::ModelData, path::Abstra
     return _write_table(df, path)
 end
 
+function write_variable_values_parquet(vars::AnnualVars, md::ModelData, path::AbstractString; threshold::Float64 = 0.0)
+    variable_col = String[]
+    index_key_col = String[]
+    index_cols = [String[] for _ in 1:5]
+    value_col = Float64[]
+
+    for name in fieldnames(AnnualVars)
+        container = getfield(vars, name)
+        _append_variable_values!(variable_col, index_key_col, index_cols, value_col, String(name), container, threshold)
+    end
+
+    df = DataFrames.DataFrame(variable = variable_col, index_key = index_key_col, value = value_col; copycols = false)
+    for i in reverse(eachindex(index_cols))
+        insertcols!(df, 2, Symbol("index_$(i)") => index_cols[i]; copycols = false)
+    end
+    return _write_table(df, path)
+end
+
+function _append_variable_values!(variable_col::Vector{String}, index_key_col::Vector{String}, index_cols::Vector{Vector{String}}, value_col::Vector{Float64}, name::String, container, threshold::Float64)
+    container === nothing && return nothing
+    if container isa AbstractDict
+        for (key, var) in container
+            labels = key isa Tuple ? key : (key,)
+            _push_variable_value!(variable_col, index_key_col, index_cols, value_col, name, labels, _solvalue(var), threshold)
+        end
+        return nothing
+    end
+    if hasproperty(container, :axes)
+        axes = getproperty(container, :axes)
+        for ci in CartesianIndices(container)
+            labels = Tuple(axes[d][ci[d]] for d in 1:length(ci.I))
+            _push_variable_value!(variable_col, index_key_col, index_cols, value_col, name, labels, _solvalue(container[labels...]), threshold)
+        end
+    end
+    return nothing
+end
+
+function _push_variable_value!(variable_col::Vector{String}, index_key_col::Vector{String}, index_cols::Vector{Vector{String}}, value_col::Vector{Float64}, name::String, labels::Tuple, val::Float64, threshold::Float64)
+    threshold > 0.0 && abs(val) <= threshold && return nothing
+    push!(variable_col, name)
+    label_strings = string.(labels)
+    for i in eachindex(index_cols)
+        push!(index_cols[i], i <= length(label_strings) ? label_strings[i] : "")
+    end
+    push!(index_key_col, join(label_strings, "|"))
+    push!(value_col, val)
+    return nothing
+end
+
 function _solvalue(var)
     try
         return Float64(value(var))
@@ -799,8 +848,11 @@ function write_cost_breakdown_parquet(vars::AnnualVars, md::ModelData, path::Abs
             retrofit = 0.0
             w_lifetime = get(lifetime_weight, (t, ps), 0.0)
             if w_lifetime != 0.0 && crf != 0.0
-                for it in s.technologies
-                    rv = _solvalue(vars.retrofitting[it, t, ps])
+                # `vars.retrofitting` is now a sparse Dict keyed by (it,jt,ps)
+                # over actual retrofit pairs only. Iterate inbound retrofits to t.
+                for it in get(p.retrofit_in_by_tech, t, Symbol[])
+                    haskey(vars.retrofitting, (it, t, ps)) || continue
+                    rv = _solvalue(vars.retrofitting[(it, t, ps)])
                     rv == 0.0 && continue
                     retrofit += sdf * w_lifetime * rv * crf * get(p.retrofit_cost, (it, t, ps), 0.0)
                 end

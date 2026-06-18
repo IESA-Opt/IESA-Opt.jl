@@ -13,9 +13,8 @@ using IESAOpt
 #   * `IESAOpt._split_cluster_changes`
 #
 # The end-to-end behaviour — running a campaign whose variants partition
-# into multiple cluster groups — is exercised by
-# `scripts/scenario_benchmark.jl` and the smoke scripts on real workbook
-# inputs; doing it in unit tests would require monkey-patching
+# into multiple cluster groups — is exercised by local manual diagnostics on
+# real workbook inputs; doing it in unit tests would require monkey-patching
 # `build_temporal_clusters!`, which is fragile.
 #
 # IMPORTANT INVARIANT: the default registry must be EMPTY so the Phase 3

@@ -177,8 +177,25 @@ function add_annual_variables!(model::JuMP.Model, md::ModelData)
     # decomStock(t, ps) ≥ 0  — recursion supplied by `decomStock_def_constraint`
     @variable(model, decomStock[t = s.technologies, ps = pss] >= 0)
 
-    # IESA-Opt 1.0 retrofitting(it,jt,ps) is dense over the full technology cross-product.
-    @variable(model, retrofitting[it = s.technologies, jt = s.technologies, ps = pss] >= 0)
+    # IESA-Opt 1.0 declares retrofitting(it,jt,ps) over the full (technologies
+    # × technologies × periods) cross-product, but Gurobi presolve discards
+    # ~99.99 % of those variables because the constraint
+    #   retrofit_relations(it,jt) * (...)  -  retrofitting(it,jt,ps)  >= 0
+    # forces retrofitting=0 whenever `retrofit_relations(it,jt) == false`.
+    # AIMMS strips them via NetVarMatrix before sending the LP to Gurobi;
+    # we build the variable sparse so the matrix matrix Gurobi receives is
+    # comparable to AIMMS in dimension. `p.retrofit_pairs` is populated by
+    # `derive_sets!::_derive_retrofit_pairs!`.
+    retrofitting = Dict{Tuple{Symbol,Symbol,Int}, JuMP.VariableRef}()
+    sizehint!(retrofitting, length(p.retrofit_pairs) * length(pss))
+    keep_names = get(ENV, "IESA_OPT_KEEP_NAMES", "0") == "1"
+    for (it_, jt_) in p.retrofit_pairs, ps in pss
+        v = @variable(model, lower_bound = 0.0)
+        if keep_names
+            JuMP.set_name(v, "retrofitting[$(it_),$(jt_),$(ps)]")
+        end
+        retrofitting[(it_, jt_, ps)] = v
+    end
 
     return AnnualVars(
         tech_use,

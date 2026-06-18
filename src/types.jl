@@ -338,6 +338,15 @@ Base.@kwdef mutable struct ModelParams
     decom_planned::Dict{Tuple{Symbol,Int},Float64}            = Dict()
     decom_plannedSel::Dict{Tuple{Symbol,Int},Float64}         = Dict()  # filtered to periods_solve
     retrofit_relations::Dict{Tuple{Symbol,Symbol},Bool}       = Dict()
+    # ---- Derived from retrofit_relations by `derive_sets!` -----------------
+    # Sparse retrofit support: AIMMS materializes only `retrofit_relations(it,jt)==true`
+    # entries before sending to Gurobi, but a dense Julia (it×jt×ps) variable
+    # creates ~|tech|^2 redundant cols/rows that Gurobi's presolve must remove.
+    # We pre-compute the active pair list and the per-tech in/out adjacency to
+    # build a sparse `retrofitting` variable.
+    retrofit_pairs::Vector{Tuple{Symbol,Symbol}}              = Tuple{Symbol,Symbol}[]
+    retrofit_in_by_tech::Dict{Symbol,Vector{Symbol}}          = Dict()  # t -> [it : (it,t) is a pair]
+    retrofit_out_by_tech::Dict{Symbol,Vector{Symbol}}         = Dict()  # t -> [jt : (t,jt) is a pair]
     cumulative_CO2storage::Dict{Symbol,Float64}               = Dict()  # per node
     emissionTargetAir::Dict{Tuple{Symbol,Int},Float64}        = Dict()
     emissionTargetAll::Dict{Tuple{Symbol,Int},Float64}        = Dict()
@@ -501,6 +510,12 @@ Base.@kwdef mutable struct ModelParams
     closure_days_BE::Dict{Symbol,Vector{Int}}                 = Dict()
     rolling_window_hours_q::Dict{Int,Vector{Int}}             = Dict()  # q → hours in 4h window
     rolling_window_hours_r::Dict{Int,Vector{Int}}             = Dict()  # r → hours in 3d window
+
+    # =========================================================================
+    # Project-specific extensions (opt-in, NOT part of the core model)
+    # See src/extensions/README.md for the architecture and removal steps.
+    # =========================================================================
+    extensions::Set{Symbol}                                   = Set{Symbol}()
 end
 
 # ----------------------------------------------------------------------------
@@ -528,7 +543,7 @@ ModelData() = ModelData(ModelSets(), ModelParams())
     RunResult
 
 Captures one solver invocation. Mirrors the fields tracked by IESA-Opt 1.0
-`RecordRunStatistics` / `run_summary.csv`.
+`RecordRunStatistics` and the current run-statistics result table.
 """
 struct RunResult
     output_folder::String

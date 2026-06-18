@@ -1,5 +1,5 @@
 # =============================================================================
-# scenario/analysis.jl -- Phase 5: lightweight result-analysis helpers
+# workflows/scenario_space/analysis.jl -- Phase 5: lightweight result-analysis helpers
 #
 # Phase 4 hands us a `ScenarioResult` (spec + sample matrix + per-variant
 # solves). Phase 5 provides three small DataFrame-returning helpers that cover

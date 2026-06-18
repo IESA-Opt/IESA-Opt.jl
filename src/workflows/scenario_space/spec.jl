@@ -1,5 +1,5 @@
 # =============================================================================
-# scenario/spec.jl -- types and parsing for a scenario-space campaign spec
+# workflows/scenario_space/spec.jl -- types and parsing for a scenario-space campaign spec
 #
 # A campaign is a single scenario-space exploration exercise. It consists of:
 #   * meta-settings (sampling method, number of variants, random seed)

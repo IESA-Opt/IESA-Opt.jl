@@ -11,17 +11,17 @@
 
 A 5-phase scenario-space exploration subsystem built on top of `IESAOpt`.
 All Julia code, tests, and helper scripts live under
-[src/scenario/](src/scenario/),
+[src/workflows/scenario_space/](src/workflows/scenario_space/),
 [test/test_scenario*.jl](test/),
 and [scripts/scenario_*.jl](scripts/).
 
 | Phase | Theme | Key files | Status |
 |------:|-------|-----------|--------|
-| 1 | Parameter-space spec + samplers (xlsx-coordinate `CampaignSpec`, LHS/Sobol/Morris/Factorial) | [src/scenario/types.jl](src/scenario/types.jl), [src/scenario/sampling.jl](src/scenario/sampling.jl), [test/test_scenario.jl](test/test_scenario.jl) | committed `67ddc60` |
-| 2 | In-place LP mutation (mutation manifest + per-variant `apply_variant!`) | [src/scenario/manifest.jl](src/scenario/manifest.jl), [src/scenario/variant.jl](src/scenario/variant.jl), [test/test_scenario_mutation.jl](test/test_scenario_mutation.jl) | committed `96775ef` |
-| 3 | Campaign runner (serial + Distributed.jl worker pool) | [src/scenario/runner.jl](src/scenario/runner.jl), [test/test_scenario_runner.jl](test/test_scenario_runner.jl), [scripts/scenario_run_campaign.jl](scripts/scenario_run_campaign.jl) | committed `2578038`, polished `4121fc0` |
-| 4 | High-level orchestrator (`run_scenario_space`) + result persistence (CSV + DuckDB) | [src/scenario/orchestrator.jl](src/scenario/orchestrator.jl), [src/scenario/persistence.jl](src/scenario/persistence.jl), [test/test_scenario_orchestrator.jl](test/test_scenario_orchestrator.jl) | **uncommitted, fully tested** |
-| 5 | Analysis helpers (`objective_table`, `sensitivity_scan`, `pareto_front`) | [src/scenario/analysis.jl](src/scenario/analysis.jl), [test/test_scenario_analysis.jl](test/test_scenario_analysis.jl) | **uncommitted, fully tested** |
+| 1 | Parameter-space spec + samplers (xlsx-coordinate `CampaignSpec`, LHS/Sobol/Morris/Factorial) | [src/workflows/scenario_space/spec.jl](src/workflows/scenario_space/spec.jl), [src/workflows/scenario_space/sampling.jl](src/workflows/scenario_space/sampling.jl), [test/test_scenario.jl](test/test_scenario.jl) | committed `67ddc60` |
+| 2 | In-place LP mutation (mutation manifest + per-variant `apply_variant!`) | [src/workflows/scenario_space/manifest.jl](src/workflows/scenario_space/manifest.jl), [src/workflows/scenario_space/variant.jl](src/workflows/scenario_space/variant.jl), [test/test_scenario_mutation.jl](test/test_scenario_mutation.jl) | committed `96775ef` |
+| 3 | Campaign runner (serial + Distributed.jl worker pool) | [src/workflows/scenario_space/runner.jl](src/workflows/scenario_space/runner.jl), [test/test_scenario_runner.jl](test/test_scenario_runner.jl), [scripts/scenario_run_campaign.jl](scripts/scenario_run_campaign.jl) | committed `2578038`, polished `4121fc0` |
+| 4 | High-level orchestrator (`run_scenario_space`) + result persistence (CSV + DuckDB) | [src/workflows/scenario_space/orchestrator.jl](src/workflows/scenario_space/orchestrator.jl), [src/workflows/scenario_space/persistence.jl](src/workflows/scenario_space/persistence.jl), [test/test_scenario_orchestrator.jl](test/test_scenario_orchestrator.jl) | **uncommitted, fully tested** |
+| 5 | Analysis helpers (`objective_table`, `sensitivity_scan`, `pareto_front`) | [src/workflows/scenario_space/analysis.jl](src/workflows/scenario_space/analysis.jl), [test/test_scenario_analysis.jl](test/test_scenario_analysis.jl) | **uncommitted, fully tested** |
 | diag | Cross-machine benchmark script + this file | [scripts/scenario_benchmark.jl](scripts/scenario_benchmark.jl), `HANDOFF.md` | **uncommitted; remove after diagnostics** |
 
 ## The open question
@@ -68,7 +68,7 @@ heuristic for `n_workers` and document the trade-off in the docs.
    julia --project=. -e 'using Pkg; Pkg.test()'
    ```
    All scenario-space testsets (Phases 1–5) must be green. If you change
-   anything in `src/scenario/persistence.jl` on Windows, see the
+   anything in `src/workflows/scenario_space/persistence.jl` on Windows, see the
    "DuckDB lock" footnote at the bottom of this file.
 
 3. **Run the benchmark sweep**
@@ -159,7 +159,7 @@ concern (UI, not Julia).
   is the inverse: `":NL"` → `Symbol`, `"2050"` → `Int`, `"3.14"` → `Float64`,
   else `String`.
 
-### 3. Analysis (`src/scenario/analysis.jl`)
+### 3. Analysis (`src/workflows/scenario_space/analysis.jl`)
 
 Three small DataFrame helpers, no plotting deps:
 
@@ -196,7 +196,7 @@ important ones for hot-loop iteration:
 
 ### 5. DuckDB on Windows (lessons learned this session)
 
-If you change `src/scenario/persistence.jl` or write any other DuckDB
+If you change `src/workflows/scenario_space/persistence.jl` or write any other DuckDB
 round-trip code, three rules:
 
 1. `DBInterface.execute(db, "CREATE TABLE a (); CREATE TABLE b ();")`
@@ -238,7 +238,7 @@ plus regression: every previous scenario testset still green
 
 How it works:
 
-1. New registry in `src/scenario/manifest.jl`:
+1. New registry in `src/workflows/scenario_space/manifest.jl`:
    - `register_clustering_affecting!(field::Symbol)`
    - `unregister_clustering_affecting!(field::Symbol) -> Bool`
    - `is_clustering_affecting(field::Symbol) -> Bool`
@@ -289,9 +289,9 @@ in the same Julia version always round-trips correctly.
 
 ```
 src/IESAOpt.jl                         — includes + exports (Phase 4 & 5)
-src/scenario/orchestrator.jl           — Phase 4: ScenarioSpec, run_scenario_space
-src/scenario/persistence.jl            — Phase 4: CSV + DuckDB save/load
-src/scenario/analysis.jl               — Phase 5: objective_table / sensitivity_scan / pareto_front
+src/workflows/scenario_space/orchestrator.jl           — Phase 4: ScenarioSpec, run_scenario_space
+src/workflows/scenario_space/persistence.jl            — Phase 4: CSV + DuckDB save/load
+src/workflows/scenario_space/analysis.jl               — Phase 5: objective_table / sensitivity_scan / pareto_front
 test/test_scenario_orchestrator.jl     — Phase 4 unit tests (13 testsets, all green)
 test/test_scenario_analysis.jl         — Phase 5 unit tests (9 testsets, all green)
 test/runtests.jl                       — wires the two new test files in
@@ -303,6 +303,6 @@ HANDOFF.md                             — this file; remove after we're done
 
 1. Update the "Results so far" table with the new measurements.
 2. Decide a default `n_workers` heuristic and document it in
-   `src/scenario/runner.jl` and (briefly) in `docs/src/user-guide/`.
+   `src/workflows/scenario_space/runner.jl` and (briefly) in `docs/src/user-guide/`.
 3. Remove `HANDOFF.md` and `scripts/scenario_benchmark.jl` from the branch.
 4. Open a PR `scenariospace → main`.

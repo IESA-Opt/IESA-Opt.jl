@@ -1,5 +1,5 @@
 # ---------------------------------------------------------------------------
-# Exact hybrid ORACLE MGA extension
+# Exact hybrid ORACLE MGA workflow
 #
 # Isolated from normal single-run and Scenario Space paths. The UI calls these
 # helpers only through /api/mga/*.

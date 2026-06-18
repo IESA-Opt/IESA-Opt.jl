@@ -61,7 +61,7 @@ end
 # -----------------------------------------------------------------------------
 # Tests
 # -----------------------------------------------------------------------------
-@testset "scenario/manifest.jl — Mutation + apply_mutation!" begin
+@testset "workflows/scenario_space/manifest.jl — Mutation + apply_mutation!" begin
     @testset "Mutation struct" begin
         m1 = Mutation(:rhs, "myCap", "", 7.5)
         @test m1.kind == :rhs
@@ -127,7 +127,7 @@ end
             Mutation(:bogus, "myCap", "", 1.0))
     end
 
-    @testset "apply_mutations! batch" begin
+    @testset "apply_mutations! multiple changes" begin
         m, _, _ = _tiny_model()
         n = apply_mutations!(m, [
             Mutation(:rhs, "myCap", "", 5.0),
@@ -140,7 +140,7 @@ end
     end
 end
 
-@testset "scenario/manifest.jl — registry + default builders" begin
+@testset "workflows/scenario_space/manifest.jl — registry + default builders" begin
     @testset "default registrations populated" begin
         regs = registered_mutation_fields()
         for f in (:emissionTargetAir, :emissionTargetBunker, :emissionTargetFS,
@@ -210,7 +210,7 @@ end
     end
 end
 
-@testset "scenario/variant.jl — LeafChange + apply_leaf_change!" begin
+@testset "workflows/scenario_space/variant.jl — LeafChange + apply_leaf_change!" begin
     @testset "LeafChange constructor + validation" begin
         ch = LeafChange(:emissionTargetAir, (:NL, 2050), 7.0)
         @test ch.field == :emissionTargetAir
@@ -279,7 +279,7 @@ end
     end
 end
 
-@testset "scenario/variant.jl — apply_variant! end-to-end" begin
+@testset "workflows/scenario_space/variant.jl — apply_variant! end-to-end" begin
     @testset "RHS push: leaf -> model" begin
         # Build the synthetic model + a minimal ModelData with one entry.
         m, _ = _emcap_model()

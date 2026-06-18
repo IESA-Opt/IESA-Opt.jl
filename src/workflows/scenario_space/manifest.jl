@@ -1,5 +1,5 @@
 # =============================================================================
-# scenario/manifest.jl — Constraint-reference manifest for in-place LP mutation
+# workflows/scenario_space/manifest.jl — Constraint-reference manifest for in-place LP mutation
 #
 # Phase 2 of scenario-space exploration. Lets a campaign change a leaf
 # parameter (e.g. emissionTargetAir[(:NL, 2050)]) and push the new value into

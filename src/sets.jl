@@ -77,6 +77,7 @@ function derive_sets!(md::ModelData)
     _build_technologies_union!(s)
     _derive_tech_materialConversion!(s, p)
     _derive_infra_subsets!(s, p)
+    _derive_retrofit_pairs!(s, p)
     return md
 end
 
@@ -110,12 +111,22 @@ function _build_temporal_sets!(s::ModelSets, p::ModelParams)
         s.semesters = collect(1:2)
     end
 
-    # Active hours: in FH mode, equals hours_orig (or aggregated when hoursPer_day < 24)
-    if isempty(s.hours)
-        if !isempty(s.hours_orig)
-            s.hours = copy(s.hours_orig)
-        elseif p.hoursPer_day > 0
-            s.hours = collect(1:(365 * p.hoursPer_day))
+    # Active hours for the FH (full-horizon) path.
+    #
+    # IESA-Opt 1.0 supports `hoursPer_day ∈ {1, 2, 3, 4, 6, 8, 12, 24}`. The raw
+    # workbook always provides 8760 hourly profile rows in `s.hours_orig`;
+    # `_resolve_hourly_profiles_fh!` aggregates them into `365 × hoursPer_day`
+    # FH-resolution buckets. The FH model itself indexes hourly variables/
+    # constraints over `s.hours`, which must therefore be the aggregated set
+    # `1..(365 * hoursPer_day)` — NOT a verbatim copy of `s.hours_orig`.
+    #
+    # Always overwrite (idempotent on repeated `derive_sets!` calls after a
+    # configuration change). TS-mode sets (`s.hours_cluster`, `s.repDays`,
+    # `s.hours_inDay_cluster`, ...) are derived separately and untouched.
+    if p.hoursPer_day > 0
+        n_hours_fh = 365 * p.hoursPer_day
+        if isempty(s.hours) || length(s.hours) != n_hours_fh
+            s.hours = collect(1:n_hours_fh)
         end
     end
 
@@ -158,7 +169,6 @@ function _build_temporal_sets!(s::ModelSets, p::ModelParams)
     end
     return nothing
 end
-
 # -----------------------------------------------------------------------------
 # Tech subsets
 # -----------------------------------------------------------------------------
@@ -383,5 +393,58 @@ function _derive_tech_materialConversion!(s::ModelSets, p::ModelParams)
         if get(p.activityType_act,
                get(p.activityPer_tech, t, Symbol("")),
                Symbol("")) == ACTIVITY_MATERIAL_CONV]
+    return nothing
+end
+
+# -----------------------------------------------------------------------------
+# Sparse retrofit support: derive `retrofit_pairs` (Vector of (it,jt)) plus
+# per-tech in/out adjacency from `retrofit_relations`.
+# AIMMS materializes only `retrofit_relations(it,jt)==true` entries before
+# sending to Gurobi; the Julia model declared `retrofitting[it,jt,ps]` dense
+# over `technologies × technologies`, creating ~|tech|^2 redundant variables
+# (Gurobi's presolve must then eliminate them — but the LP that Gurobi sees
+# is much larger than AIMMS's, breaking apples-to-apples comparison and
+# wasting build time). These derived containers let `add_annual_variables!`
+# build a sparse retrofit variable indexed only over active pairs.
+# -----------------------------------------------------------------------------
+function _derive_retrofit_pairs!(s::ModelSets, p::ModelParams)
+    pairs = Tuple{Symbol,Symbol}[]
+    in_by  = Dict{Symbol,Vector{Symbol}}()
+    out_by = Dict{Symbol,Vector{Symbol}}()
+
+    # Default: sparse mode — only emit the (it,jt) pairs for which
+    # `retrofit_relations(it,jt)==true`. This is what AIMMS's NetVarMatrix
+    # presolver effectively passes to Gurobi.
+    #
+    # Set env var `IESA_OPT_DENSE_RETROFIT=1` to materialize the full
+    # `technologies × technologies` cross-product instead (AIMMS-comparable
+    # mode for LP-size validation). In dense mode every inactive entry is
+    # still emitted, and `retrofit_constraint` multiplies the RHS by the
+    # relation factor so inactive variables are pinned to 0 (→ Gurobi
+    # presolve will drop them, matching AIMMS's behavior).
+    dense = get(ENV, "IESA_OPT_DENSE_RETROFIT", "0") == "1"
+
+    if dense && !isempty(s.technologies)
+        techs = collect(s.technologies)
+        sizehint!(pairs, length(techs)^2)
+        for it_ in techs, jt_ in techs
+            push!(pairs, (it_, jt_))
+        end
+        for t_ in techs
+            in_by[t_]  = copy(techs)
+            out_by[t_] = copy(techs)
+        end
+    else
+        for ((it_, jt_), v) in p.retrofit_relations
+            v || continue
+            push!(pairs, (it_, jt_))
+            push!(get!(in_by,  jt_, Symbol[]), it_)  # (it_, jt_): jt_ has it_ as inbound
+            push!(get!(out_by, it_, Symbol[]), jt_)  # (it_, jt_): it_ has jt_ as outbound
+        end
+    end
+
+    p.retrofit_pairs        = pairs
+    p.retrofit_in_by_tech   = in_by
+    p.retrofit_out_by_tech  = out_by
     return nothing
 end

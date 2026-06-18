@@ -46,7 +46,7 @@ julia --project=. -e "using Pkg; Pkg.instantiate()"
 Check that the example workbook can be loaded:
 
 ```powershell
-julia --project=. scripts/load_only.jl data/default_data.xlsx
+julia --project=. scripts/load_only.jl Input/default_data.xlsx
 ```
 
 Run the default representative-day solve:
@@ -59,9 +59,9 @@ For repeated study runs, keep local run wrappers under `local/`, which is ignore
 
 ## Input Data And Results
 
-IESA-Opt.jl reads Excel workbooks from paths relative to the repository root. The tracked example input is [data/default_data.xlsx](data/default_data.xlsx). Additional local study workbooks can be placed in `data/` or `data_Batch/`; those folders are configured so private scenario files stay out of Git.
+IESA-Opt.jl reads Excel workbooks from paths relative to the repository root. The tracked example input is [Input/default_data.xlsx](Input/default_data.xlsx). Additional local study workbooks can be placed in `Input/`; private workbooks stay out of Git unless explicitly unignored.
 
-Solve results are written under `Output/` or `Output_Batch/`. New runs store model outputs in a single DuckDB database named `results.duckdb` in each run folder. Common result tables include run statistics, solve timings, total costs, cost breakdowns, technology stock, technology use, representative-day dispatch, cluster maps, and emission-price outputs. The Excel workbook remains the editable input source; repeated runs automatically reuse a compiled DuckDB input cache and rebuild it when the workbook changes. See the [outputs guide](https://iesa-opt.github.io/IESA-Opt.jl/v0.1/user-guide/outputs/) for details.
+Solve results are written under `Output/`. Campaigns use one named campaign folder under `Output/`, with variant/run folders below it as needed. New runs store model outputs in a single DuckDB database named `results.duckdb` in each run folder. Common result tables include run statistics, solve timings, total costs, cost breakdowns, technology stock, technology use, representative-day dispatch, cluster maps, and emission-price outputs. The Excel workbook remains the editable input source; repeated runs automatically reuse a compiled DuckDB input cache and rebuild it when the workbook changes. See the [outputs guide](https://iesa-opt.github.io/IESA-Opt.jl/v0.1/user-guide/outputs/) for details.
 
 ## Local UI Dashboard
 
@@ -76,7 +76,7 @@ Make sure dependencies are installed once (`julia --project=. -e "using Pkg; Pkg
 - **Cross-platform terminal:** from the repository root run `julia --threads=auto --project=. scripts/serve_ui.jl`. The same script works on Windows, macOS, and Linux.
 - **From inside Julia:** `using IESAOpt; serve_ui!()` (defaults: `host="127.0.0.1"`, `port=8123`, `open_browser=true`). To run headless (no auto-open), use `serve_ui!(open_browser=false)`.
 
-The first launch precompiles the package and warms an input cache for `data/default_data.xlsx`; subsequent launches start in a few seconds.
+The first launch precompiles the package and warms an input cache for `Input/default_data.xlsx`; subsequent launches start in a few seconds.
 
 #### Developer fast-start
 
@@ -91,11 +91,13 @@ Pair both for the fastest development loop. Unset them (or set to `0`) to get th
 
 The UI has the following main workspaces:
 
-- **Run.** Pick an input workbook (Browse selects any `.xlsx` / `.xlsm` / `.xls` file under `data/`), choose temporal mode (annual, time-slice, or full-hourly), set periods, representative days, hours per day, solver, threads, and output name, then click *Run*. The right-hand panel streams live solver output and per-stage progress (read → prepare → cluster → generate → solve → write).
-- **Results and Compare.** Inspect output folders under `Output/` and `Output_Batch/`, view interactive Plotly charts, and compare multiple runs side by side.
+- **Run.** Pick an input workbook from `Input/`, or use Browse to select any `.xlsx` / `.xlsm` / `.xls` file from disk. Choose temporal mode (annual, time-slice, or full-hourly), set periods, representative days, hours per day, solver, threads, and output name, then click *Run*. The right-hand panel streams live solver output and per-stage progress (read → prepare → cluster → generate → solve → write).
+- **Results and Compare.** Inspect output folders under `Output/`, view interactive Plotly charts, and compare multiple runs side by side.
 - **Scenario Space.** Define sampled workbook/model parameters, run parallel campaigns, monitor worker progress, inspect system-cost versus CO2-price scatter plots, and use the Analysis sheet for PRIM-style scenario discovery and rank-correlation global sensitivity analysis.
 - **Scenario Explorer.** Browse workbook sheets, technology dependencies, coupled sectors, profiles, policies, and flow details directly from the model input data.
 - **MGA.** Configure model-generated alternatives with a system-cost slack and parallel directional exploration, watch baseline / seed / ORACLE refinement solves stream in live on the Progress tab, then inspect the Results tab: certificate cards, slack-vs-diversity scatter, alternatives table, and an *Investments across alternatives* panel with a min/max envelope chart and ranked low-regret + high-volatility tables that summarise which technologies every near-optimal pathway agrees on and where MGA finds genuine design flexibility. Past campaigns are listed in the sidebar and can be reloaded with one click.
+
+For source navigation, optional model-building patches live in [src/extensions/](src/extensions/). Higher-level solve campaigns live in [src/workflows/](src/workflows/): Scenario Space is under [src/workflows/scenario_space/](src/workflows/scenario_space/) and MGA is under [src/workflows/mga/](src/workflows/mga/). This keeps one-model mathematical extensions separate from workflows that orchestrate many model builds or alternative solves.
 
 All results charts are interactive (zoom, pan, click-to-toggle legend, save-as-PNG):
 
@@ -123,12 +125,10 @@ Close the launcher window, or press **Ctrl+C** in the terminal where Julia is ru
 ```text
 src/              Julia package source
 src/model/        Variable, objective, and constraint families
-scripts/          Reusable run and smoke-test scripts
+scripts/          Core launcher and run scripts
 test/             Unit and smoke tests
-data/             Default and local single-run input workbooks
-data_Batch/       Local batch input workbooks and scenario variants
-Output/           Generated single-run outputs, ignored by Git
-Output_Batch/     Generated batch outputs, ignored by Git
+Input/            Default and local input workbooks
+Output/           Generated run and campaign outputs, ignored by Git
 ui/               Local UI dashboard assets (HTML, JS, CSS, vendored Plotly)
 scripts/launcher/ Windows .bat / PowerShell .ps1 launchers for the local UI
 docs/             User-facing documentation

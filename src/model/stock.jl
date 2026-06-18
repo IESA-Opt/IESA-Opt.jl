@@ -72,6 +72,7 @@ function add_stock_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     #                       + sum[pa, decomMat_NewInv(t, pa, ps) *
     #                                 (cap_investments(t, pa) + sum[it, retrofitting(it, t, pa)])]
     #                       + eco_decommisioning(t, ps)
+    # `rt` is a sparse Dict{(it,jt,ps),VariableRef}; only iterate inbound retrofits.
     # -------------------------------------------------------------------------
     for t in tech, ps in pss
         prev_ps = _prev_period(pss, ps)
@@ -79,13 +80,14 @@ function add_stock_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
         planned = get(p.decom_plannedSel, (t, ps), 0.0)
 
         new_decom_expr = AffExpr(0.0)
+        retro_in_t = get(p.retrofit_in_by_tech, t, Symbol[])
         for pa in pss
             coef = get(p.decomMat_NewInv, (t, pa, ps), 0.0)
             coef == 0.0 && continue
             add_to_expression!(new_decom_expr, coef, ci[t, pa])
-            # retrofits in onto `t` at period pa
-            for it_ in tech
-                add_to_expression!(new_decom_expr, coef, rt[it_, t, pa])
+            # retrofits in onto `t` at period pa (sparse over actual retrofit pairs)
+            for it_ in retro_in_t
+                add_to_expression!(new_decom_expr, coef, rt[(it_, t, pa)])
             end
         end
 
@@ -115,9 +117,11 @@ function add_stock_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
 
         retro_in  = AffExpr(0.0)
         retro_out = AffExpr(0.0)
-        for it_ in tech
-            add_to_expression!(retro_in,  1.0, rt[it_, t, ps])
-            add_to_expression!(retro_out, 1.0, rt[t, it_, ps])
+        for it_ in get(p.retrofit_in_by_tech, t, Symbol[])
+            add_to_expression!(retro_in,  1.0, rt[(it_, t, ps)])
+        end
+        for jt_ in get(p.retrofit_out_by_tech, t, Symbol[])
+            add_to_expression!(retro_out, 1.0, rt[(t, jt_, ps)])
         end
 
         @constraint(m,
@@ -218,19 +222,35 @@ function add_stock_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     # retrofit_constraint (IESA-Opt 1.0 line ~2861):
     #   if first(ps): retrofit_relations(it, jt) * techStock_exist(it) - retrofitting(it, jt, ps) >= 0
     #   else:         retrofit_relations(it, jt) * techStock(it, ps-1) - retrofitting(it, jt, ps) >= 0
+    #
+    # Default (sparse) mode: `p.retrofit_pairs` already filters to active pairs
+    # (rel=1.0 for every entry), so we drop the `rel` multiplier.
+    # Dense (AIMMS-comparable) mode: `p.retrofit_pairs` enumerates the full
+    # technologies×technologies cross-product. We look up the relation factor;
+    # for inactive pairs (rel=0) the constraint reduces to `-rt >= 0` which
+    # pins the retrofitting var to 0 (matching AIMMS).
     # -------------------------------------------------------------------------
-    for it_ in tech, jt_ in tech, ps in pss
+    for (it_, jt_) in p.retrofit_pairs, ps in pss
+        # rel = retrofit_relations(it,jt). Missing key => implicitly inactive
+        # (the workbook only stores entries that exist in the Retrofitting sheet,
+        # whether true or false). In SPARSE mode every pair in retrofit_pairs has
+        # an explicit `true` entry so rel is always 1.0; in DENSE mode the
+        # cross-product enumerates pairs that are NOT in the dict, and those
+        # MUST be treated as 0.0 (otherwise the model gets free retrofitting).
         rel = get(p.retrofit_relations, (it_, jt_), false) ? 1.0 : 0.0
-        prev_ps = _prev_period(pss, ps)
-        ub = if prev_ps === nothing
-            rel * get(p.techStock_exist, it_, 0.0)
+        if rel == 0.0
+            @constraint(m, -rt[(it_, jt_, ps)] >= 0,
+                        base_name = "retrofit[$(it_),$(jt_),$(ps)]")
         else
-            expr = AffExpr(0.0)
-            rel == 0.0 || add_to_expression!(expr, rel, ts[it_, prev_ps])
-            expr
+            prev_ps = _prev_period(pss, ps)
+            ub = if prev_ps === nothing
+                get(p.techStock_exist, it_, 0.0)
+            else
+                ts[it_, prev_ps]
+            end
+            @constraint(m, ub - rt[(it_, jt_, ps)] >= 0,
+                        base_name = "retrofit[$(it_),$(jt_),$(ps)]")
         end
-        @constraint(m, ub - rt[it_, jt_, ps] >= 0,
-                    base_name = "retrofit[$(it_),$(jt_),$(ps)]")
     end
 
     # -------------------------------------------------------------------------

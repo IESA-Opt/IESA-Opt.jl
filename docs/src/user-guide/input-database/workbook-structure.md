@@ -33,7 +33,7 @@ The current Julia reader expects the active sheets below. The names are exact wo
 Many sheets contain period-indexed blocks, typically for 2022, 2025, 2030, 2035, 2040, 2045, and 2050. The Julia call
 
 ```julia
-read_data("data/default_data.xlsx"; periods = [2022, 2025, 2030, 2035, 2040, 2045, 2050])
+read_data("Input/default_data.xlsx"; periods = [2022, 2025, 2030, 2035, 2040, 2045, 2050])
 ```
 
 sets the period universe used by the reader. `periods_solve` can then select a subset of periods for solving.

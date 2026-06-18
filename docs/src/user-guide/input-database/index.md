@@ -1,6 +1,6 @@
 # Input Database
 
-IESA-Opt.jl reads scenario data from an Excel workbook. The public example workbook is `data/default_data.xlsx`; study-specific workbooks can be placed under `data/` or `data_Batch/` and should normally remain outside Git.
+IESA-Opt.jl reads scenario data from an Excel workbook. The public example workbook is `Input/default_data.xlsx`; study-specific workbooks can be placed under `Input/` and should normally remain outside Git. Scenario variants are configured in the UI or campaign workflow rather than by maintaining a separate workbook folder.
 
 The workbook is more than a collection of tables. It defines the model universe: periods, regions, activities, technologies, policy targets, time profiles, technology-activity balances, infrastructure assets, prices, learning assumptions, feedstocks, and retrofit relations. The Julia reader converts these sheets into `ModelSets` and `ModelParams`, derives secondary sets and parameters, and then passes those structures to the model builder.
 

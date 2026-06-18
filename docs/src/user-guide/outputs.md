@@ -1,12 +1,12 @@
 # Outputs
 
-IESA-Opt.jl writes structured result tables to the selected output folder. New runs store model outputs in a single DuckDB database named `results.duckdb`.
+IESA-Opt.jl writes structured result tables to the selected output folder. New runs store model outputs in a single DuckDB database named `results.duckdb`. Run scripts may also write a `parquet/` mirror for external tools, but CSV result reporting is not part of the normal model-output path.
 
 Output folders are run artifacts. Keep important study outputs outside Git or archive them separately.
 
 ## Output Location
 
-The default run script writes under `Output/`. Batch workflows write under `Output_Batch/`. Both folders are ignored by Git except for `.gitkeep` placeholders.
+Runs and campaigns write under `Output/`. A campaign should use one named folder inside `Output/`, with each variant/run stored below that campaign folder as needed. `Output/` is ignored by Git except for its `.gitkeep` placeholder.
 
 The default representative-day run writes to a folder named from the scenario, representative-day count, and thread count, for example:
 
@@ -28,8 +28,14 @@ Custom output locations can be set in a local wrapper script with `IESA_OUT_DIR`
 | `techStock` | Installed technology stock by technology and period. |
 | `tech_use` | Annual technology use by technology and period. |
 | `tech_use_TS` | Representative-day dispatch results for time-slice runs. |
+| `tech_use_h` | Full-hourly dispatch results for full-hourly runs. |
+| `variable_values` | Complete long-format dump of every JuMP variable value, including zero-valued variables. |
 | `cluster_map` | Mapping from calendar days to representative days. |
 | `CO2_price` | Emission-cap shadow prices when the corresponding dual outputs are available. |
+| `activity_prices` | Annual commodity balance shadow prices by activity, period, and balance family. |
+| `activity_prices_daily` | Daily commodity balance shadow prices for daily-dispatched activities. |
+| `activity_prices_hourly` | Hourly or representative-hour commodity balance shadow prices for hourly-dispatched activities. |
+| `emission_prices` | Shadow prices for emission-cap constraint families by node and period. |
 
 Some output files depend on the selected solve mode and enabled writer options.
 

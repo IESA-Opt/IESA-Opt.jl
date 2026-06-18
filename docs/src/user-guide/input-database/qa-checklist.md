@@ -30,7 +30,7 @@ Run these checks before starting long solves.
 From the repository root:
 
 ```powershell
-julia --project=. scripts/load_only.jl data/default_data.xlsx
+julia --project=. scripts/load_only.jl Input/default_data.xlsx
 julia --project=. test/runtests.jl
 ```
 

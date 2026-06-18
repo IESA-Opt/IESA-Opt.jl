@@ -1,17 +1,7 @@
 # =============================================================================
-# scenario/persistence.jl -- Phase 4: save/load ScenarioResult to disk
+# workflows/scenario_space/persistence.jl -- save/load ScenarioResult to disk
 #
-# Persistence layout (CSV is the default; DuckDB is a single-file alternative):
-#
-#   <dir>/
-#       spec.json        — human-readable spec dump
-#       samples.csv      — variant_id + one column per LeafTarget
-#       results.csv      — variant_id, objective, term_status, primal_status,
-#                          worker_pid, build_seconds, apply_seconds, solve_seconds, error
-#       combined.csv     — INNER JOIN of samples + results on variant_id
-#                          (convenience for one-click DataFrame loading)
-#
-# DuckDB alternative (single file, fast columnar queries):
+# Persistence layout (single DuckDB file, fast columnar queries):
 #
 #   <dir>/scenario_results.duckdb
 #       table spec        (key, value)
@@ -19,14 +9,8 @@
 #       table samples     (variant_id, target_id, value)
 #       table results     (variant_id, objective, term_status, primal_status,
 #                          worker_pid, build_seconds, apply_seconds, solve_seconds, error)
-#
-# The CSV format is the default because it is human-readable, version-control-
-# friendly, and trivially loaded by Python/R/Excel for downstream analysis.
-# DuckDB is offered when you have many variants (N > ~1e4) where CSV starts
-# to slow down.
 # =============================================================================
 
-using CSV
 using DataFrames
 using DuckDB
 using JSON3
@@ -36,13 +20,11 @@ using JSON3
 # -----------------------------------------------------------------------------
 
 """
-    save_scenario_results(dir, result::ScenarioResult; format=:csv, overwrite=false)
+    save_scenario_results(dir, result::ScenarioResult; format=:duckdb, overwrite=false)
 
 Persist a [`ScenarioResult`](@ref) to `dir`. The directory is created if it
 does not exist.
 
-* `format=:csv`     writes `spec.json` + `samples.csv` + `results.csv` +
-                    `combined.csv` (see file docstring for layout).
 * `format=:duckdb`  writes a single `scenario_results.duckdb` file with the
                     same data normalised into 4 tables.
 * `overwrite=true`  silently overwrites existing files; default `false`
@@ -51,20 +33,18 @@ does not exist.
 Returns the absolute path to `dir`.
 """
 function save_scenario_results(dir::AbstractString, result::ScenarioResult;
-                               format::Symbol = :csv,
+                               format::Symbol = :duckdb,
                                overwrite::Bool = false)
     isdir(dir) || mkpath(dir)
-    if format === :csv
-        return _save_csv(dir, result; overwrite = overwrite)
-    elseif format === :duckdb
+    if format === :duckdb
         return _save_duckdb(dir, result; overwrite = overwrite)
     else
-        throw(ArgumentError("Unknown format $(repr(format)). Use :csv or :duckdb."))
+        throw(ArgumentError("Unknown format $(repr(format)). Use :duckdb."))
     end
 end
 
 """
-    load_scenario_results(dir; format=:csv) -> ScenarioResult
+    load_scenario_results(dir; format=:duckdb) -> ScenarioResult
 
 Inverse of [`save_scenario_results`](@ref). Reads back the spec, samples, and
 variant results from `dir`.
@@ -75,64 +55,12 @@ re-run / re-sample the campaign but is not byte-identical to the in-memory
 spec if the original had auxiliary metadata that the persistence layer did
 not preserve.
 """
-function load_scenario_results(dir::AbstractString; format::Symbol = :csv)
-    if format === :csv
-        return _load_csv(dir)
-    elseif format === :duckdb
+function load_scenario_results(dir::AbstractString; format::Symbol = :duckdb)
+    if format === :duckdb
         return _load_duckdb(dir)
     else
-        throw(ArgumentError("Unknown format $(repr(format)). Use :csv or :duckdb."))
+        throw(ArgumentError("Unknown format $(repr(format)). Use :duckdb."))
     end
-end
-
-# -----------------------------------------------------------------------------
-# CSV implementation
-# -----------------------------------------------------------------------------
-
-function _csv_paths(dir::AbstractString)
-    return (spec     = joinpath(dir, "spec.json"),
-            samples  = joinpath(dir, "samples.csv"),
-            results  = joinpath(dir, "results.csv"),
-            combined = joinpath(dir, "combined.csv"))
-end
-
-function _save_csv(dir::AbstractString, result::ScenarioResult; overwrite::Bool)
-    p = _csv_paths(dir)
-    if !overwrite
-        for f in (p.spec, p.samples, p.results, p.combined)
-            isfile(f) && throw(ArgumentError("File already exists: $f. Use overwrite=true."))
-        end
-    end
-    # spec.json — combine the spec dict with the campaign runtime so a single
-    # file describes the campaign + how long it took.
-    spec_dict = _spec_to_dict(result.spec)
-    spec_dict["runtime_seconds"] = result.runtime_seconds
-    open(p.spec, "w") do io
-        JSON3.pretty(io, spec_dict)
-    end
-    # samples.csv
-    CSV.write(p.samples, _samples_dataframe(result))
-    # results.csv
-    CSV.write(p.results, _results_dataframe(result))
-    # combined.csv (samples joined with results on variant_id)
-    CSV.write(p.combined, _combined_dataframe(result))
-    return abspath(dir)
-end
-
-function _load_csv(dir::AbstractString)
-    p = _csv_paths(dir)
-    isfile(p.spec)    || throw(ArgumentError("Missing $(p.spec)"))
-    isfile(p.samples) || throw(ArgumentError("Missing $(p.samples)"))
-    isfile(p.results) || throw(ArgumentError("Missing $(p.results)"))
-    spec_dict = JSON3.read(read(p.spec, String), Dict{String,Any})
-    spec = _dict_to_spec(spec_dict)
-    samples_df = CSV.read(p.samples, DataFrame)
-    results_df = CSV.read(p.results, DataFrame)
-    samples = _dataframe_to_samples(spec, samples_df)
-    variants = _dataframe_to_variants(spec, results_df, samples)
-    runtime = get(spec_dict, "runtime_seconds", NaN)
-    runtime = runtime isa Real ? Float64(runtime) : NaN
-    return ScenarioResult(spec, samples, variants, runtime)
 end
 
 # -----------------------------------------------------------------------------
@@ -342,74 +270,6 @@ _parse_index(x) = x
 
 _format_index(x::Symbol) = ":" * String(x)
 _format_index(x) = x
-
-# -----------------------------------------------------------------------------
-# DataFrame views
-# -----------------------------------------------------------------------------
-
-function _samples_dataframe(result::ScenarioResult)
-    n, k = size(result.samples)
-    df = DataFrame(variant_id = 1:n)
-    for j in 1:k
-        col = Symbol(result.spec.targets[j].label)
-        df[!, col] = result.samples[:, j]
-    end
-    return df
-end
-
-function _results_dataframe(result::ScenarioResult)
-    return DataFrame(
-        variant_id    = [v.variant_id for v in result.variants],
-        objective     = [v.objective for v in result.variants],
-        term_status   = [v.term_status for v in result.variants],
-        primal_status = [v.primal_status for v in result.variants],
-        worker_pid    = [v.worker_pid for v in result.variants],
-        build_seconds = [v.build_seconds for v in result.variants],
-        apply_seconds = [v.apply_seconds for v in result.variants],
-        solve_seconds = [v.solve_seconds for v in result.variants],
-        error         = [v.error === nothing ? "" : v.error for v in result.variants])
-end
-
-function _combined_dataframe(result::ScenarioResult)
-    samples_df = _samples_dataframe(result)
-    results_df = _results_dataframe(result)
-    return innerjoin(samples_df, results_df, on = :variant_id)
-end
-
-function _dataframe_to_samples(spec::ScenarioSpec, df::DataFrame)
-    n = nrow(df); k = length(spec.targets)
-    samples = Matrix{Float64}(undef, n, k)
-    for j in 1:k
-        col = Symbol(spec.targets[j].label)
-        hasproperty(df, col) || throw(ArgumentError("samples.csv missing column $col"))
-        samples[:, j] = Float64.(df[!, col])
-    end
-    return samples
-end
-
-function _dataframe_to_variants(spec::ScenarioSpec, df::DataFrame, samples::Matrix{Float64})
-    variants = VariantResult[]
-    for r in eachrow(df)
-        # Re-attach the leaf values for this variant from the sample matrix
-        # (samples.csv is the source of truth for what was perturbed).
-        leaf_vals = samples[Int(r.variant_id), :]
-        err_raw = r.error
-        err = (err_raw === missing || (err_raw isa AbstractString && isempty(err_raw))) ?
-              nothing : String(err_raw)
-        push!(variants, VariantResult(
-            variant_id    = Int(r.variant_id),
-            leaf_values   = leaf_vals,
-            objective     = Float64(r.objective),
-            term_status   = String(r.term_status),
-            primal_status = String(r.primal_status),
-            worker_pid    = Int(r.worker_pid),
-            build_seconds = Float64(r.build_seconds),
-            apply_seconds = Float64(r.apply_seconds),
-            solve_seconds = Float64(r.solve_seconds),
-            error         = err))
-    end
-    return variants
-end
 
 # -----------------------------------------------------------------------------
 # Index serialisation helpers (used by DuckDB)

@@ -12,8 +12,8 @@ using HiGHS
 #   * `_campaign_optimizer` solver factory
 #
 # The orchestration layer (`run_campaign` serial + Distributed paths) is
-# exercised end-to-end by `scripts/scenario_run_campaign.jl`, which runs
-# against a real workbook with a real `build_ts_lp!` call. Unit-testing
+# exercised end-to-end by local manual diagnostics against a real workbook
+# with a real `build_ts_lp!` call. Unit-testing
 # `run_campaign` itself would require monkey-patching `_build_campaign_model`
 # which is fragile (the function reference is the same singleton — restoring
 # the original easily produces infinite recursion).

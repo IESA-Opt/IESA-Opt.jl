@@ -102,7 +102,7 @@
 
   function currentWorkbook(id) {
     const select = $(id);
-    return select && select.value ? select.value : ((state.options.defaults && state.options.defaults.inputWorkbook) || "data/default_data.xlsx");
+    return select && select.value ? select.value : ((state.options.defaults && state.options.defaults.inputWorkbook) || "Input/default_data.xlsx");
   }
 
   async function loadModelOptions() {

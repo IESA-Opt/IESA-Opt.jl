@@ -58,7 +58,7 @@ julia --project=. test/runtests.jl
 Load the default workbook and print a data summary:
 
 ```powershell
-julia --project=. scripts/load_only.jl data/default_data.xlsx
+julia --project=. scripts/load_only.jl Input/default_data.xlsx
 ```
 
 ## 5. Run The Default Case
@@ -69,7 +69,7 @@ Start the default representative-day time-slice solve:
 julia --project=. scripts/run_ts_timing.jl
 ```
 
-By default, the run script reads `data/default_data.xlsx`, solves the 2050 period with 30 representative days, and writes to an output folder under `Output/` named from the scenario, representative-day count, and thread count.
+By default, the run script reads `Input/default_data.xlsx`, solves the 2050 period with 30 representative days, and writes to an output folder under `Output/` named from the scenario, representative-day count, and thread count.
 
 ## 6. Keep Repeated Run Settings In A Local Wrapper
 
@@ -79,7 +79,7 @@ Example:
 
 ```powershell
 # local/run-my-case.ps1
-$env:IESA_DATA_XLSX = "data\my_scenario.xlsx"
+$env:IESA_DATA_XLSX = "Input\my_scenario.xlsx"
 $env:IESA_REPDAYS = "40"
 $env:IESA_THREADS = "8"
 $env:IESA_OUT_DIR = "Output\my_scenario_rd40"
