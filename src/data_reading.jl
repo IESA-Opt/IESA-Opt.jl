@@ -76,6 +76,14 @@ function read_data(xlsx_path::AbstractString;
     compute_derived_params!(md)
 
     @info "read_data: complete" technologies=length(s.technologies) activities=length(s.activities_original) periods=length(s.periods)
+
+    try
+        tables_db_path = _duckdb_input_cache_path(xlsx_path, joinpath(dirname(abspath(xlsx_path)), ".iesa_cache"))
+        write_input_tables_duckdb!(md, tables_db_path)
+    catch err
+        @warn "read_data: failed to write input tables to DuckDB" err = err
+    end
+
     return md
 end
 
@@ -85,72 +93,93 @@ end
 
 function _read_iesa_opt_database!(s::ModelSets, p::ModelParams, xf)
     sh = xf["IESA-Opt database"]
+    # Document-title cell, not part of any tabular header — no named-column
+    # lookup applies here.
     p.scenario_description = _str(sh["E21"])
     return nothing
 end
 
 function _read_parameters_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["Parameters"]
-    p.XC_TransmissionLoss_global = _float(sh["B5"])
-    p.baseload_treshold          = _float(sh["B6"])
-    p.shedding_inLoad            = _float(sh["B7"])
-    p.social_discount_rate       = _float(sh["B12"])
-    p.base_year                  = _int(sh["B13"])
-    p.ActiveConstraintSet        = _str(sh["B46"])
+    C = ColumnNames.Parameters
+    # One named scalar per row (column A = Name, column B = Value) — the
+    # transposed counterpart of the column-header lookup used elsewhere.
+    row(name) = _row_by_name(sh, 1, name; r_start = 4, r_end = 60)
+    p.XC_TransmissionLoss_global = _float(sh[row(C.xc_transmission_loss), 2])
+    p.baseload_treshold          = _float(sh[row(C.baseload_threshold), 2])
+    p.shedding_inLoad            = _float(sh[row(C.shedding_in_load), 2])
+    p.social_discount_rate       = _float(sh[row(C.social_discount_rate), 2])
+    p.base_year                  = _int(sh[row(C.base_year), 2])
+    p.ActiveConstraintSet        = _str(sh[row(C.active_constraint_set), 2])
     return nothing
 end
 
 function _read_types_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["Types"]
     last_row = _last_row(sh, "A")
-    s.dispatch_type    = _read_column_symbols(sh, "A", 4, last_row)
-    s.activity_type    = _read_column_symbols(sh, "B", 4, last_row)
-    s.process_type     = _read_column_symbols(sh, "C", 4, last_row)
-    s.flexibility_type = _read_column_symbols(sh, "D", 4, last_row)
-    s.range_type       = _read_column_symbols(sh, "E", 4, last_row)
-    s.sectors          = _read_column_symbols(sh, "F", 4, last_row)
-    s.nodes            = _read_column_symbols(sh, "H", 4, last_row)
-    s.node_names       = _read_column_symbols(sh, "I", 4, last_row)
-    s.energy_labels    = _read_column_symbols(sh, "K", 4, last_row)
-    s.sectors_kev      = _read_column_symbols(sh, "N", 4, last_row)
+    hdr = _header_row_texts(sh, 2, _col_index(_last_col(sh)))
+    C = ColumnNames.Types
 
-    _read_list_to_sym!(p.IEM_sector,   sh, "F", "G", 4, last_row)
-    _read_list_to_sym!(p.namePer_node, sh, "H", "I", 4, last_row)
-    _read_list_to_sym!(p.IEM_node,     sh, "H", "J", 4, last_row)
-    _read_list_to_float!(p.is_renewable, sh, "K", "L", 4, last_row)
+    s.dispatch_type    = _read_column_symbols(sh, _hcol(hdr, C.dispatch_type), 4, last_row)
+    s.activity_type    = _read_column_symbols(sh, _hcol(hdr, C.activity_type), 4, last_row)
+    s.process_type     = _read_column_symbols(sh, _hcol(hdr, C.process_type), 4, last_row)
+    s.flexibility_type = _read_column_symbols(sh, _hcol(hdr, C.flexibility_type), 4, last_row)
+    s.range_type       = _read_column_symbols(sh, _hcol(hdr, C.range_type), 4, last_row)
+    s.sectors          = _read_column_symbols(sh, _hcol(hdr, C.sectors), 4, last_row)
+    s.nodes            = _read_column_symbols(sh, _hcol(hdr, C.nodes), 4, last_row)
+    s.node_names       = _read_column_symbols(sh, _hcol(hdr, C.node_name), 4, last_row)
+    s.energy_labels    = _read_column_symbols(sh, _hcol(hdr, C.energy_labels), 4, last_row)
+    s.sectors_kev      = _read_column_symbols(sh, _hcol(hdr, C.sectors_kev), 4, last_row)
+
+    col_sectors = _hcol(hdr, C.sectors)
+    col_nodes   = _hcol(hdr, C.nodes)
+    col_labels  = _hcol(hdr, C.energy_labels)
+    _read_list_to_sym!(p.IEM_sector,   sh, col_sectors, _hcol(hdr, C.iem_sector), 4, last_row)
+    _read_list_to_sym!(p.namePer_node, sh, col_nodes,   _hcol(hdr, C.node_name), 4, last_row)
+    _read_list_to_sym!(p.IEM_node,     sh, col_nodes,   _hcol(hdr, C.iem_node), 4, last_row)
+    _read_list_to_float!(p.is_renewable, sh, col_labels, _hcol(hdr, C.is_renewable), 4, last_row)
     return nothing
 end
 
 function _read_node_parameters_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["NodeParameters"]
     last_row = _last_row(sh, "A")
-    nodes_col       = _read_column_symbols(sh, "A", 5, last_row)
-    # NodeParameters layout (header row 3):
-    #   B..H  (7 cols, 2022-2050)  Emission target air  [MtonCO2eq/yr]
-    #   I                          Cumulative emission 2022-2050 [Mton]
-    #   J                          Cumulative CO2 storage [Mton]
-    #   K..P                       Sector emission targets in 2030 (not used here)
-    #   Q                          Data source label
-    #   R..X  (7 cols, 2022-2050)  Emission target incl Scope3+FuelEx
-    #   Y..AE  (7 cols, 2022-2050)  Emission target Bunker
-    #   AF..AL (7 cols, 2022-2050)  Emission target FeedStock
-    period_hdr_B    = _read_row_ints(sh, 3, "B", "H")          # B..H = 7 periods
-    _read_table_sym_int_to_float!(p.emissionTargetAir, sh, nodes_col, period_hdr_B, "B", 5, last_row;
+    last_col_idx = _col_index(_last_col(sh))
+    hdr_group = _header_row_texts(sh, 2, last_col_idx)  # emission-target block anchors
+    hdr_row4  = _header_row_texts(sh, 4, last_col_idx)  # "Node" field label
+    C = ColumnNames.NodeParameters
+
+    # Each emission-target block is 7 columns (2022-2050) with no distinct
+    # row-3 field name of its own — only the row-2 group label identifies it.
+    block(name) = begin
+        start_idx = _col_by_header(hdr_group, name)
+        (_col_letter(start_idx), _col_letter(start_idx + 6))
+    end
+
+    col_node = _hcol(hdr_row4, C.node)
+    nodes_col = _read_column_symbols(sh, col_node, 5, last_row)
+
+    col_air, col_air_end = block(C.emission_target_air)
+    period_hdr_B = _read_row_ints(sh, 3, col_air, col_air_end)
+    _read_table_sym_int_to_float!(p.emissionTargetAir, sh, nodes_col, period_hdr_B, col_air, 5, last_row;
                                   keep_zeros=true)
 
-    _read_column_to_float_dict_sym!(p.CO2_cumulative_budget,  sh, "A", "I", 5, last_row)
-    _read_column_to_float_dict_sym!(p.cumulative_CO2storage,  sh, "A", "J", 5, last_row)
+    _read_column_to_float_dict_sym!(p.CO2_cumulative_budget,  sh, col_node, _hcol(hdr_group, C.cumulative_emission_budget), 5, last_row)
+    _read_column_to_float_dict_sym!(p.cumulative_CO2storage,  sh, col_node, _hcol(hdr_group, C.cumulative_co2_storage), 5, last_row)
 
-    period_hdr_R = _read_row_ints(sh, 3, "R", "X")
-    _read_table_sym_int_to_float!(p.emissionTargetAll, sh, nodes_col, period_hdr_R, "R", 5, last_row;
+    col_all, col_all_end = block(C.emission_target_all)
+    period_hdr_R = _read_row_ints(sh, 3, col_all, col_all_end)
+    _read_table_sym_int_to_float!(p.emissionTargetAll, sh, nodes_col, period_hdr_R, col_all, 5, last_row;
                                   keep_zeros=true)
 
-    period_hdr_Y = _read_row_ints(sh, 3, "Y", "AE")
-    _read_table_sym_int_to_float!(p.emissionTargetBunker, sh, nodes_col, period_hdr_Y, "Y", 5, last_row;
+    col_bunker, col_bunker_end = block(C.emission_target_bunker)
+    period_hdr_Y = _read_row_ints(sh, 3, col_bunker, col_bunker_end)
+    _read_table_sym_int_to_float!(p.emissionTargetBunker, sh, nodes_col, period_hdr_Y, col_bunker, 5, last_row;
                                   keep_zeros=true)
 
-    period_hdr_AF = _read_row_ints(sh, 3, "AF", "AL")
-    _read_table_sym_int_to_float!(p.emissionTargetFS, sh, nodes_col, period_hdr_AF, "AF", 5, last_row;
+    col_fs, col_fs_end = block(C.emission_target_feedstock)
+    period_hdr_AF = _read_row_ints(sh, 3, col_fs, col_fs_end)
+    _read_table_sym_int_to_float!(p.emissionTargetFS, sh, nodes_col, period_hdr_AF, col_fs, 5, last_row;
                                   keep_zeros=true)
     return nothing
 end
@@ -158,19 +187,30 @@ end
 function _read_activities_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["Activities"]
     last_row = _last_row(sh, "A")
-    s.activities_original = _read_column_symbols(sh, "A", 9, last_row)
+    # The sheet's real per-column header spans two rows here (7=group, 8=field);
+    # rows 1-6 hold a separate "external drivers" mini-table with far fewer
+    # columns, so the header width must be measured at row 8, not via `_last_col`.
+    last_col_idx = _col_index(_last_col_at_row(sh, 8))
+    hdr_group = _header_row_texts(sh, 7, last_col_idx)
+    hdr_field = _header_row_texts(sh, 8, last_col_idx)
+    C = ColumnNames.Activities
 
-    _read_list_to_sym!(p.act_units,           sh, "A", "B", 9, last_row)
-    _read_list_to_float!(p.actChange_maxOrig, sh, "A", "J", 9, last_row)
-    _read_list_to_sym!(p.dispatchType_act,    sh, "A", "K", 9, last_row)
-    _read_list_to_sym!(p.activityType_act,    sh, "A", "L", 9, last_row)
-    _read_list_to_sym!(p.nodePer_act,         sh, "A", "M", 9, last_row)
-    _read_list_to_sym!(p.emissionTarget_bin,  sh, "A", "N", 9, last_row)
-    _read_list_to_sym!(p.labelPer_act,        sh, "A", "O", 9, last_row)
+    col_name = _hcol(hdr_field, C.name)
+    s.activities_original = _read_column_symbols(sh, col_name, 9, last_row)
 
-    period_hdr_C = _read_row_ints(sh, 8, "C", "I")
+    _read_list_to_sym!(p.act_units,           sh, col_name, _hcol(hdr_field, C.unit), 9, last_row)
+    _read_list_to_float!(p.actChange_maxOrig, sh, col_name, _hcol(hdr_group, C.change_max), 9, last_row)
+    _read_list_to_sym!(p.dispatchType_act,    sh, col_name, _hcol(hdr_group, C.dispatch_resolution), 9, last_row)
+    _read_list_to_sym!(p.activityType_act,    sh, col_name, _hcol(hdr_group, C.activity_type), 9, last_row)
+    _read_list_to_sym!(p.nodePer_act,         sh, col_name, _hcol(hdr_group, C.node), 9, last_row)
+    _read_list_to_sym!(p.emissionTarget_bin,  sh, col_name, _hcol(hdr_group, C.emission_target_bin), 9, last_row)
+    _read_list_to_sym!(p.labelPer_act,        sh, col_name, _hcol(hdr_group, C.energy_label), 9, last_row)
+
+    col_vol_start = _col_by_header(hdr_group, C.volumes_group)
+    col_vol_letter = _col_letter(col_vol_start)
+    period_hdr_C = _read_row_ints(sh, 8, col_vol_letter, _col_letter(col_vol_start + 6))
     _read_table_sym_int_to_float!(p.activities_netVolumesOrig, sh,
-        s.activities_original, period_hdr_C, "C", 9, last_row)
+        s.activities_original, period_hdr_C, col_vol_letter, 9, last_row)
     return nothing
 end
 
@@ -178,101 +218,125 @@ function _read_hourly_profiles_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["HourlyProfiles"]
     last_row = _last_row(sh, "A")
     last_col = _last_col(sh)
-    s.hours_orig = _read_column_ints(sh, "A", 5, last_row)
-    s.profile_typeRead = _read_row_symbols(sh, 3, "D", last_col)
+    hdr = _header_row_texts(sh, 3, _col_index(last_col))
+    C = ColumnNames.HourlyProfiles
 
-    _read_column_to_int_dict_int!(p.monthPer_hourOrig, sh, "A", "C", 5, last_row)
+    col_hour  = _hcol(hdr, C.hour)
+    col_month = _hcol(hdr, C.month)
+    col_profiles_start = _col_letter(_col_by_header(hdr, C.month) + 1)
+
+    s.hours_orig = _read_column_ints(sh, col_hour, 5, last_row)
+    s.profile_typeRead = _read_row_symbols(sh, 3, col_profiles_start, last_col)
+
+    _read_column_to_int_dict_int!(p.monthPer_hourOrig, sh, col_hour, col_month, 5, last_row)
     _read_table_int_sym_to_float!(p.hourly_profilesReadOrig, sh,
-        s.hours_orig, s.profile_typeRead, "D", 5, last_row)
+        s.hours_orig, s.profile_typeRead, col_profiles_start, 5, last_row)
     return nothing
 end
 
 function _read_technologies_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["Technologies"]
     last_row = _last_row(sh, "A")
-    s.tech_balancers = _read_column_symbols(sh, "A", 7, last_row)
+    last_col_idx = _col_index(_last_col(sh))
+    hdr_group = _header_row_texts(sh, 2, last_col_idx)
+    hdr_field = _header_row_texts(sh, 3, last_col_idx)
+    hdr = _flatten_header(hdr_group, hdr_field)  # "group / field", disambiguates repeated field names
+    C = ColumnNames.Technologies
 
-    _read_list_to_sym!(p.tech_sector_kev,      sh, "A", "B", 7, last_row)
-    _read_list_to_sym!(p.tech_category,        sh, "A", "C", 7, last_row)
-    _read_list_to_sym!(p.tech_sector,          sh, "A", "D", 7, last_row)
-    _read_list_to_sym!(p.tech_subsector,       sh, "A", "E", 7, last_row)
-    _read_list_to_sym!(p.activityPer_techOrig, sh, "A", "F", 7, last_row)
-    _read_list_to_str!(p.tech_name,            sh, "A", "G", 7, last_row)
-    _read_list_to_sym!(p.tech_units,           sh, "A", "H", 7, last_row)
+    col_id = _hcol(hdr, C.tech_id)
+    s.tech_balancers = _read_column_symbols(sh, col_id, 7, last_row)
 
-    period_hdr_I = _read_row_ints(sh, 4, "I", "O")
-    _read_table_sym_int_to_float!(p.inv_cost, sh, s.tech_balancers, period_hdr_I, "I", 7, last_row)
+    _read_list_to_sym!(p.tech_sector_kev,      sh, col_id, _hcol(hdr, C.sector_kev), 7, last_row)
+    _read_list_to_sym!(p.tech_category,        sh, col_id, _hcol(hdr, C.category), 7, last_row)
+    _read_list_to_sym!(p.tech_sector,          sh, col_id, _hcol(hdr, C.sector), 7, last_row)
+    _read_list_to_sym!(p.tech_subsector,       sh, col_id, _hcol(hdr, C.subsector), 7, last_row)
+    _read_list_to_sym!(p.activityPer_techOrig, sh, col_id, _hcol(hdr, C.main_activity), 7, last_row)
+    _read_list_to_str!(p.tech_name,            sh, col_id, _hcol(hdr, C.name), 7, last_row)
+    _read_list_to_sym!(p.tech_units,           sh, col_id, _hcol(hdr, C.unit), 7, last_row)
 
-    _read_list_to_float!(p.Salvage_value, sh, "A", "P", 7, last_row)
+    col_inv = _col_by_header(hdr, C.investment)
+    period_hdr_I = _read_row_ints(sh, 4, _col_letter(col_inv), _col_letter(col_inv + 6))
+    _read_table_sym_int_to_float!(p.inv_cost, sh, s.tech_balancers, period_hdr_I, _col_letter(col_inv), 7, last_row)
 
-    period_hdr_Q = _read_row_ints(sh, 4, "Q", "W")
-    _read_table_sym_int_to_float!(p.fom_cost, sh, s.tech_balancers, period_hdr_Q, "Q", 7, last_row)
+    _read_list_to_float!(p.Salvage_value, sh, col_id, _hcol(hdr, C.salvage_value), 7, last_row)
 
-    period_hdr_X = _read_row_ints(sh, 4, "X", "AD")
-    _read_table_sym_int_to_float!(p.vom_cost, sh, s.tech_balancers, period_hdr_X, "X", 7, last_row)
+    col_fom = _col_by_header(hdr, C.fixed_om)
+    period_hdr_Q = _read_row_ints(sh, 4, _col_letter(col_fom), _col_letter(col_fom + 6))
+    _read_table_sym_int_to_float!(p.fom_cost, sh, s.tech_balancers, period_hdr_Q, _col_letter(col_fom), 7, last_row)
 
-    _read_list_to_float!(p.WACC,                sh, "A", "AE", 7, last_row)
-    _read_list_to_float!(p.construction_time,   sh, "A", "AF", 7, last_row)   # stored as Float; will round at use-site
-    _read_list_to_float!(p.economic_lifetime,   sh, "A", "AG", 7, last_row)
-    _read_list_to_float!(p.technical_lifetime,  sh, "A", "AH", 7, last_row)
-    _read_list_to_float!(p.cap2act,             sh, "A", "AI", 7, last_row)
-    _read_list_to_sym!(p.processType_tech,      sh, "A", "AJ", 7, last_row)
-    _read_list_to_sym!(p.profileType_techRead,  sh, "A", "AK", 7, last_row)
-    _read_list_to_float!(p.ramping,             sh, "A", "AL", 7, last_row)
+    col_vom = _col_by_header(hdr, C.variable_om)
+    period_hdr_X = _read_row_ints(sh, 4, _col_letter(col_vom), _col_letter(col_vom + 6))
+    _read_table_sym_int_to_float!(p.vom_cost, sh, s.tech_balancers, period_hdr_X, _col_letter(col_vom), 7, last_row)
 
-    _read_list_to_sym!(p.CHP_prodOrig,          sh, "A", "AM", 7, last_row)
-    _read_list_to_sym!(p.CHP_fuelOrig,          sh, "A", "AN", 7, last_row)
-    _read_list_to_float!(p.CHP_eta,             sh, "A", "AO", 7, last_row)
-    _read_list_to_sym!(p.CHP_range,             sh, "A", "AP", 7, last_row)
-    _read_list_to_float!(p.CHP_dev_use,         sh, "A", "AQ", 7, last_row)
-    _read_list_to_float!(p.CHP_dev_PtoH,        sh, "A", "AR", 7, last_row)
+    _read_list_to_float!(p.WACC,                sh, col_id, _hcol(hdr, C.wacc), 7, last_row)
+    _read_list_to_float!(p.construction_time,   sh, col_id, _hcol(hdr, C.construction_time), 7, last_row)   # stored as Float; will round at use-site
+    _read_list_to_float!(p.economic_lifetime,   sh, col_id, _hcol(hdr, C.economic_lifetime), 7, last_row)
+    _read_list_to_float!(p.technical_lifetime,  sh, col_id, _hcol(hdr, C.technical_lifetime), 7, last_row)
+    _read_list_to_float!(p.cap2act,             sh, col_id, _hcol(hdr, C.cap2act), 7, last_row)
+    _read_list_to_sym!(p.processType_tech,      sh, col_id, _hcol(hdr, C.process_type), 7, last_row)
+    _read_list_to_sym!(p.profileType_techRead,  sh, col_id, _hcol(hdr, C.profile_type), 7, last_row)
+    _read_list_to_float!(p.ramping,             sh, col_id, _hcol(hdr, C.ramping), 7, last_row)
 
-    _read_list_to_float!(p.shed_capacity_percentage, sh, "A", "AS", 7, last_row)
-    _read_list_to_float!(p.shed_volume,         sh, "A", "AT", 7, last_row)
-    _read_list_to_sym!(p.shed_range,            sh, "A", "AU", 7, last_row)
+    _read_list_to_sym!(p.CHP_prodOrig,          sh, col_id, _hcol(hdr, C.chp_prod), 7, last_row)
+    _read_list_to_sym!(p.CHP_fuelOrig,          sh, col_id, _hcol(hdr, C.chp_fuel), 7, last_row)
+    _read_list_to_float!(p.CHP_eta,             sh, col_id, _hcol(hdr, C.chp_eta), 7, last_row)
+    _read_list_to_sym!(p.CHP_range,             sh, col_id, _hcol(hdr, C.chp_range), 7, last_row)
+    _read_list_to_float!(p.CHP_dev_use,         sh, col_id, _hcol(hdr, C.chp_dev_use), 7, last_row)
+    _read_list_to_float!(p.CHP_dev_PtoH,        sh, col_id, _hcol(hdr, C.chp_dev_ptoh), 7, last_row)
 
-    _read_list_to_float!(p.phs_capacity,        sh, "A", "AV", 7, last_row)
-    _read_list_to_float!(p.reservoir_capacity,  sh, "A", "AW", 7, last_row)
-    _read_list_to_float!(p.phs_Losses,          sh, "A", "AX", 7, last_row)
+    _read_list_to_float!(p.shed_capacity_percentage, sh, col_id, _hcol(hdr, C.shed_capacity), 7, last_row)
+    _read_list_to_float!(p.shed_volume,         sh, col_id, _hcol(hdr, C.shed_volume), 7, last_row)
+    _read_list_to_sym!(p.shed_range,            sh, col_id, _hcol(hdr, C.shed_range), 7, last_row)
 
-    _read_list_to_sym!(p.flexibilityType_tech,  sh, "A", "AY", 7, last_row)
-    _read_list_to_sym!(p.flex_activityOrig,     sh, "A", "AZ", 7, last_row)
-    _read_list_to_float!(p.flex_capacity_pct,   sh, "A", "BA", 7, last_row)
-    _read_list_to_float!(p.flex_storage,        sh, "A", "BB", 7, last_row)
-    _read_list_to_sym!(p.flex_range,            sh, "A", "BC", 7, last_row)
-    _read_list_to_float!(p.flex_losses_legacy,  sh, "A", "BD", 7, last_row)   # legacy combined; split later
-    _read_list_to_float!(p.flex_nnLoad,         sh, "A", "BE", 7, last_row)
-    _read_list_to_float!(p.avg_journey,         sh, "A", "BF", 7, last_row)
-    _read_list_to_float!(p.avg_speed,           sh, "A", "BG", 7, last_row)
+    _read_list_to_float!(p.phs_capacity,        sh, col_id, _hcol(hdr, C.pumphead_ratio), 7, last_row)
+    _read_list_to_float!(p.reservoir_capacity,  sh, col_id, _hcol(hdr, C.reservoir_capacity), 7, last_row)
+    _read_list_to_float!(p.phs_Losses,          sh, col_id, _hcol(hdr, C.phs_losses), 7, last_row)
 
-    _read_list_to_sym!(p.buffer_activityOrig,   sh, "A", "BH", 7, last_row)
-    _read_list_to_float!(p.bufferUP_capacity,   sh, "A", "BI", 7, last_row)
-    _read_list_to_float!(p.bufferDW_capacity,   sh, "A", "BJ", 7, last_row)
-    _read_list_to_float!(p.buffer_storage,      sh, "A", "BL", 7, last_row)
+    _read_list_to_sym!(p.flexibilityType_tech,  sh, col_id, _hcol(hdr, C.flexibility_form), 7, last_row)
+    _read_list_to_sym!(p.flex_activityOrig,     sh, col_id, _hcol(hdr, C.flex_activity), 7, last_row)
+    _read_list_to_float!(p.flex_capacity_pct,   sh, col_id, _hcol(hdr, C.flex_capacity), 7, last_row)
+    _read_list_to_float!(p.flex_storage,        sh, col_id, _hcol(hdr, C.flex_storage), 7, last_row)
+    _read_list_to_sym!(p.flex_range,            sh, col_id, _hcol(hdr, C.flex_range), 7, last_row)
+    _read_list_to_float!(p.flex_losses_legacy,  sh, col_id, _hcol(hdr, C.flex_losses), 7, last_row)   # legacy combined; split later
+    _read_list_to_float!(p.flex_nnLoad,         sh, col_id, _hcol(hdr, C.flex_nnload), 7, last_row)
+    _read_list_to_float!(p.avg_journey,         sh, col_id, _hcol(hdr, C.avg_journey), 7, last_row)
+    _read_list_to_float!(p.avg_speed,           sh, col_id, _hcol(hdr, C.avg_speed), 7, last_row)
 
-    _read_list_to_float!(p.techChange_max,      sh, "A", "BM", 7, last_row)
-    _read_list_to_float!(p.techStock_exist,     sh, "A", "BN", 7, last_row)
+    _read_list_to_sym!(p.buffer_activityOrig,   sh, col_id, _hcol(hdr, C.buffer_activity), 7, last_row)
+    _read_list_to_float!(p.bufferUP_capacity,   sh, col_id, _hcol(hdr, C.buffer_up), 7, last_row)
+    _read_list_to_float!(p.bufferDW_capacity,   sh, col_id, _hcol(hdr, C.buffer_down), 7, last_row)
+    _read_list_to_float!(p.buffer_storage,      sh, col_id, _hcol(hdr, C.buffer_storage), 7, last_row)
 
-    period_hdr_BO = _read_row_ints(sh, 5, "BO", "BT")
-    _read_table_sym_int_to_float!(p.decom_planned, sh, s.tech_balancers, period_hdr_BO, "BO", 7, last_row)
+    _read_list_to_float!(p.techChange_max,      sh, col_id, _hcol(hdr, C.change_max), 7, last_row)
+    _read_list_to_float!(p.techStock_exist,     sh, col_id, _hcol(hdr, C.stock_exist), 7, last_row)
 
-    period_hdr_BU = _read_row_ints(sh, 5, "BU", "CA")
-    _read_table_sym_int_to_float!(p.techStock_min, sh, s.tech_balancers, period_hdr_BU, "BU", 7, last_row)
+    col_decom = _col_by_header(hdr_group, C.decom_planned_group)
+    period_hdr_BO = _read_row_ints(sh, 5, _col_letter(col_decom), _col_letter(col_decom + 5))
+    _read_table_sym_int_to_float!(p.decom_planned, sh, s.tech_balancers, period_hdr_BO, _col_letter(col_decom), 7, last_row)
 
-    period_hdr_CB = _read_row_ints(sh, 5, "CB", "CH")
-    _read_table_sym_int_to_float!(p.techStock_max, sh, s.tech_balancers, period_hdr_CB, "CB", 7, last_row; keep_zeros=true)
+    col_stmin = _col_by_header(hdr_group, C.stock_min_group)
+    period_hdr_BU = _read_row_ints(sh, 5, _col_letter(col_stmin), _col_letter(col_stmin + 6))
+    _read_table_sym_int_to_float!(p.techStock_min, sh, s.tech_balancers, period_hdr_BU, _col_letter(col_stmin), 7, last_row)
 
-    period_hdr_CI = _read_row_ints(sh, 5, "CI", "CO")
-    _read_table_sym_int_to_float!(p.techUse_min, sh, s.tech_balancers, period_hdr_CI, "CI", 7, last_row)
+    col_stmax = _col_by_header(hdr_group, C.stock_max_group)
+    period_hdr_CB = _read_row_ints(sh, 5, _col_letter(col_stmax), _col_letter(col_stmax + 6))
+    _read_table_sym_int_to_float!(p.techStock_max, sh, s.tech_balancers, period_hdr_CB, _col_letter(col_stmax), 7, last_row; keep_zeros=true)
 
-    period_hdr_CP = _read_row_ints(sh, 5, "CP", "CV")
-    _read_table_sym_int_to_float!(p.techUse_max, sh, s.tech_balancers, period_hdr_CP, "CP", 7, last_row; keep_zeros=true)
+    col_usemin = _col_by_header(hdr_group, C.use_min_group)
+    period_hdr_CI = _read_row_ints(sh, 5, _col_letter(col_usemin), _col_letter(col_usemin + 6))
+    _read_table_sym_int_to_float!(p.techUse_min, sh, s.tech_balancers, period_hdr_CI, _col_letter(col_usemin), 7, last_row)
 
-    period_hdr_CW = _read_row_ints(sh, 5, "CW", "DC")
-    _read_table_sym_int_to_bool!(p.no_new_invest, sh, s.tech_balancers, period_hdr_CW, "CW", 7, last_row)
+    col_usemax = _col_by_header(hdr_group, C.use_max_group)
+    period_hdr_CP = _read_row_ints(sh, 5, _col_letter(col_usemax), _col_letter(col_usemax + 6))
+    _read_table_sym_int_to_float!(p.techUse_max, sh, s.tech_balancers, period_hdr_CP, _col_letter(col_usemax), 7, last_row; keep_zeros=true)
 
-    period_hdr_DD = _read_row_ints(sh, 5, "DD", "DJ")
-    _read_table_sym_int_to_bool!(p.no_eco_decom, sh, s.tech_balancers, period_hdr_DD, "DD", 7, last_row)
+    col_noinv = _col_by_header(hdr_group, C.no_new_invest_group)
+    period_hdr_CW = _read_row_ints(sh, 5, _col_letter(col_noinv), _col_letter(col_noinv + 6))
+    _read_table_sym_int_to_bool!(p.no_new_invest, sh, s.tech_balancers, period_hdr_CW, _col_letter(col_noinv), 7, last_row)
+
+    col_nodecom = _col_by_header(hdr_group, C.no_eco_decom_group)
+    period_hdr_DD = _read_row_ints(sh, 5, _col_letter(col_nodecom), _col_letter(col_nodecom + 6))
+    _read_table_sym_int_to_bool!(p.no_eco_decom, sh, s.tech_balancers, period_hdr_DD, _col_letter(col_nodecom), 7, last_row)
     return nothing
 end
 
@@ -280,50 +344,70 @@ function _read_energy_balance_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["EnergyBalance"]
     last_row = _last_row(sh, "A")
     last_col = _last_col(sh)
-    tech_rows  = _read_column_symbols(sh, "A", 7, last_row)
-    act_hdrs   = _read_row_strings(sh, 3, "Q", last_col)
-    _read_table_3key_balances!(p.activity_balancesRef, sh, tech_rows, act_hdrs, "Q", 7, last_row)
+    last_col_idx = _col_index(last_col)
+    hdr = _header_row_texts(sh, 3, last_col_idx)
+    hdr_group = _header_row_texts(sh, 2, last_col_idx)
+    C = ColumnNames.EnergyBalance
+
+    tech_rows = _read_column_symbols(sh, _hcol(hdr, C.tech_id), 7, last_row)
+    # The per-activity balance columns start right after the single blank
+    # "Data source" spacer column (row 3 has no field name of its own there).
+    col_act_start = _col_letter(_col_by_header(hdr_group, C.data_source_col) + 1)
+    act_hdrs = _read_row_strings(sh, 3, col_act_start, last_col)
+    _read_table_3key_balances!(p.activity_balancesRef, sh, tech_rows, act_hdrs, col_act_start, 7, last_row)
     return nothing
 end
 
 function _read_infrastructure_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["Infrastructure"]
     last_row = _last_row(sh, "A")
-    s.tech_infra = _read_column_symbols(sh, "A", 6, last_row)
+    last_col_idx = _col_index(_last_col(sh))
+    hdr_group = _header_row_texts(sh, 2, last_col_idx)
+    hdr_field = _header_row_texts(sh, 3, last_col_idx)
+    hdr = _flatten_header(hdr_group, hdr_field)
+    C = ColumnNames.Infrastructure
+
+    col_id = _hcol(hdr, C.tech_id)
+    s.tech_infra = _read_column_symbols(sh, col_id, 6, last_row)
 
     # Merge infra rows into tech_* dicts (merge=true → don't overwrite existing)
-    _read_list_to_sym!(p.tech_sector_kev,  sh, "A", "B", 6, last_row; merge=true)
-    _read_list_to_sym!(p.tech_category,    sh, "A", "C", 6, last_row; merge=true)
-    _read_list_to_sym!(p.tech_sector,      sh, "A", "D", 6, last_row; merge=true)
-    _read_list_to_sym!(p.tech_subsector,   sh, "A", "E", 6, last_row; merge=true)
-    _read_list_to_str!(p.tech_name,        sh, "A", "F", 6, last_row; merge=true)
-    _read_list_to_sym!(p.tech_units,       sh, "A", "G", 6, last_row; merge=true)
+    _read_list_to_sym!(p.tech_sector_kev,  sh, col_id, _hcol(hdr, C.sector_kev), 6, last_row; merge=true)
+    _read_list_to_sym!(p.tech_category,    sh, col_id, _hcol(hdr, C.category), 6, last_row; merge=true)
+    _read_list_to_sym!(p.tech_sector,      sh, col_id, _hcol(hdr, C.sector), 6, last_row; merge=true)
+    _read_list_to_sym!(p.tech_subsector,   sh, col_id, _hcol(hdr, C.subsector), 6, last_row; merge=true)
+    _read_list_to_str!(p.tech_name,        sh, col_id, _hcol(hdr, C.name), 6, last_row; merge=true)
+    _read_list_to_sym!(p.tech_units,       sh, col_id, _hcol(hdr, C.unit), 6, last_row; merge=true)
 
-    period_hdr_H = _read_row_ints(sh, 4, "H", "N")
-    _read_table_sym_int_to_float!(p.inv_cost, sh, s.tech_infra, period_hdr_H, "H", 6, last_row; merge=true)
+    col_inv = _col_by_header(hdr, C.investment)
+    period_hdr_H = _read_row_ints(sh, 4, _col_letter(col_inv), _col_letter(col_inv + 6))
+    _read_table_sym_int_to_float!(p.inv_cost, sh, s.tech_infra, period_hdr_H, _col_letter(col_inv), 6, last_row; merge=true)
 
-    _read_list_to_float!(p.Salvage_value,    sh, "A", "O", 6, last_row; merge=true)
+    _read_list_to_float!(p.Salvage_value,    sh, col_id, _hcol(hdr, C.salvage_value), 6, last_row; merge=true)
 
-    period_hdr_P = _read_row_ints(sh, 4, "P", "V")
-    _read_table_sym_int_to_float!(p.fom_cost, sh, s.tech_infra, period_hdr_P, "P", 6, last_row; merge=true)
+    col_fom = _col_by_header(hdr, C.fixed_om)
+    period_hdr_P = _read_row_ints(sh, 4, _col_letter(col_fom), _col_letter(col_fom + 6))
+    _read_table_sym_int_to_float!(p.fom_cost, sh, s.tech_infra, period_hdr_P, _col_letter(col_fom), 6, last_row; merge=true)
 
-    _read_list_to_float!(p.WACC,               sh, "A", "W", 6, last_row; merge=true)
-    _read_list_to_float!(p.economic_lifetime,  sh, "A", "X", 6, last_row; merge=true)
-    _read_list_to_float!(p.technical_lifetime, sh, "A", "Y", 6, last_row; merge=true)
-    _read_list_to_float!(p.cap2act,            sh, "A", "Z", 6, last_row; merge=true)
-    _read_list_to_sym!(p.infra_range,          sh, "A", "AA", 6, last_row)
-    _read_list_to_sym!(p.infra_activityOrig,   sh, "A", "AB", 6, last_row)
-    _read_list_to_float!(p.techChange_max,     sh, "A", "AD", 6, last_row; merge=true)
-    _read_list_to_float!(p.techStock_exist,    sh, "A", "AE", 6, last_row; merge=true)
+    _read_list_to_float!(p.WACC,               sh, col_id, _hcol(hdr, C.wacc), 6, last_row; merge=true)
+    _read_list_to_float!(p.economic_lifetime,  sh, col_id, _hcol(hdr, C.economic_lifetime), 6, last_row; merge=true)
+    _read_list_to_float!(p.technical_lifetime, sh, col_id, _hcol(hdr, C.technical_lifetime), 6, last_row; merge=true)
+    _read_list_to_float!(p.cap2act,            sh, col_id, _hcol(hdr, C.cap2act), 6, last_row; merge=true)
+    _read_list_to_sym!(p.infra_range,          sh, col_id, _hcol(hdr, C.infra_range), 6, last_row)
+    _read_list_to_sym!(p.infra_activityOrig,   sh, col_id, _hcol(hdr, C.infra_activity), 6, last_row)
+    _read_list_to_float!(p.techChange_max,     sh, col_id, _hcol(hdr, C.change_max), 6, last_row; merge=true)
+    _read_list_to_float!(p.techStock_exist,    sh, col_id, _hcol(hdr_group, C.stock_exist), 6, last_row; merge=true)
 
-    period_hdr_AF = _read_row_ints(sh, 3, "AF", "AK")
-    _read_table_sym_int_to_float!(p.decom_planned, sh, s.tech_infra, period_hdr_AF, "AF", 6, last_row; merge=true)
+    col_decom = _col_by_header(hdr_group, C.decom_planned_group)
+    period_hdr_AF = _read_row_ints(sh, 3, _col_letter(col_decom), _col_letter(col_decom + 5))
+    _read_table_sym_int_to_float!(p.decom_planned, sh, s.tech_infra, period_hdr_AF, _col_letter(col_decom), 6, last_row; merge=true)
 
-    period_hdr_AL = _read_row_ints(sh, 3, "AL", "AR")
-    _read_table_sym_int_to_float!(p.techStock_min, sh, s.tech_infra, period_hdr_AL, "AL", 6, last_row; merge=true)
+    col_stmin = _col_by_header(hdr_group, C.stock_min_group)
+    period_hdr_AL = _read_row_ints(sh, 3, _col_letter(col_stmin), _col_letter(col_stmin + 6))
+    _read_table_sym_int_to_float!(p.techStock_min, sh, s.tech_infra, period_hdr_AL, _col_letter(col_stmin), 6, last_row; merge=true)
 
-    period_hdr_AS = _read_row_ints(sh, 3, "AS", "AY")
-    _read_table_sym_int_to_float!(p.techStock_max, sh, s.tech_infra, period_hdr_AS, "AS", 6, last_row; merge=true, keep_zeros=true)
+    col_stmax = _col_by_header(hdr_group, C.stock_max_group)
+    period_hdr_AS = _read_row_ints(sh, 3, _col_letter(col_stmax), _col_letter(col_stmax + 6))
+    _read_table_sym_int_to_float!(p.techStock_max, sh, s.tech_infra, period_hdr_AS, _col_letter(col_stmax), 6, last_row; merge=true, keep_zeros=true)
     return nothing
 end
 
@@ -331,48 +415,73 @@ function _read_price_profiles_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["PriceProfiles"]
     last_row = _last_row(sh, "A")
     last_col = _last_col(sh)
-    _read_price_profiles_table!(p.interconnectedHourly_pricesOrig, sh, s.hours_orig, 5, last_row, last_col)
+    hdr = _header_row_texts(sh, 3, _col_index(last_col))
+    col_start = _col_letter(_col_by_header(hdr, ColumnNames.PriceProfiles.month) + 1)
+    _read_price_profiles_table!(p.interconnectedHourly_pricesOrig, sh, s.hours_orig, col_start, 5, last_row, last_col)
     return nothing
 end
 
 function _read_act_grouping_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["ActGrouping"]
     last_row = _last_row(sh, "A")
-    s.activities_group = _read_column_symbols(sh, "A", 4, last_row)
+    hdr = _header_row_texts(sh, 2, _col_index(_last_col(sh)))
+    C = ColumnNames.ActGrouping
 
-    _read_list_to_sym!(p.dispatchType_act,    sh, "A", "B", 4, last_row; merge=true)
-    _read_list_to_sym!(p.activityType_act,    sh, "A", "C", 4, last_row; merge=true)
-    _read_list_to_sym!(p.nodePer_act,         sh, "A", "D", 4, last_row; merge=true)
-    _read_list_to_sym!(p.emissionTarget_bin,  sh, "A", "E", 4, last_row; merge=true)
-    _read_list_to_sym!(p.labelPer_act,        sh, "A", "F", 4, last_row; merge=true)
+    col_name = _hcol(hdr, C.name)
+    s.activities_group = _read_column_symbols(sh, col_name, 4, last_row)
 
-    _read_act_grouping_table!(p.act_to_group, sh, 4, last_row)
+    _read_list_to_sym!(p.dispatchType_act,    sh, col_name, _hcol(hdr, C.dispatch_type), 4, last_row; merge=true)
+    _read_list_to_sym!(p.activityType_act,    sh, col_name, _hcol(hdr, C.activity_type), 4, last_row; merge=true)
+    _read_list_to_sym!(p.nodePer_act,         sh, col_name, _hcol(hdr, C.node), 4, last_row; merge=true)
+    _read_list_to_sym!(p.emissionTarget_bin,  sh, col_name, _hcol(hdr, C.emission_target_bin), 4, last_row; merge=true)
+    _read_list_to_sym!(p.labelPer_act,        sh, col_name, _hcol(hdr, C.energy_label), 4, last_row; merge=true)
+
+    _read_act_grouping_table!(p.act_to_group, sh, _hcol(hdr, C.activity_original), _hcol(hdr, C.activity_group), 4, last_row)
     return nothing
 end
 
 function _read_eff_learning_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["EffLearning"]
     last_row = _last_row(sh, "C")
-    tech_act_pairs = _read_two_col_keys_sym(sh, "C", "D", 4, last_row)
-    period_hdr_E   = _read_row_ints(sh, 3, "E", "K")
-    _read_table_sym_pair_int_to_float!(p.activity_EffImprov, sh, tech_act_pairs, period_hdr_E, "E", 4, last_row)
+    last_col_idx = _col_index(_last_col(sh))
+    hdr_group = _header_row_texts(sh, 2, last_col_idx)
+    hdr_field = _header_row_texts(sh, 3, last_col_idx)
+    C = ColumnNames.EffLearning
+
+    tech_act_pairs = _read_two_col_keys_sym(sh, _hcol(hdr_field, C.tech_id), _hcol(hdr_group, C.activity), 4, last_row)
+
+    col_period = _col_by_header(hdr_group, C.period_group)
+    col_period_letter = _col_letter(col_period)
+    period_hdr_E = _read_row_ints(sh, 3, col_period_letter, _col_letter(col_period + 6))
+    _read_table_sym_pair_int_to_float!(p.activity_EffImprov, sh, tech_act_pairs, period_hdr_E, col_period_letter, 4, last_row)
     return nothing
 end
 
 function _read_feedstocks_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["Feedstocks"]
     last_row = _last_row(sh, "C")
-    _read_list_2sym_to_float!(p.feedstockUse_techOrig, sh, "C", "D", "H", 4, last_row)
+    last_col_idx = _col_index(_last_col(sh))
+    hdr_group = _header_row_texts(sh, 2, last_col_idx)
+    hdr_field = _header_row_texts(sh, 3, last_col_idx)
+    C = ColumnNames.Feedstocks
+
+    _read_list_2sym_to_float!(p.feedstockUse_techOrig, sh,
+        _hcol(hdr_field, C.tech_id), _hcol(hdr_group, C.activity), _hcol(hdr_group, C.use), 4, last_row)
     return nothing
 end
 
 function _read_retrofitting_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["Retrofitting"]
     last_row = _last_row(sh, "A")
-    _read_list_2sym_to_bool!(p.retrofit_relations, sh, "A", "B", "F", 4, last_row)
+    hdr = _header_row_texts(sh, 3, _col_index(_last_col(sh)))
+    C = ColumnNames.Retrofitting
+
+    col_from = _hcol(hdr, C.from_tech)
+    col_to   = _hcol(hdr, C.to_tech)
+    _read_list_2sym_to_bool!(p.retrofit_relations, sh, col_from, col_to, _hcol(hdr, C.enabled), 4, last_row)
     # Retrofit costs are stored by (from_tech, to_tech, period).
     # We broadcast across all configured periods.
-    _read_retrofit_cost!(p.retrofit_cost, sh, "A", "B", "G", 4, last_row, s.periods)
+    _read_retrofit_cost!(p.retrofit_cost, sh, col_from, col_to, _hcol(hdr, C.investment), 4, last_row, s.periods)
     return nothing
 end
 
@@ -430,6 +539,77 @@ function _col_letter(n::Int)::String
     return s
 end
 
+# ------------------------------------------------- header-name column lookup --
+# Columns are located by header text (see column_names.jl / `ColumnNames`),
+# not by hardcoded Excel letters — mirrors the reference IESA-Sim Python
+# loader's `Constants.Parameters` + `.get_loc(name)` pattern.
+
+"""
+    _header_row_texts(sh, row, last_col_idx) -> Vector{String}
+
+Read `row` across columns `1:last_col_idx` as plain strings (empty string for
+blank/missing cells).
+"""
+function _header_row_texts(sh, row::Int, last_col_idx::Int)::Vector{String}
+    return [_str(sh[row, c]) for c in 1:last_col_idx]
+end
+
+"""
+    _flatten_header(group_row, field_row) -> Vector{String}
+
+2-row (group/field) header flatten, matching the Python loader's
+`flatten_header`: `group_row` is forward-filled across its span (Excel merges
+only carry text in the first cell) and joined to `field_row` with " / ".
+Disambiguates field names reused under different groups (e.g. Technologies'
+"Benefited activity", used by both flexibility and buffer data).
+"""
+function _flatten_header(group_row::Vector{String}, field_row::Vector{String})::Vector{String}
+    out = Vector{String}(undef, length(field_row))
+    current_group = ""
+    for i in eachindex(field_row)
+        isempty(group_row[i]) || (current_group = group_row[i])
+        field = field_row[i]
+        out[i] = isempty(current_group) ? field : (isempty(field) ? current_group : current_group * " / " * field)
+    end
+    return out
+end
+
+"""
+    _col_by_header(header_texts, name) -> Int
+
+First column (1-based) whose header text equals `name`. Errors loudly if not
+found — a missing header means the workbook layout no longer matches what the
+reader expects, which should surface immediately rather than silently reading
+the wrong column.
+"""
+function _col_by_header(header_texts::Vector{String}, name::AbstractString)::Int
+    idx = findfirst(==(name), header_texts)
+    idx === nothing && error("Column header not found: $(repr(name))")
+    return idx
+end
+
+"""
+    _hcol(header_texts, name) -> String
+
+Like `_col_by_header`, but returns the Excel column letter — the form the
+existing block-reader helpers (`_read_list_to_sym!` etc.) accept.
+"""
+_hcol(header_texts::Vector{String}, name::AbstractString)::String = _col_letter(_col_by_header(header_texts, name))
+
+"""
+    _row_by_name(sh, name_col_idx, name; r_start, r_end) -> Int
+
+First row (within `r_start:r_end`) whose cell in column `name_col_idx` equals
+`name`. Used for sheets laid out as one named scalar per row (e.g.
+Parameters), the transposed counterpart of `_col_by_header`.
+"""
+function _row_by_name(sh, name_col_idx::Int, name::AbstractString; r_start::Int = 1, r_end::Int = 200)::Int
+    for r in r_start:r_end
+        _str(sh[r, name_col_idx]) == name && return r
+    end
+    error("Row not found for name: $(repr(name))")
+end
+
 function _last_row(sh, col::AbstractString)::Int
     ci = _col_index(col)
     # XLSX's stored dimension is the worksheet's recorded bounding box — use it
@@ -474,6 +654,32 @@ function _last_col(sh)::String
             end
         end
         if found
+            last = c
+            consec_empty = 0
+        else
+            consec_empty += 1
+            consec_empty > 50 && c > last + 50 && break
+        end
+    end
+    return _col_letter(last)
+end
+
+# Like `_last_col`, but scans a single specified row instead of assuming the
+# sheet's header sits within rows 1-5 — needed for Activities, whose real
+# per-column header is at row 7/8 (rows 1-6 hold a separate "external
+# drivers" mini-table with far fewer columns).
+function _last_col_at_row(sh, row::Int)::String
+    dim = try
+        XLSX.get_dimension(sh)
+    catch
+        nothing
+    end
+    max_col = dim === nothing ? 1000 : XLSX.column_number(dim.stop)
+    last = 1
+    consec_empty = 0
+    @inbounds for c in 1:max_col
+        v = sh[row, c]
+        if v !== nothing && !ismissing(v) && _str(v) != ""
             last = c
             consec_empty = 0
         else
@@ -817,9 +1023,9 @@ end
 and 3 (period int); row key is the orig hour.
 """
 function _read_price_profiles_table!(d::Dict{Tuple{Int,Symbol,Int},Float64}, sh,
-                                       hours_orig::Vector{Int},
+                                       hours_orig::Vector{Int}, col_start::AbstractString,
                                        r_start::Int, r_end::Int, last_col::AbstractString)
-    cs = _col_index("D")
+    cs = _col_index(col_start)
     ce = _col_index(last_col)
     n_h = min(length(hours_orig), r_end - r_start + 1)
     n_c = ce - cs + 1
@@ -887,10 +1093,10 @@ function _read_two_col_keys_sym(sh, col1::AbstractString, col2::AbstractString,
 end
 
 function _read_act_grouping_table!(act_to_group::Dict{Symbol,Symbol}, sh,
+                                     col_orig::AbstractString, col_group::AbstractString,
                                      r_start::Int, r_end::Int)
-    # Columns H = original activity, I = group activity (J is the binary flag)
-    ch = _col_index("H")
-    ci = _col_index("I")
+    ch = _col_index(col_orig)
+    ci = _col_index(col_group)
     for r in r_start:r_end
         orig = _str(sh[r, ch])
         grp  = _str(sh[r, ci])

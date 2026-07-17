@@ -147,6 +147,11 @@ function _write_duckdb_input_cache(cache_path::AbstractString, xlsx_path::Abstra
         DBInterface.close!(con)
         GC.gc()
     end
+    try
+        write_input_tables_duckdb!(md, cache_path)
+    catch err
+        @warn "read_data_cached: failed to write input tables to DuckDB" err = err
+    end
     return cache_path
 end
 

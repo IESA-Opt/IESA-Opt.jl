@@ -1,11 +1,11 @@
 """
     IESAOpt
 
-IESA-Opt.jl — the Julia/JuMP implementation of the IESA-Opt integrated
-energy-system optimization model.
+    IESA-Opt.jl — the Julia/JuMP implementation of the IESA-Opt integrated
+    energy-system optimization model.
 
-The package exposes data loading, clustering, JuMP model construction, solver
-configuration, and result-writing helpers for IESA-Opt.jl.
+    The package exposes data loading, clustering, JuMP model construction, solver
+    configuration, and result-writing helpers for IESA-Opt.jl.
 """
 module IESAOpt
 
@@ -40,8 +40,10 @@ include("types.jl")
 
 # ---------------------------------------------------------------------------
 # Phase 1: data layer
+include("column_names.jl")
 include("data_reading.jl")
 include("data_cache.jl")
+include("input_tables.jl")
 include("sets.jl")
 include("parameters.jl")
 include("data_writing.jl")
@@ -116,6 +118,7 @@ include("ui_server.jl")
 export ModelSets, ModelParams, ModelData, RunResult
 export read_data, derive_sets!, compute_derived_params!
 export read_data_cached, clear_data_cache
+export write_input_tables_duckdb!
 export compute_temporal_helpers!, compute_period_indicators!
 export compute_financial_params!, compute_investment_matrices!
 export compute_activity_balances!, compute_chp_eps!, compute_activity_indicators!
