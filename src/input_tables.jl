@@ -122,14 +122,15 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
         _write_input_table!(con, _retrofittings_df(p, valid_tech_ids, mismatches), "retrofittings", written, skipped, mismatches;
             pk = [:from_tech, :to_tech, :period], fks = [(:from_tech, "technologies", "id"), (:to_tech, "technologies", "id")])
         _write_input_table!(con, _tuple_dict_to_named_df(p.feedstockUse_techOrig, [:tech_id, :activity_name]; value_name = :fraction), "feedstock_use", written, skipped, mismatches;
-            fks = [(:tech_id, "technologies", "id"), (:activity_name, "activities", "Name")])
+            pk = [:tech_id, :activity_name], fks = [(:tech_id, "technologies", "id"), (:activity_name, "activities", "Name")])
         _write_input_table!(con, _tuple_dict_to_named_df(p.activity_EffImprov, [:tech_id, :activity_name, :period]), "activity_efficiency_improvement", written, skipped, mismatches;
-            fks = [(:tech_id, "technologies", "id"), (:activity_name, "activities", "Name"), (:period, "periods", "period")])
-        _write_input_table!(con, _dict_to_input_df(p.act_to_group), "activity_grouping", written, skipped, mismatches)
+            pk = [:tech_id, :activity_name, :period], fks = [(:tech_id, "technologies", "id"), (:activity_name, "activities", "Name"), (:period, "periods", "period")])
+        _write_input_table!(con, _tuple_dict_to_named_df(p.act_to_group, [:activity_original]; value_name = :activity_group), "activity_grouping", written, skipped, mismatches;
+            pk = [:activity_original], fks = [(:activity_original, "activities", "Name")])
 
         # ------------------------------------------------------------- nodes --
         _write_input_table!(con, _node_emission_targets_df(s, p), "node_emission_targets", written, skipped, mismatches;
-            fks = [(:node, "nodes", "node"), (:period, "periods", "period")])
+            pk = [:node, :period], fks = [(:node, "nodes", "node"), (:period, "periods", "period")])
         _write_input_table!(con, _node_co2_budget_df(s, p), "node_co2_budget", written, skipped, mismatches;
             pk = [:node], fks = [(:node, "nodes", "node")])
 
