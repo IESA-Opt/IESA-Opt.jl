@@ -185,7 +185,8 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
                 continue
             end
             push!(set_table_names, tname)
-            _write_input_table!(con, df, tname, written, skipped, mismatches)
+            pk_s, fks_s = _fallback_set_constraints(tname)
+            _write_input_table!(con, df, tname, written, skipped, mismatches; pk = pk_s, fks = fks_s)
         end
 
         scalar_names = String[]
@@ -411,6 +412,27 @@ function _seq_df(colname::Symbol, values::AbstractVector)
     df[!, colname] = _coerce_input_column(values)
     df[!, :seq] = collect(0:length(values)-1)
     return df
+end
+
+# Most fallback ModelSets fields are *derived subsets* of a core entity list
+# (activities_hour, tech_flexible, act_infraH, ...) — not raw workbook data of
+# their own. Rather than leave dozens of these as disconnected flat tables,
+# infer their parent entity from the field-name prefix and add a PK (they're
+# sets, so values are unique by construction) plus an FK back to that entity.
+# The usual tiered fallback still applies if a value doesn't actually resolve
+# (e.g. a mixed-domain set touching both technologies and infrastructure).
+function _fallback_set_constraints(tname::AbstractString)
+    if tname in ("tech_infraH", "tech_infraD")
+        return ([:value], [(:value, "infrastructure", "id")])
+    elseif startswith(tname, "tech_")
+        return ([:value], [(:value, "technologies", "id")])
+    elseif startswith(tname, "activities") || tname in ("act_infraH", "act_infraD")
+        return ([:value], [(:value, "activities", "Name")])
+    elseif tname == "nodes_IEM"
+        return ([:value], [(:value, "nodes", "node")])
+    else
+        return ([:value], Tuple{Symbol,String,String}[])
+    end
 end
 
 # ============================================================================
