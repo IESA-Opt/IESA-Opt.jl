@@ -48,6 +48,7 @@ include("input_tables.jl")
 include("duckdb_select_table.jl")
 include("compat_check.jl")
 include("data_merge.jl")
+include("data_load_duckdb.jl")
 include("sets.jl")
 include("parameters.jl")
 include("data_writing.jl")
@@ -126,6 +127,7 @@ export write_input_tables_duckdb!
 export check_file_compatibility, check_iesa_opt_excel_compatibility
 export check_iesa_sim_excel_compatibility, check_duckdb_compatibility
 export merge_or_copy_into
+export read_data_from_duckdb
 export compute_temporal_helpers!, compute_period_indicators!
 export compute_financial_params!, compute_investment_matrices!
 export compute_activity_balances!, compute_chp_eps!, compute_activity_indicators!

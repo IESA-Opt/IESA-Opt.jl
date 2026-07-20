@@ -39,7 +39,15 @@ function read_data_cached(xlsx_path::AbstractString;
                           cache_dir::Union{String,Nothing} = nothing,
                           force_refresh::Bool = false,
                           kwargs...)
-    isfile(xlsx_path) || error("XLSX not found: $xlsx_path")
+    isfile(xlsx_path) || error("Input file not found: $xlsx_path")
+
+    # A .duckdb input (e.g. the unified/merged database from the compare
+    # wizard) is already a relational database, not something to compile a
+    # cache from — read it directly via the Phase 3 loader and skip the
+    # Excel-mtime-keyed cache-write logic below entirely.
+    if lowercase(splitext(xlsx_path)[2]) == ".duckdb"
+        return read_data_from_duckdb(xlsx_path)
+    end
 
     if cache_dir === nothing
         cache_dir = joinpath(dirname(abspath(xlsx_path)), ".iesa_cache")

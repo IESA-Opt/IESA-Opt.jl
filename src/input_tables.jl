@@ -594,21 +594,29 @@ function _tuple_dict_to_named_df(d::AbstractDict, colnames::Vector{Symbol}; valu
 end
 
 # Long-format (id, period, value...) table built from one or more Dict{Tuple{Symbol,Int},Float64}
-# sharing the same (id, period) key space. Missing entries default to 0.0.
+# sharing the same (id, period) key space. Missing entries are written as SQL
+# NULL, not a literal 0.0 default — several of these fields (technology_stocks'
+# techStock_max/techUse_max in particular) are *upper bounds* consumed via
+# `for ((t,ps), v) in p.techStock_max ... @constraint(ts[t,ps] <= v)`
+# (model/stock.jl), so a materialized 0.0 for a combination that was never
+# actually specified would wrongly force that tech/period to zero capacity —
+# not a harmless default. Writing NULL lets read_data_from_duckdb
+# (data_load_duckdb.jl) skip genuinely-absent entries instead of
+# reconstructing a phantom (and here, actively wrong) constraint.
 function _period_long_df(id_col::Symbol, ids::AbstractVector{Symbol}, periods::AbstractVector{Int},
                           value_dicts::Vector{<:Pair})
     (isempty(ids) || isempty(periods)) && return nothing
     n = length(ids) * length(periods)
     id_out = Vector{String}(undef, n)
     per_out = Vector{Int}(undef, n)
-    valcols = Dict{Symbol,Vector{Float64}}(name => Vector{Float64}(undef, n) for (name, _) in value_dicts)
+    valcols = Dict{Symbol,Vector{Union{Missing,Float64}}}(name => Vector{Union{Missing,Float64}}(undef, n) for (name, _) in value_dicts)
     i = 0
     for id in ids, per in periods
         i += 1
         id_out[i] = String(id)
         per_out[i] = per
         for (name, d) in value_dicts
-            valcols[name][i] = get(d, (id, per), 0.0)
+            valcols[name][i] = get(d, (id, per), missing)
         end
     end
     df = DataFrames.DataFrame()
@@ -756,6 +764,7 @@ function _tech_metadata_df(ids::Vector{Symbol}, s::ModelSets, p::ModelParams)
     df[!, :category] = sym_col(p.tech_category)
     df[!, :sector] = sym_col(p.tech_sector)
     df[!, :subsector] = sym_col(p.tech_subsector)
+    df[!, :sector_kev] = sym_col(p.tech_sector_kev)
     df[!, :name] = [haskey(p.tech_name, t) ? p.tech_name[t] : missing for t in ids]
     df[!, :unit] = sym_col(p.tech_units)
     df[!, :activity] = sym_col(p.activityPer_techOrig)
@@ -823,6 +832,7 @@ function _infra_metadata_df(ids::Vector{Symbol}, s::ModelSets, p::ModelParams)
     df[!, :category] = sym_col(p.tech_category)
     df[!, :sector] = sym_col(p.tech_sector)
     df[!, :subsector] = sym_col(p.tech_subsector)
+    df[!, :sector_kev] = sym_col(p.tech_sector_kev)
     df[!, :name] = [haskey(p.tech_name, t) ? p.tech_name[t] : missing for t in ids]
     df[!, :unit] = sym_col(p.tech_units)
     df[!, :activity] = sym_col(p.infra_activityOrig)
