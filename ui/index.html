@@ -32,6 +32,7 @@
     <button class="section-button" data-section="scenario" type="button">Scenario Space</button>
     <button class="section-button" data-section="explorer" type="button">Scenario explorer</button>
     <button class="section-button" data-section="mga" type="button">MGA</button>
+    <button class="section-button" data-section="merge" type="button">Merge Workspace</button>
     <button class="section-button" data-section="about" type="button">About</button>
   </nav>
 
@@ -56,6 +57,7 @@
     <button class="tab-button" data-section="explorer" data-tab="explorer-policy" type="button">Policy</button>
     <button class="tab-button" data-section="explorer" data-tab="explorer-model" type="button">Model browser</button>
     <button class="tab-button" data-section="explorer" data-tab="explorer-tech" type="button">Technology dependencies</button>
+    <button class="tab-button" data-section="merge" data-tab="merge-wizard" type="button">Wizard</button>
     <button class="tab-button" data-section="about" data-tab="about" type="button">Overview</button>
   </nav>
 
@@ -807,6 +809,67 @@
       </div>
     </section>
 
+    <section id="tab-merge-wizard" class="tab-panel">
+      <section class="panel compact-panel">
+        <div class="panel-title"><h2>Cross-model Merge Wizard</h2><span id="mergeStepSummary" class="subtle">Load a file to check IESA-Opt / IESA-Sim compatibility.</span></div>
+        <div id="mergeStageSteps" class="stage-steps merge-stage-steps">
+          <div class="stage-step" id="mergeStepFile1"><span class="stage-dot"></span><div><strong>1. Load file</strong><span>Compatibility check</span></div></div>
+          <div class="stage-step" id="mergeStepFile2"><span class="stage-dot"></span><div><strong>2. Fill gap</strong><span>Second file, if needed</span></div></div>
+          <div class="stage-step" id="mergeStepPriority"><span class="stage-dot"></span><div><strong>3. Priority</strong><span>Overlap resolution</span></div></div>
+          <div class="stage-step" id="mergeStepSave"><span class="stage-dot"></span><div><strong>4. Save</strong><span>Write merged database</span></div></div>
+        </div>
+      </section>
+
+      <section class="panel compact-panel" id="mergeFile1Panel">
+        <h2>Step 1 &middot; Load a file</h2>
+        <p class="subtle">Excel workbook or DuckDB database. We'll check whether it's usable by IESA-Opt, IESA-Sim, or both.</p>
+        <div class="form-grid two">
+          <div class="field"><span>File</span><div class="browse-row"><button id="mergeBrowseFile1" class="secondary-button" type="button">Browse&hellip;</button></div></div>
+          <div id="mergeFile1Display" class="field span-2 hidden"><span>Selected file</span><div id="mergeFile1Path" class="custom-input-path"></div></div>
+        </div>
+        <div id="mergeFile1Report" class="merge-report"></div>
+      </section>
+
+      <section class="panel compact-panel hidden" id="mergeFile2Panel">
+        <h2>Step 2 &middot; Load a second file to cover the gap</h2>
+        <p id="mergeFile2Hint" class="subtle"></p>
+        <div class="form-grid two">
+          <div class="field"><span>File</span><div class="browse-row"><button id="mergeBrowseFile2" class="secondary-button" type="button">Browse&hellip;</button></div></div>
+          <div id="mergeFile2Display" class="field span-2 hidden"><span>Selected file</span><div id="mergeFile2Path" class="custom-input-path"></div></div>
+        </div>
+        <div id="mergeFile2Report" class="merge-report"></div>
+      </section>
+
+      <section class="panel compact-panel hidden" id="mergePriorityPanel">
+        <h2>Step 3 &middot; Priority for overlapping data</h2>
+        <p class="subtle">Both files describe some of the same technologies/activities. Pick which model's values win where they overlap &mdash; the other file only fills in what is missing.</p>
+        <div class="form-grid two">
+          <label class="field checkbox"><input type="radio" name="mergePriority" value="iesaOpt" id="mergePriorityOpt"><span>Prefer IESA-Opt values</span></label>
+          <label class="field checkbox"><input type="radio" name="mergePriority" value="iesaSim" id="mergePrioritySim"><span>Prefer IESA-Sim values</span></label>
+        </div>
+      </section>
+
+      <section class="panel compact-panel hidden" id="mergeSavePanel">
+        <h2>Step 4 &middot; Save merged database</h2>
+        <div class="form-grid two">
+          <label class="field span-2"><span>Output path</span><input id="mergeOutputPath" type="text" placeholder="data/.iesa_cache/merged/merged_&lt;timestamp&gt;.duckdb"></label>
+        </div>
+        <button id="mergeSaveButton" class="primary-button" type="button" style="width:auto;">Merge &amp; Save</button>
+        <p id="mergeSaveStatus" class="subtle"></p>
+      </section>
+
+      <section class="panel compact-panel hidden" id="mergeSummaryPanel">
+        <div class="panel-title"><h2>Merge complete</h2><button id="mergeStartOverButton" class="secondary-button" type="button">Start a new merge</button></div>
+        <p id="mergeSummaryPath" class="subtle"></p>
+        <div id="mergeSummaryTable" class="table-wrap"></div>
+      </section>
+
+      <section class="panel hidden" id="mergeErrorPanel">
+        <div class="panel-title"><h2>Cannot proceed</h2><button id="mergeErrorStartOverButton" class="secondary-button" type="button">Start a new merge</button></div>
+        <p id="mergeErrorMessage" class="subtle"></p>
+      </section>
+    </section>
+
     <section id="tab-about" class="tab-panel">
       <div class="about-layout">
         <aside class="about-sidebar panel" aria-label="On this page">
@@ -830,6 +893,7 @@
           <li><strong>Scenario Space</strong> &mdash; the campaign workspace for sampling-based uncertainty studies. Tabs: <em>Parameter Space</em> (define the parameter space + sample variants), <em>Progress</em> (live multi-worker campaign progress with pause / resume / stop controls), <em>Results</em> (aggregated cross-variant analytics with a campaigns sidebar), <em>Analysis</em> (Scenario Discovery + global sensitivity analysis).</li>
           <li><strong>Scenario explorer</strong> &mdash; workbook and generated-model inspection. Tabs: <em>Input overview</em>, <em>Technology atlas</em>, <em>Cost assumptions</em>, <em>Activity map</em>, <em>Coupled Sectors</em>, <em>Flow details</em>, <em>Profiles 3D</em>, <em>Policy</em>, <em>Model browser</em>, <em>Technology dependencies</em>.</li>
           <li><strong>MGA</strong> &mdash; solver-backed modelling-to-generate-alternatives campaigns with near-optimal cost caps and ORACLE refinement. Tabs: <em>Configure</em>, <em>Progress</em>, <em>Results</em>.</li>
+          <li><strong>Merge Workspace</strong> &mdash; a step-by-step wizard that checks whether an Excel workbook or DuckDB database is usable by IESA-Opt, IESA-Sim, or both, and consolidates two sources into one merged database. Tab: <em>Wizard</em>.</li>
           <li><strong>About</strong> &mdash; this reference page.</li>
         </ul>
         <p>The tabs below the section bar are filtered automatically: only the tabs that belong to the active section are shown. Each tab is described below together with every option it exposes.</p>
@@ -1064,6 +1128,16 @@
         </ul>
         <p>Use the categories together: low-regret tells you what every near-optimal pathway agrees on; high-volatility tells you where there is genuine flexibility (and therefore where political, social, or implementation preferences can decide between alternatives without paying a meaningful cost penalty).</p>
 
+        <h3>Merge Workspace</h3>
+        <p>A wizard for combining IESA-Opt.jl and IESA-Sim input data into one consolidated database. It replaces manual spreadsheet reconciliation with a guided, four-step flow:</p>
+        <ul class="about-list">
+          <li><strong>Step 1 &mdash; Load a file</strong> &mdash; browse to an Excel workbook or a <code>.duckdb</code> file. The wizard checks it against the sheets/headers IESA-Opt.jl needs and the tables IESA-Sim needs, and reports both as compatible / not compatible, with the specific missing sheets, headers, or tables listed.</li>
+          <li><strong>Step 2 &mdash; Fill the gap</strong> &mdash; shown only if the first file covers just one of the two models. Load a second file that covers the missing model. An IESA-Sim-shaped <em>Excel</em> file can be recognised as compatible, but there is no Julia parser for IESA-Sim workbooks yet, so it cannot fill an IESA-Sim gap here &mdash; only an IESA-Sim <code>.duckdb</code> file can. The wizard says so explicitly rather than failing silently.</li>
+          <li><strong>Step 3 &mdash; Priority</strong> &mdash; shown only when two files are needed. Technologies, activities, and other records that exist in both sources are deduplicated on their natural key (e.g. activity name); this step picks which source's values win on that overlap. The other source only fills in what the priority source is missing &mdash; there is no side-by-side tagging, the result is one consolidated row per key.</li>
+          <li><strong>Step 4 &mdash; Save</strong> &mdash; choose an output path (or accept the auto-generated one under <code>data/.iesa_cache/merged/</code>) and merge. The summary table lists every table in the output with its row count and origin (<em>merged</em>, or <em>copied</em> from whichever source supplied it untouched).</li>
+        </ul>
+        <p>If the loaded file(s) cannot satisfy either model, or a second file still doesn't cover the gap, the wizard stops with an explanation and a <strong>Start a new merge</strong> button rather than letting you proceed with an unusable combination.</p>
+
         <h3>About tab</h3>
         <p>This page. Use the links above to reach the source code and the full documentation.</p>
       </section>
@@ -1091,5 +1165,6 @@
   <script src="/app.scenario.js"></script>
   <script src="/app.explorer.js"></script>
   <script src="/app.mga.js?v=mga-investments-20260614"></script>
+  <script src="/app.merge.js"></script>
 </body>
 </html>

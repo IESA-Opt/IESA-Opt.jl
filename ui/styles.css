@@ -134,6 +134,14 @@ details summary { cursor:pointer; min-height:30px; }
 .stage-step.done { border-color:#9bc58c; color:#2e6c29; background:#f2f8ef; }
 .stage-step.active { border-color:var(--cyan); color:var(--blue); background:#edf8fb; }
 .stage-step.failed { border-color:#d88982; color:var(--red); background:#fff3f2; }
+/* Merge wizard: 4-step bar, per-model compatibility report. */
+.merge-stage-steps { grid-template-columns:repeat(4,minmax(80px,1fr)); }
+.merge-report { display:grid; gap:10px; margin-top:12px; }
+.merge-report-model { border:1px solid var(--line); border-radius:6px; padding:10px 12px; background:#f8fafb; }
+.merge-report-model-title { display:flex; align-items:center; justify-content:space-between; gap:8px; font-weight:650; margin-bottom:6px; }
+.merge-report-missing { margin:6px 0 0; padding-left:18px; color:var(--muted); font-size:13px; }
+.merge-report-missing li { word-break:break-all; }
+.merge-report-note { margin:6px 0 0; color:var(--amber); font-size:13px; }
 /* MGA progress: bar, workers, direction table. */
 .mga-progress-bar-wrap { display:grid; gap:6px; }
 .mga-progress-bar { width:100%; height:14px; background:#e7edf1; border-radius:7px; overflow:hidden; border:1px solid var(--line); }
