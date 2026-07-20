@@ -208,6 +208,11 @@ function merge_or_copy_into(out_db::AbstractString;
         _duckdb_execute!(con, "ATTACH '$(sim_source)' AS sim (READ_ONLY)")
 
         shared_names = Set{String}(e.name for e in _IESA_OPT_SIM_SHARED_TABLES)
+        # metadata/model_data are data_cache.jl's opaque serialized-ModelData
+        # blob cache, not relational input data — excluded from the
+        # consolidated output (they're per-workbook implementation detail,
+        # not something meaningful to merge or copy through).
+        excluded_names = Set{String}(["metadata", "model_data"])
 
         for entry in _IESA_OPT_SIM_SHARED_TABLES
             sim_select = entry.sim_select === nothing ? _sim_activity_volumes_select(con) : entry.sim_select
@@ -228,13 +233,13 @@ function merge_or_copy_into(out_db::AbstractString;
         secondary_tables, secondary_alias, secondary_label = priority == :iesa_opt ? (sim_tables, "sim", "iesaSim") : (opt_tables, "opt", "iesaOpt")
 
         for t in primary_tables
-            t in shared_names && continue
+            (t in shared_names || t in excluded_names) && continue
             _copy_table_asis!(con, t, primary_alias, t)
             n = (DBInterface.execute(con, "SELECT COUNT(*) AS n FROM $(_duckdb_quote_identifier(t))") |> first)[1]
             summary[t] = Dict{String,Any}("rows" => n, "origin" => "copied:$(primary_label)")
         end
         for t in secondary_tables
-            (t in shared_names || haskey(summary, t)) && continue
+            (t in shared_names || t in excluded_names || haskey(summary, t)) && continue
             _copy_table_asis!(con, t, secondary_alias, t)
             n = (DBInterface.execute(con, "SELECT COUNT(*) AS n FROM $(_duckdb_quote_identifier(t))") |> first)[1]
             summary[t] = Dict{String,Any}("rows" => n, "origin" => "copied:$(secondary_label)")

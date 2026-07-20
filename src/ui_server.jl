@@ -28,6 +28,15 @@ const UI_CAMPAIGNS_LOCK = ReentrantLock()
 const UI_MGA_CAMPAIGNS = Dict{String,Dict{String,Any}}()
 const UI_MGA_TASKS = Dict{String,Task}()
 const UI_MGA_LOCK = ReentrantLock()
+# Data-merge wizard sessions: unlike a solve/campaign job, this spans several
+# decisions the user makes across multiple HTTP round-trips (load file 1 ->
+# see compatibility report -> maybe load file 2 -> maybe pick a priority ->
+# save). This dict holds that accumulated state; the actual async work at
+# each step still goes through the existing generic UI_JOBS/_job_update!/
+# _job_snapshot machinery (see _merge_start_job! below), so GET /api/jobs/{id}
+# polling works unmodified for these jobs too.
+const UI_MERGE_SESSIONS = Dict{String,Dict{String,Any}}()
+const UI_MERGE_SESSIONS_LOCK = ReentrantLock()
 const COMMERCIAL_SOLVER_IDS = ("gurobi", "cplex", "xpress")
 const UI_MAX_LOG_LINES = 5000
 const UI_DATA_CACHE_LOCK = ReentrantLock()
@@ -232,6 +241,36 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         elseif length(parts) == 4 && parts[3] == "result"
             return _json_response(_mga_result(parts[4]))
         end
+    elseif method == "POST" && path == "/api/merge/session"
+        return _json_response(_merge_new_session!())
+    elseif method == "GET" && startswith(path, "/api/merge/session/")
+        parts = _url_parts(path)
+        if length(parts) == 4 && parts[3] == "session"
+            return _json_response(_merge_session_snapshot(parts[4]))
+        end
+    elseif method == "POST" && startswith(path, "/api/merge/session/")
+        parts = _url_parts(path)
+        if length(parts) == 5 && parts[3] == "session" && parts[5] == "loadFile"
+            body = _json_body(req)
+            slot = Int(_config_get(body, "slot", 1))
+            file_path = String(_config_get(body, "path", ""))
+            job_id = _merge_start_check_job!(parts[4], slot, file_path)
+            return _json_response(Dict("ok" => true, "jobId" => job_id); status = 202)
+        elseif length(parts) == 5 && parts[3] == "session" && parts[5] == "priority"
+            body = _json_body(req)
+            return _json_response(_merge_set_priority!(parts[4], String(_config_get(body, "priority", ""))))
+        elseif length(parts) == 5 && parts[3] == "session" && parts[5] == "save"
+            body = _json_body(req)
+            out_path = String(_config_get(body, "outputPath", ""))
+            if isempty(out_path)
+                out_path = joinpath(_repo_root(), "data", ".iesa_cache", "merged",
+                                     "merged_" * Dates.format(now(), "yyyymmdd_HHMMSS") * ".duckdb")
+            end
+            job_id = _merge_start_merge_job!(parts[4], out_path)
+            return _json_response(Dict("ok" => true, "jobId" => job_id, "outputPath" => out_path); status = 202)
+        end
+    elseif method == "POST" && path == "/api/merge/browseFile"
+        return _json_response(Dict("path" => _browse_for_input_file(; kind = :any)))
     elseif method == "GET" && startswith(path, "/api/jobs/")
         parts = _url_parts(path)
         if length(parts) == 3
@@ -407,14 +446,18 @@ end
 const _COMDLG_OFN_SIZE  = 152  # x64 OPENFILENAMEW size in bytes
 # OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_EXPLORER | OFN_NOCHANGEDIR
 const _COMDLG_OFN_FLAGS = UInt32(0x00001000 | 0x00000800 | 0x00080000 | 0x00000008)
-function _browse_for_input_file_native()
+function _browse_for_input_file_native(; kind::Symbol = :xlsx)
     (Sys.iswindows() && Sys.WORD_SIZE == 64) || return nothing
     initial_dir = joinpath(_repo_root(), "data")
     isdir(initial_dir) || (initial_dir = _repo_root())
     # OPENFILENAMEW filter format: "<label>\0<patterns>\0…\0\0"
-    filter_w  = transcode(UInt16,
-        "Excel files (*.xlsx;*.xlsm;*.xls)\0*.xlsx;*.xlsm;*.xls\0" *
-        "All files (*.*)\0*.*\0\0")
+    filter_w = kind == :any ?
+        transcode(UInt16,
+            "Data files (*.xlsx;*.xlsm;*.xls;*.duckdb)\0*.xlsx;*.xlsm;*.xls;*.duckdb\0" *
+            "All files (*.*)\0*.*\0\0") :
+        transcode(UInt16,
+            "Excel files (*.xlsx;*.xlsm;*.xls)\0*.xlsx;*.xlsm;*.xls\0" *
+            "All files (*.*)\0*.*\0\0")
     title_w   = transcode(UInt16, "Select IESA-Opt input workbook\0")
     initdir_w = transcode(UInt16, initial_dir * "\0")
     nMaxFile  = UInt32(2048)
@@ -445,15 +488,18 @@ function _browse_for_input_file_native()
     return transcode(String, file_buf[1:n])
 end
 
-function _browse_for_input_file()
+function _browse_for_input_file(; kind::Symbol = :xlsx)
     Sys.iswindows() || return ""
-    native = _browse_for_input_file_native()
+    native = _browse_for_input_file_native(; kind = kind)
     native === nothing || return native
     initial_dir = joinpath(_repo_root(), "data")
     if !isdir(initial_dir)
         initial_dir = _repo_root()
     end
     ps_quote(s) = "'" * replace(String(s), "'" => "''") * "'"
+    ps_filter = kind == :any ?
+        "Data files (*.xlsx;*.xlsm;*.xls;*.duckdb)|*.xlsx;*.xlsm;*.xls;*.duckdb|All files (*.*)|*.*" :
+        "Excel files (*.xlsx;*.xlsm;*.xls)|*.xlsx;*.xlsm;*.xls|All files (*.*)|*.*"
     # The dialog owner is a 1x1 invisible TopMost form so the picker
     # is brought above the browser window. Without an owner the dialog
     # often opens behind VS Code / Chrome and looks like a hang.
@@ -474,7 +520,7 @@ Add-Type -AssemblyName System.Drawing | Out-Null
 try {
     \$dlg = New-Object System.Windows.Forms.OpenFileDialog
     \$dlg.Title = 'Select IESA-Opt input workbook'
-    \$dlg.Filter = 'Excel files (*.xlsx;*.xlsm;*.xls)|*.xlsx;*.xlsm;*.xls|All files (*.*)|*.*'
+    \$dlg.Filter = $(ps_quote(ps_filter))
     \$dlg.InitialDirectory = $(ps_quote(initial_dir))
     \$dlg.RestoreDirectory = \$true
     if (\$dlg.ShowDialog(\$owner) -eq [System.Windows.Forms.DialogResult]::OK) {
@@ -948,6 +994,255 @@ function _mga_campaigns()
     finally
         unlock(UI_MGA_LOCK)
     end
+end
+
+# =============================================================================
+# Data-merge wizard
+#
+# Session state machine (see UI_MERGE_SESSIONS):
+#   awaiting_file1 -> file1_checked -> (awaiting_save | awaiting_file2 | error_incompatible)
+#   awaiting_file2 -> (awaiting_priority | error_file2_insufficient)
+#   awaiting_priority -> awaiting_save -> merging -> complete
+# =============================================================================
+
+function _merge_new_session!()
+    id = "merge_" * Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
+    session = Dict{String,Any}(
+        "id" => id,
+        "createdAt" => string(now()),
+        "file1" => Dict{String,Any}("path" => "", "kind" => "", "report" => nothing, "checkJobId" => nothing),
+        "file2" => Dict{String,Any}("path" => "", "kind" => "", "report" => nothing, "checkJobId" => nothing),
+        "gapModel" => nothing,
+        "priority" => nothing,
+        "mergeJobId" => nothing,
+        "outputPath" => nothing,
+        "status" => "awaiting_file1",
+    )
+    lock(UI_MERGE_SESSIONS_LOCK)
+    try
+        UI_MERGE_SESSIONS[id] = session
+    finally
+        unlock(UI_MERGE_SESSIONS_LOCK)
+    end
+    return Dict{String,Any}("ok" => true, "session" => session)
+end
+
+function _merge_session_snapshot(id::AbstractString)
+    lock(UI_MERGE_SESSIONS_LOCK)
+    try
+        haskey(UI_MERGE_SESSIONS, id) || error("Unknown merge session id: $(id)")
+        return Dict{String,Any}("ok" => true, "session" => copy(UI_MERGE_SESSIONS[id]))
+    finally
+        unlock(UI_MERGE_SESSIONS_LOCK)
+    end
+end
+
+# Lightweight job starter shared by the compat-check and merge-save steps.
+# Deliberately not _start_ui_job!/_run_ui_job! — those are solve-run specific
+# (their job dict carries config/outputDir/effectiveSolver/model fields this
+# work has no use for). _job_update!/_job_snapshot are generic and reused as-is.
+function _merge_start_job!()
+    job_id = "mergejob_" * Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
+    created_at = string(now())
+    job = Dict{String,Any}(
+        "id" => job_id,
+        "status" => "queued",
+        "stage" => "queued",
+        "createdAt" => created_at,
+        "updatedAt" => created_at,
+        "logs" => Vector{Dict{String,String}}(),
+    )
+    lock(UI_JOBS_LOCK)
+    try
+        UI_JOBS[job_id] = job
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    return job_id
+end
+
+function _merge_start_check_job!(session_id::AbstractString, slot::Int, path::AbstractString)
+    lock(UI_MERGE_SESSIONS_LOCK)
+    try
+        haskey(UI_MERGE_SESSIONS, session_id) || error("Unknown merge session id: $(session_id)")
+    finally
+        unlock(UI_MERGE_SESSIONS_LOCK)
+    end
+    isempty(path) && error("No file path given")
+    job_id = _merge_start_job!()
+    task = Base.Threads.@spawn _merge_run_check_job!(job_id, session_id, slot, path)
+    lock(UI_JOBS_LOCK)
+    try
+        UI_TASKS[job_id] = task
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    return job_id
+end
+
+function _merge_run_check_job!(job_id::String, session_id::String, slot::Int, path::String)
+    _job_update!(job_id; status = "running", stage = "checking", message = "Checking $(path)")
+    try
+        report = check_file_compatibility(path)
+        lock(UI_MERGE_SESSIONS_LOCK)
+        try
+            session = UI_MERGE_SESSIONS[session_id]
+            slot_key = slot == 1 ? "file1" : "file2"
+            session[slot_key]["path"] = path
+            session[slot_key]["kind"] = report["kind"]
+            session[slot_key]["report"] = report
+            session[slot_key]["checkJobId"] = job_id
+            _merge_recompute_status!(session)
+        finally
+            unlock(UI_MERGE_SESSIONS_LOCK)
+        end
+        _job_update!(job_id; status = "done", stage = "done", message = "Compatibility check complete",
+                     extra = Dict{String,Any}("report" => report))
+    catch err
+        _job_update!(job_id; status = "error", stage = "error", message = "Compatibility check failed: $(sprint(showerror, err))")
+    end
+    return nothing
+end
+
+# Recomputes session["status"]/"gapModel" from whatever reports are known so
+# far. Caller must hold UI_MERGE_SESSIONS_LOCK.
+function _merge_recompute_status!(session::Dict{String,Any})
+    r1 = session["file1"]["report"]
+    r1 === nothing && return nothing
+    opt1 = r1["iesaOpt"]["compatible"]
+    sim1 = r1["iesaSim"]["compatible"] && get(r1["iesaSim"], "mergeCapable", true)
+
+    if opt1 && sim1
+        session["status"] = "awaiting_save"
+        session["gapModel"] = nothing
+        return nothing
+    elseif !opt1 && !sim1
+        session["status"] = "error_incompatible"
+        session["gapModel"] = nothing
+        return nothing
+    end
+
+    gap = opt1 ? "iesaSim" : "iesaOpt"
+    session["gapModel"] = gap
+
+    r2 = session["file2"]["report"]
+    if r2 === nothing
+        session["status"] = "awaiting_file2"
+        return nothing
+    end
+
+    gap_ok = gap == "iesaOpt" ? r2["iesaOpt"]["compatible"] : (r2["iesaSim"]["compatible"] && get(r2["iesaSim"], "mergeCapable", true))
+    session["status"] = gap_ok ? "awaiting_priority" : "error_file2_insufficient"
+    return nothing
+end
+
+function _merge_set_priority!(session_id::AbstractString, priority::AbstractString)
+    priority in ("iesaOpt", "iesaSim") || error("priority must be \"iesaOpt\" or \"iesaSim\"")
+    lock(UI_MERGE_SESSIONS_LOCK)
+    try
+        haskey(UI_MERGE_SESSIONS, session_id) || error("Unknown merge session id: $(session_id)")
+        session = UI_MERGE_SESSIONS[session_id]
+        session["status"] == "awaiting_priority" || error("Session is not awaiting a priority choice (status=$(session["status"]))")
+        session["priority"] = priority
+        session["status"] = "awaiting_save"
+        return Dict{String,Any}("ok" => true, "session" => copy(session))
+    finally
+        unlock(UI_MERGE_SESSIONS_LOCK)
+    end
+end
+
+# merge_or_copy_into only understands DuckDB paths (it ATTACHes them) — an
+# IESA-Opt-compatible *Excel* slot must be parsed into its .iesa_input.duckdb
+# cache first, via the same read_data_cached pipeline used everywhere else
+# in this codebase (which also writes the relational tables). IESA-Sim slots
+# never need this: mergeCapable is only ever true for kind=="duckdb" (see
+# check_file_compatibility), since there's no IESA-Sim Excel parser here.
+function _resolve_opt_duckdb_path(path::AbstractString, kind::AbstractString)
+    kind == "duckdb" && return path
+    read_data_cached(path)
+    return _duckdb_input_cache_path(path, joinpath(dirname(abspath(path)), ".iesa_cache"))
+end
+
+# Which loaded file plays the IESA-Opt-shaped / IESA-Sim-shaped source role,
+# based on each file's compatibility report (file1 preferred when either
+# alone could fill a role). Caller must hold UI_MERGE_SESSIONS_LOCK, or pass
+# an already-copied session snapshot.
+function _merge_resolve_sources(session::Dict{String,Any})
+    opt_source = nothing
+    sim_source = nothing
+    for slot_key in ("file1", "file2")
+        slot = session[slot_key]
+        r = slot["report"]
+        r === nothing && continue
+        if opt_source === nothing && r["iesaOpt"]["compatible"]
+            opt_source = _resolve_opt_duckdb_path(slot["path"], slot["kind"])
+        end
+        if sim_source === nothing && r["iesaSim"]["compatible"] && get(r["iesaSim"], "mergeCapable", true)
+            sim_source = slot["path"]
+        end
+    end
+    return opt_source, sim_source
+end
+
+function _merge_start_merge_job!(session_id::AbstractString, output_path::AbstractString)
+    session_copy = nothing
+    lock(UI_MERGE_SESSIONS_LOCK)
+    try
+        haskey(UI_MERGE_SESSIONS, session_id) || error("Unknown merge session id: $(session_id)")
+        session = UI_MERGE_SESSIONS[session_id]
+        session["status"] == "awaiting_save" || error("Session is not ready to save (status=$(session["status"]))")
+        session_copy = copy(session)
+        session["status"] = "merging"
+    finally
+        unlock(UI_MERGE_SESSIONS_LOCK)
+    end
+
+    job_id = _merge_start_job!()
+    task = Base.Threads.@spawn _merge_run_save_job!(job_id, session_id, session_copy, output_path)
+    lock(UI_JOBS_LOCK)
+    try
+        UI_TASKS[job_id] = task
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    lock(UI_MERGE_SESSIONS_LOCK)
+    try
+        UI_MERGE_SESSIONS[session_id]["mergeJobId"] = job_id
+    finally
+        unlock(UI_MERGE_SESSIONS_LOCK)
+    end
+    return job_id
+end
+
+function _merge_run_save_job!(job_id::String, session_id::String, session::Dict{String,Any}, output_path::String)
+    _job_update!(job_id; status = "running", stage = "preparing", message = "Resolving input sources")
+    try
+        opt_source, sim_source = _merge_resolve_sources(session)
+        priority_arg = (opt_source !== nothing && sim_source !== nothing) ?
+            (session["priority"] == "iesaOpt" ? :iesa_opt : :iesa_sim) : nothing
+        _job_update!(job_id; stage = "merging", message = "Merging into $(output_path)")
+        summary = merge_or_copy_into(output_path; opt_source = opt_source, sim_source = sim_source, priority = priority_arg)
+
+        lock(UI_MERGE_SESSIONS_LOCK)
+        try
+            s = UI_MERGE_SESSIONS[session_id]
+            s["status"] = "complete"
+            s["outputPath"] = output_path
+        finally
+            unlock(UI_MERGE_SESSIONS_LOCK)
+        end
+        _job_update!(job_id; status = "done", stage = "done", message = "Merge complete",
+                     extra = Dict{String,Any}("summary" => summary, "outputPath" => output_path))
+    catch err
+        lock(UI_MERGE_SESSIONS_LOCK)
+        try
+            UI_MERGE_SESSIONS[session_id]["status"] = "error_merge_failed"
+        finally
+            unlock(UI_MERGE_SESSIONS_LOCK)
+        end
+        _job_update!(job_id; status = "error", stage = "error", message = "Merge failed: $(sprint(showerror, err))")
+    end
+    return nothing
 end
 
 function _ui_warmup_status_snapshot()
