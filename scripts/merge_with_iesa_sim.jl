@@ -48,6 +48,7 @@
 using DuckDB
 using DataFrames
 import DBInterface
+using IESAOpt: _create_table_from_select!
 
 const REPO_ROOT = normpath(joinpath(@__DIR__, ".."))
 
@@ -62,59 +63,6 @@ isfile(sim_db) || error("IESA-Sim DB not found: $sim_db")
 isfile(out_db) && rm(out_db)
 mkpath(dirname(out_db))
 
-# ---------------------------------------------------------------------------
-# _create_merged_table!(con, name, select_sql; pk, fks)
-#
-# `select_sql` must already produce exactly the target column list (in
-# order), including `model_source`. `pk` is a Vector{String} of column names
-# or `nothing`. `fks` is a Vector of (cols::Vector{String}, ref_table::String,
-# ref_cols::Vector{String}) candidates — each is checked with an anti-join
-# against `select_sql` before being declared, and dropped (with a printed
-# reason) if any non-NULL child value has no match in the parent.
-# ---------------------------------------------------------------------------
-function _create_merged_table!(con, name::String, select_sql::String;
-                                pk::Union{Nothing,Vector{String}} = nothing,
-                                fks::Vector = Tuple{Vector{String},String,Vector{String}}[])
-    schema_df = DBInterface.execute(con, "SELECT * FROM ($(select_sql)) LIMIT 0") |> DataFrame
-    colnames = names(schema_df)
-
-    valid_fks = Tuple{Vector{String},String,Vector{String}}[]
-    for (cols, ref_table, ref_cols) in fks
-        join_cond = join(("c.\"$(a)\" = p.\"$(b)\"" for (a, b) in zip(cols, ref_cols)), " AND ")
-        notnull_cond = join(("c.\"$(a)\" IS NOT NULL" for a in cols), " AND ")
-        check_sql = """
-            SELECT COUNT(*) AS n FROM ($(select_sql)) c
-            LEFT JOIN $(ref_table) p ON $(join_cond)
-            WHERE $(notnull_cond) AND p."$(ref_cols[1])" IS NULL
-        """
-        n = (DBInterface.execute(con, check_sql) |> first)[1]
-        if n == 0
-            push!(valid_fks, (cols, ref_table, ref_cols))
-        else
-            println("  [$(name)] dropping FK $(cols) -> $(ref_table)$(ref_cols): $(n) orphan value(s)")
-        end
-    end
-
-    col_list_sql = join(("\"$(c)\"" for c in colnames), ", ")
-    constraints = String[]
-    pk !== nothing && push!(constraints, "PRIMARY KEY (" * join(("\"$(c)\"" for c in pk), ", ") * ")")
-    for (cols, ref_table, ref_cols) in valid_fks
-        push!(constraints, "FOREIGN KEY (" * join(("\"$(c)\"" for c in cols), ", ") * ") REFERENCES " *
-                            "$(ref_table)(" * join(("\"$(c)\"" for c in ref_cols), ", ") * ")")
-    end
-
-    # Column types come from the (already-typed) SELECT itself — describe the
-    # zero-row projection to get them without re-deriving each type by hand.
-    types_df = DBInterface.execute(con, "DESCRIBE SELECT * FROM ($(select_sql)) LIMIT 0") |> DataFrame
-    types = Dict{String,String}(row.column_name => row.column_type for row in eachrow(types_df))
-    cols_sql = join(("\"$(c)\" $(types[c])" for c in colnames), ",\n    ")
-
-    body = join(vcat([cols_sql], constraints), ",\n    ")
-    DBInterface.execute(con, "CREATE TABLE \"$(name)\" (\n    $(body)\n)")
-    DBInterface.execute(con, "INSERT INTO \"$(name)\" SELECT $(col_list_sql) FROM ($(select_sql))")
-    return nothing
-end
-
 con = DBInterface.connect(DuckDB.DB, out_db)
 try
     DBInterface.execute(con, "ATTACH '$(julia_db)' AS jl (READ_ONLY)")
@@ -123,21 +71,21 @@ try
     written = String[]
 
     # ---- root reference tables (no FKs of their own) -----------------------
-    _create_merged_table!(con, "periods", """
+    _create_table_from_select!(con, "periods", """
         SELECT 'IESA-Opt' AS model_source, * FROM jl.periods
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, * FROM sim.periods
     """; pk = ["model_source", "period"])
     push!(written, "periods")
 
-    _create_merged_table!(con, "hourly_profile_types", """
+    _create_table_from_select!(con, "hourly_profile_types", """
         SELECT 'IESA-Opt' AS model_source, * FROM jl.hourly_profile_types
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, * FROM sim.hourly_profile_types
     """; pk = ["model_source", "name"])
     push!(written, "hourly_profile_types")
 
-    _create_merged_table!(con, "interconnectors", """
+    _create_table_from_select!(con, "interconnectors", """
         SELECT 'IESA-Opt' AS model_source, * FROM jl.interconnectors
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, * FROM sim.interconnectors
@@ -146,7 +94,7 @@ try
 
     # activities: after the rename in input_tables.jl, Name/UoA/Node/Target/
     # activity_resolution/activity_type/energy_label/seq match verbatim.
-    _create_merged_table!(con, "activities", """
+    _create_table_from_select!(con, "activities", """
         SELECT 'IESA-Opt' AS model_source, "Name", "UoA", activity_resolution, activity_type, "Node", "Target", energy_label, seq
         FROM jl.activities
         UNION ALL
@@ -159,7 +107,7 @@ try
     # IESA-Sim's lifetime is INTEGER, IESA-Opt.jl's economic-lifetime-derived
     # `lifetime` is DOUBLE — cast to DOUBLE so the union doesn't need an
     # implicit narrowing cast.
-    _create_merged_table!(con, "technologies", """
+    _create_table_from_select!(con, "technologies", """
         SELECT 'IESA-Opt' AS model_source, id, seq, category, sector, subsector, name, unit, activity, cap2act,
                CAST(lifetime AS DOUBLE) AS lifetime, hourly_profile,
                shedding_capacity, shedding_limits,
@@ -181,7 +129,7 @@ try
     ])
     push!(written, "technologies")
 
-    _create_merged_table!(con, "infrastructure", """
+    _create_table_from_select!(con, "infrastructure", """
         SELECT 'IESA-Opt' AS model_source, id, seq, category, name, unit, activity, cap2act,
                CAST(lifetime AS DOUBLE) AS lifetime, stock_initial
         FROM jl.infrastructure
@@ -198,7 +146,7 @@ try
     # technology_stocks: IESA-Opt.jl has extra use_min/use_max/no_new_invest/
     # no_eco_decom columns IESA-Sim's reader never captures — union only the
     # shared (tech_id, period, dec_planned, min, max).
-    _create_merged_table!(con, "technology_stocks", """
+    _create_table_from_select!(con, "technology_stocks", """
         SELECT 'IESA-Opt' AS model_source, tech_id, period, dec_planned, min, max FROM jl.technology_stocks
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, tech_id, period, dec_planned, min, max FROM sim.technology_stocks
@@ -208,7 +156,7 @@ try
     ])
     push!(written, "technology_stocks")
 
-    _create_merged_table!(con, "technology_costs", """
+    _create_table_from_select!(con, "technology_costs", """
         SELECT 'IESA-Opt' AS model_source, * FROM jl.technology_costs
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, * FROM sim.technology_costs
@@ -218,7 +166,7 @@ try
     ])
     push!(written, "technology_costs")
 
-    _create_merged_table!(con, "infrastructure_costs", """
+    _create_table_from_select!(con, "infrastructure_costs", """
         SELECT 'IESA-Opt' AS model_source, * FROM jl.infrastructure_costs
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, * FROM sim.infrastructure_costs
@@ -228,7 +176,7 @@ try
     ])
     push!(written, "infrastructure_costs")
 
-    _create_merged_table!(con, "hourly_profiles", """
+    _create_table_from_select!(con, "hourly_profiles", """
         SELECT 'IESA-Opt' AS model_source, * FROM jl.hourly_profiles
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, * FROM sim.hourly_profiles
@@ -237,7 +185,7 @@ try
     ])
     push!(written, "hourly_profiles")
 
-    _create_merged_table!(con, "price_profiles", """
+    _create_table_from_select!(con, "price_profiles", """
         SELECT 'IESA-Opt' AS model_source, * FROM jl.price_profiles
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, * FROM sim.price_profiles
@@ -265,7 +213,7 @@ try
             " UNION ALL ",
         )
     end
-    _create_merged_table!(con, "activity_volumes", """
+    _create_table_from_select!(con, "activity_volumes", """
         SELECT 'IESA-Opt' AS model_source, activity_name, period, value FROM jl.activity_volumes
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, activity_name, period, value FROM ($(sim_volumes_select))
@@ -282,7 +230,7 @@ try
     # own rows repeat the same (tech_id, activity_name)/(from_tech, to_tech)
     # once per period) — these stay keyless fact tables, same as e.g.
     # IESA-Sim's own `population`/`criteria_weights`, but keep their FKs.
-    _create_merged_table!(con, "energy_balance", """
+    _create_table_from_select!(con, "energy_balance", """
         SELECT 'IESA-Opt' AS model_source, tech_id, activity_name, period, value FROM jl.energy_balance
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, tech_id, activity_name, CAST(NULL AS INTEGER) AS period, value FROM sim.energy_balance
@@ -293,7 +241,7 @@ try
     ])
     push!(written, "energy_balance")
 
-    _create_merged_table!(con, "retrofittings", """
+    _create_table_from_select!(con, "retrofittings", """
         SELECT 'IESA-Opt' AS model_source, from_tech, to_tech, period, cost FROM jl.retrofittings
         UNION ALL
         SELECT 'IESA-Sim' AS model_source, from_tech, to_tech, CAST(NULL AS INTEGER) AS period, cost FROM sim.retrofittings
