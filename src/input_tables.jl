@@ -95,7 +95,7 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
             pk = [:hour, :interconnector_id, :period], fks = [(:interconnector_id, "interconnectors", "id"), (:period, "periods", "period")])
 
         # ---------------------------------------------------- technologies --
-        _write_input_table!(con, _tech_metadata_df(s.tech_balancers, p), "technologies", written, skipped, mismatches;
+        _write_input_table!(con, _tech_metadata_df(s.tech_balancers, s, p), "technologies", written, skipped, mismatches;
             pk = [:id], fks = [(:activity, "activities", "Name"), (:hourly_profile, "hourly_profile_types", "name")])
         _write_input_table!(con, _period_long_df(:tech_id, s.tech_balancers, s.periods,
                 [:investment => p.inv_cost, :fom => p.fom_cost, :vom => p.vom_cost]), "technology_costs", written, skipped, mismatches;
@@ -106,7 +106,7 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
             pk = [:tech_id], fks = [(:tech_id, "technologies", "id"), (:activity_name, "activities", "Name")])
 
         # ---------------------------------------------------- infrastructure --
-        _write_input_table!(con, _infra_metadata_df(s.tech_infra, p), "infrastructure", written, skipped, mismatches;
+        _write_input_table!(con, _infra_metadata_df(s.tech_infra, s, p), "infrastructure", written, skipped, mismatches;
             pk = [:id], fks = [(:activity, "activities", "Name")])
         _write_input_table!(con, _period_long_df(:infra_id, s.tech_infra, s.periods,
                 [:investment => p.inv_cost, :fom => p.fom_cost]), "infrastructure_costs", written, skipped, mismatches;
@@ -137,11 +137,12 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
         _write_input_table!(con, _parameters_scalar_df(p), "parameters", written, skipped, mismatches; pk = [:Name])
 
         # ------------------------------------------------------- fallback --
-        core_sets = Set{Symbol}([
-            :periods, :dispatch_type, :activity_type, :process_type, :flexibility_type, :range_type,
-            :profile_typeRead, :sectors, :sectors_kev, :nodes, :energy_labels,
-            :activities_original, :hours_orig, :tech_balancers, :tech_infra,
-        ])
+        core_sets = Set{Symbol}(vcat(
+            [:periods, :dispatch_type, :activity_type, :process_type, :flexibility_type, :range_type,
+             :profile_typeRead, :sectors, :sectors_kev, :nodes, :energy_labels,
+             :activities_original, :hours_orig, :tech_balancers, :tech_infra],
+            _TECH_SUBSET_FIELDS, _INFRA_SUBSET_FIELDS, _ACTIVITIES_SUBSET_FIELDS, _NODES_SUBSET_FIELDS,
+        ))
         core_params = Set{Symbol}([
             :scenario_description, :base_year, :XC_TransmissionLoss_global, :baseload_treshold,
             :shedding_inLoad, :social_discount_rate, :ActiveConstraintSet,
@@ -307,22 +308,44 @@ function _write_input_table!(con, df, table_name::AbstractString, written::Vecto
     end
     df = _parquet_compatible_table(df)
 
-    # Tier 1: PRIMARY KEY + all FOREIGN KEYs.
-    if pk !== nothing || !isempty(fks)
+    # Validate each FK independently against the (already-written) referenced
+    # table, dropping only the ones with an orphan value — a single bad
+    # reference (e.g. one activity tagged with an activity_type not in the
+    # enum) must not also cost the table's *other*, perfectly valid FKs.
+    valid_fks = Tuple{Symbol,String,String}[]
+    for (col, ref_table, ref_col) in fks
+        orphans = try
+            _fk_orphan_values(con, df, col, ref_table, ref_col)
+        catch err
+            @warn "write_input_tables_duckdb!: failed to validate foreign key, dropping it" table_name col ref_table ref_col err = err
+            push!(mismatches, "table=$(table_name): could not validate FK $(col) -> $(ref_table).$(ref_col), dropped — $(_error_text(err))")
+            continue
+        end
+        if isempty(orphans)
+            push!(valid_fks, (col, ref_table, ref_col))
+        else
+            shown = join((repr(v) for v in first(orphans, 5)), ", ")
+            more = length(orphans) > 5 ? " (+$(length(orphans) - 5) more)" : ""
+            push!(mismatches, "table=$(table_name): FK $(col) -> $(ref_table).$(ref_col) dropped — $(length(orphans)) value(s) not found: $(shown)$(more)")
+        end
+    end
+
+    # Tier 1: PRIMARY KEY + validated FOREIGN KEYs.
+    if pk !== nothing || !isempty(valid_fks)
         try
-            _create_constrained_table!(con, df, table_name; pk = pk, fks = fks)
+            _create_constrained_table!(con, df, table_name; pk = pk, fks = valid_fks)
             push!(written, table_name)
             return nothing
         catch err
             @warn "write_input_tables_duckdb!: constrained create failed for table, retrying without foreign keys" table_name err = err
-            push!(mismatches, "table=$(table_name): foreign key constraint(s) $(fks) failed, table kept without them — $(_error_text(err))")
+            push!(mismatches, "table=$(table_name): PRIMARY KEY create with validated FK(s) still failed, retrying without foreign keys — $(_error_text(err))")
         end
     end
 
-    # Tier 2: PRIMARY KEY only. A single bad FK value (data-quality issue, not a
-    # schema bug) must not cost this table its PK too — every other table's FK
+    # Tier 2: PRIMARY KEY only. A bad PK (e.g. genuine duplicate rows) must not
+    # cost this table its FKs' *targets* either — every other table's FK
     # pointing *at* this one depends on that PK existing.
-    if pk !== nothing && !isempty(fks)
+    if pk !== nothing && !isempty(valid_fks)
         try
             _create_constrained_table!(con, df, table_name; pk = pk, fks = Tuple{Symbol,String,String}[])
             push!(written, table_name)
@@ -345,6 +368,22 @@ function _write_input_table!(con, df, table_name::AbstractString, written::Vecto
 end
 
 _error_text(err) = sprint(showerror, err)
+
+# Values in `df[!, col]` that don't appear in `ref_table.ref_col` (ignoring
+# missing/NULL, which FK constraints always permit). Empty result means the
+# FK is safe to declare.
+function _fk_orphan_values(con, df::DataFrames.DataFrame, col::Symbol, ref_table::AbstractString, ref_col::AbstractString)
+    ref_df = _duckdb_query_df(con, "SELECT DISTINCT $(_duckdb_quote_identifier(ref_col)) AS v FROM $(_duckdb_quote_identifier(ref_table))")
+    ref_keys = Set(skipmissing(ref_df.v))
+    orphans = Any[]
+    seen = Set{Any}()
+    for v in df[!, col]
+        (ismissing(v) || v in ref_keys || v in seen) && continue
+        push!(seen, v)
+        push!(orphans, v)
+    end
+    return orphans
+end
 
 function _create_constrained_table!(con, df::DataFrames.DataFrame, table_name::AbstractString;
                                      pk::Union{Nothing,Vector{Symbol}}, fks::Vector{<:Tuple})
@@ -411,6 +450,54 @@ function _seq_df(colname::Symbol, values::AbstractVector)
     df = DataFrames.DataFrame()
     df[!, colname] = _coerce_input_column(values)
     df[!, :seq] = collect(0:length(values)-1)
+    return df
+end
+
+# ============================================================================
+# Derived-subset membership columns
+#
+# Most ModelSets fields beyond the core entity lists are *derived subsets* of
+# one — e.g. tech_flexible/tech_fStorage/tech_hourlyCHPflex are all "is this
+# tech_balancer id a member of this category" flags, not raw data of their
+# own. Rather than emit ~50 separate one-column tables for these, fold each
+# into a boolean column on the entity's own wide table (technologies /
+# infrastructure / activities / nodes), matching IESA-Sim's flat-table shape
+# instead of scattering membership flags across dozens of tiny tables.
+# ============================================================================
+
+const _TECH_SUBSET_FIELDS = Symbol[
+    :tech_hourlyDispatch, :tech_dailyDispatch, :tech_flexible, :tech_fStorage, :tech_fEV,
+    :tech_fEVcharging, :tech_fEVgrid, :tech_fDRshifting, :tech_fBEshifting, :tech_fWithBattery,
+    :tech_flexH, :tech_flexD, :tech_flexR, :tech_flexW, :tech_flexM, :tech_flexS, :tech_flexB,
+    :tech_flexY, :tech_flexLT, :tech_shedding, :tech_shedH, :tech_shedW, :tech_reservoir,
+    :tech_hourlyCHPflex, :tech_hourlyCHPflexH, :tech_hourlyCHPflexD, :tech_hourlyCHPflexW,
+    :tech_gasBuffer, :tech_emission, :tech_materialConversion,
+]
+const _INFRA_SUBSET_FIELDS = Symbol[:tech_infraH, :tech_infraD]
+const _ACTIVITIES_SUBSET_FIELDS = Symbol[
+    :activities_solve, :activities_hour, :activities_day, :activities_indirect, :activities_energy,
+    :activities_fixEnergy, :activities_balance, :activities_driver, :activities_year, :activities_target,
+    :activities_target_FeedStocks, :activities_target_Bunkers, :activities_materialConversion,
+    :activities_emission, :activities_emissionFix, :activities_energyNonFixed, :activities_emissionReport,
+    :activities_credits, :act_infraH, :act_infraD,
+]
+const _NODES_SUBSET_FIELDS = Symbol[:nodes_IEM]
+
+function _membership_colname(fieldname::Symbol)::Symbol
+    str = String(fieldname)
+    for prefix in ("tech_", "activities_", "act_", "nodes_")
+        if startswith(str, prefix)
+            return Symbol("is_" * str[length(prefix)+1:end])
+        end
+    end
+    return Symbol("is_" * str)
+end
+
+function _add_membership_columns!(df::DataFrames.DataFrame, ids::Vector{Symbol}, s::ModelSets, fields::Vector{Symbol})
+    for f in fields
+        members = Set(getfield(s, f))
+        df[!, _membership_colname(f)] = [t in members for t in ids]
+    end
     return df
 end
 
@@ -553,6 +640,7 @@ function _nodes_df(s::ModelSets, p::ModelParams)
     df[!, :seq] = collect(0:length(s.nodes)-1)
     df[!, :name] = [haskey(p.namePer_node, n) ? String(p.namePer_node[n]) : missing for n in s.nodes]
     df[!, :iem_node] = [haskey(p.IEM_node, n) ? String(p.IEM_node[n]) : missing for n in s.nodes]
+    _add_membership_columns!(df, s.nodes, s, _NODES_SUBSET_FIELDS)
     return df
 end
 
@@ -628,6 +716,7 @@ function _activities_df(s::ModelSets, p::ModelParams)
     df[!, :emission_target_bin] = sym_col(p.emissionTarget_bin)
     df[!, :energy_label] = sym_col(p.labelPer_act)
     df[!, :act_change_max] = [get(p.actChange_maxOrig, a, missing) for a in ids]
+    _add_membership_columns!(df, ids, s, _ACTIVITIES_SUBSET_FIELDS)
     return df
 end
 
@@ -650,7 +739,7 @@ end
 # social_perception/perceived_complexity/subsidy_subject/feedin_subject/
 # stock_deploy/shedding_guarantee are agent-diffusion concepts with no
 # IESA-Opt.jl data and are omitted.
-function _tech_metadata_df(ids::Vector{Symbol}, p::ModelParams)
+function _tech_metadata_df(ids::Vector{Symbol}, s::ModelSets, p::ModelParams)
     isempty(ids) && return nothing
     sym_col(d) = [haskey(d, t) ? String(d[t]) : missing for t in ids]
     val_col(d) = [get(d, t, missing) for t in ids]
@@ -685,6 +774,7 @@ function _tech_metadata_df(ids::Vector{Symbol}, p::ModelParams)
     df[!, :buffer_capacity] = val_col(p.buffer_storage)
     df[!, :stock_initial] = val_col(p.techStock_exist)
     df[!, :change_max] = val_col(p.techChange_max)
+    _add_membership_columns!(df, ids, s, _TECH_SUBSET_FIELDS)
     return df
 end
 
@@ -716,7 +806,7 @@ function _tech_stocks_df(ids::Vector{Symbol}, periods::Vector{Int}, p::ModelPara
     return df
 end
 
-function _infra_metadata_df(ids::Vector{Symbol}, p::ModelParams)
+function _infra_metadata_df(ids::Vector{Symbol}, s::ModelSets, p::ModelParams)
     isempty(ids) && return nothing
     sym_col(d) = [haskey(d, t) ? String(d[t]) : missing for t in ids]
     val_col(d) = [get(d, t, missing) for t in ids]
@@ -737,6 +827,7 @@ function _infra_metadata_df(ids::Vector{Symbol}, p::ModelParams)
     df[!, :stock_initial] = val_col(p.techStock_exist)
     df[!, :change_max] = val_col(p.techChange_max)
     df[!, :infra_range] = sym_col(p.infra_range)
+    _add_membership_columns!(df, ids, s, _INFRA_SUBSET_FIELDS)
     return df
 end
 
