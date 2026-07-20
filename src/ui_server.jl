@@ -132,6 +132,12 @@ function _ui_handler(req::HTTP.Request)
     query = uri.query === nothing ? nothing : String(uri.query)
     method = String(req.method)
     try
+        if method == "GET" && path == "/health"
+            # Container liveness probe (docker-compose healthcheck) — deliberately
+            # outside /api/* so it stays reachable even if the API layer itself
+            # is unhealthy for some other reason.
+            return _json_response(Dict("status" => "ok"))
+        end
         if startswith(path, "/api/")
             return _api_response(method, path, query, req)
         end
