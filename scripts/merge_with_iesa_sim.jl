@@ -1,20 +1,36 @@
 #!/usr/bin/env julia
 # =============================================================================
 # merge_with_iesa_sim.jl — combine an IESA-Opt.jl input DuckDB with an
-# IESA-Sim (Python) input DuckDB into one merged database.
+# IESA-Sim (Python) input DuckDB into one merged database, with real
+# PRIMARY KEY / FOREIGN KEY constraints (not just unioned rows).
 #
-# The two models are genuinely different (IESA-Opt.jl is an optimization
-# model with CHP/flexibility/reservoir/emission-target detail; IESA-Sim is an
-# agent-diffusion simulation with agent/social-perception detail), so this
-# does not attempt to force byte-identical schemas. Instead, for each shared
+# Two things this needs that a plain `CREATE TABLE ... AS SELECT ...` can't
+# give you:
+#   1. DuckDB's CTAS syntax cannot carry PRIMARY KEY/FOREIGN KEY at all — same
+#      limitation input_tables.jl works around. So every merged table here is
+#      built as an explicit `CREATE TABLE (columns, PK, FK)` followed by
+#      `INSERT INTO ... SELECT`, not a bare CTAS.
+#   2. The two models' id domains overlap semantically (both are built from
+#      the same real activities/technologies, e.g. both have an activity
+#      literally named "Electricity demand - Residential") — so every key
+#      and every FK must include `model_source`, or rows from the two
+#      sources collide/cross-reference incorrectly. A naive PK on `id` alone
+#      would reject the second source's row as a duplicate.
+#
+# The two models are otherwise genuinely different (IESA-Opt.jl is an
+# optimization model with CHP/flexibility/reservoir/emission-target detail;
+# IESA-Sim is an agent-diffusion simulation with agent/social-perception
+# detail), so this does not attempt byte-identical schemas. For each shared
 # table it:
-#   - unions the columns that mean the same thing in both models, tagged
-#     with a `model_source` column ('IESA-Opt' / 'IESA-Sim') so merged rows
-#     stay distinguishable,
+#   - unions the columns that mean the same thing in both models,
 #   - reconciles the couple of genuine structural differences (IESA-Sim's
 #     wide `volumes_<year>` columns vs IESA-Opt.jl's long activity_volumes
 #     table; IESA-Sim's energy_balance/retrofittings having no period
 #     dimension at all) rather than dropping data on either side,
+#   - validates each candidate FK against the actual merged data first (the
+#     same known IESA-Opt.jl data-quality gaps — e.g. an activity_type of
+#     "Credits" not in the enum — apply here too) and drops just that one FK
+#     if it doesn't hold, exactly like input_tables.jl's per-column validation,
 #   - leaves model-specific columns/tables (agents, CHP, ...) out of the
 #     merged view — they remain queryable in the original two files, ATTACHed
 #     read-only alongside the merge output.
@@ -30,6 +46,7 @@
 # =============================================================================
 
 using DuckDB
+using DataFrames
 import DBInterface
 
 const REPO_ROOT = normpath(joinpath(@__DIR__, ".."))
@@ -45,6 +62,59 @@ isfile(sim_db) || error("IESA-Sim DB not found: $sim_db")
 isfile(out_db) && rm(out_db)
 mkpath(dirname(out_db))
 
+# ---------------------------------------------------------------------------
+# _create_merged_table!(con, name, select_sql; pk, fks)
+#
+# `select_sql` must already produce exactly the target column list (in
+# order), including `model_source`. `pk` is a Vector{String} of column names
+# or `nothing`. `fks` is a Vector of (cols::Vector{String}, ref_table::String,
+# ref_cols::Vector{String}) candidates — each is checked with an anti-join
+# against `select_sql` before being declared, and dropped (with a printed
+# reason) if any non-NULL child value has no match in the parent.
+# ---------------------------------------------------------------------------
+function _create_merged_table!(con, name::String, select_sql::String;
+                                pk::Union{Nothing,Vector{String}} = nothing,
+                                fks::Vector = Tuple{Vector{String},String,Vector{String}}[])
+    schema_df = DBInterface.execute(con, "SELECT * FROM ($(select_sql)) LIMIT 0") |> DataFrame
+    colnames = names(schema_df)
+
+    valid_fks = Tuple{Vector{String},String,Vector{String}}[]
+    for (cols, ref_table, ref_cols) in fks
+        join_cond = join(("c.\"$(a)\" = p.\"$(b)\"" for (a, b) in zip(cols, ref_cols)), " AND ")
+        notnull_cond = join(("c.\"$(a)\" IS NOT NULL" for a in cols), " AND ")
+        check_sql = """
+            SELECT COUNT(*) AS n FROM ($(select_sql)) c
+            LEFT JOIN $(ref_table) p ON $(join_cond)
+            WHERE $(notnull_cond) AND p."$(ref_cols[1])" IS NULL
+        """
+        n = (DBInterface.execute(con, check_sql) |> first)[1]
+        if n == 0
+            push!(valid_fks, (cols, ref_table, ref_cols))
+        else
+            println("  [$(name)] dropping FK $(cols) -> $(ref_table)$(ref_cols): $(n) orphan value(s)")
+        end
+    end
+
+    col_list_sql = join(("\"$(c)\"" for c in colnames), ", ")
+    constraints = String[]
+    pk !== nothing && push!(constraints, "PRIMARY KEY (" * join(("\"$(c)\"" for c in pk), ", ") * ")")
+    for (cols, ref_table, ref_cols) in valid_fks
+        push!(constraints, "FOREIGN KEY (" * join(("\"$(c)\"" for c in cols), ", ") * ") REFERENCES " *
+                            "$(ref_table)(" * join(("\"$(c)\"" for c in ref_cols), ", ") * ")")
+    end
+
+    # Column types come from the (already-typed) SELECT itself — describe the
+    # zero-row projection to get them without re-deriving each type by hand.
+    types_df = DBInterface.execute(con, "DESCRIBE SELECT * FROM ($(select_sql)) LIMIT 0") |> DataFrame
+    types = Dict{String,String}(row.column_name => row.column_type for row in eachrow(types_df))
+    cols_sql = join(("\"$(c)\" $(types[c])" for c in colnames), ",\n    ")
+
+    body = join(vcat([cols_sql], constraints), ",\n    ")
+    DBInterface.execute(con, "CREATE TABLE \"$(name)\" (\n    $(body)\n)")
+    DBInterface.execute(con, "INSERT INTO \"$(name)\" SELECT $(col_list_sql) FROM ($(select_sql))")
+    return nothing
+end
+
 con = DBInterface.connect(DuckDB.DB, out_db)
 try
     DBInterface.execute(con, "ATTACH '$(julia_db)' AS jl (READ_ONLY)")
@@ -52,80 +122,130 @@ try
 
     written = String[]
 
-    # ---- tables with an already-identical schema: straight UNION ALL -------
-    for t in ("technology_costs", "periods", "infrastructure_costs",
-              "hourly_profile_types", "hourly_profiles", "interconnectors", "price_profiles")
-        DBInterface.execute(con, """
-            CREATE TABLE $(t) AS
-            SELECT *, 'IESA-Opt' AS model_source FROM jl.$(t)
-            UNION ALL
-            SELECT *, 'IESA-Sim' AS model_source FROM sim.$(t)
-        """)
-        push!(written, t)
-    end
-
-    # technology_stocks: IESA-Opt.jl has extra use_min/use_max/no_new_invest/
-    # no_eco_decom columns IESA-Sim's reader never captures — union only the
-    # shared (tech_id, period, dec_planned, min, max).
-    DBInterface.execute(con, """
-        CREATE TABLE technology_stocks AS
-        SELECT tech_id, period, dec_planned, min, max, 'IESA-Opt' AS model_source FROM jl.technology_stocks
+    # ---- root reference tables (no FKs of their own) -----------------------
+    _create_merged_table!(con, "periods", """
+        SELECT 'IESA-Opt' AS model_source, * FROM jl.periods
         UNION ALL
-        SELECT tech_id, period, dec_planned, min, max, 'IESA-Sim' AS model_source FROM sim.technology_stocks
-    """)
-    push!(written, "technology_stocks")
+        SELECT 'IESA-Sim' AS model_source, * FROM sim.periods
+    """; pk = ["model_source", "period"])
+    push!(written, "periods")
 
-    # technologies / infrastructure: union only the columns present (and
-    # semantically equivalent) on both sides; IESA-Sim's lifetime is
-    # INTEGER, IESA-Opt.jl's economic-lifetime-derived `lifetime` is DOUBLE —
-    # cast to DOUBLE so the union doesn't need an implicit narrowing cast.
-    DBInterface.execute(con, """
-        CREATE TABLE technologies AS
-        SELECT id, seq, category, sector, subsector, name, unit, activity, cap2act,
-               CAST(lifetime AS DOUBLE) AS lifetime, hourly_profile,
-               shedding_capacity, shedding_limits,
-               flexibility_form, flexibility_capacity, flexibility_volume, flexibility_range,
-               flexibility_losses, flexibility_nonnegotiable,
-               buffer_up, buffer_down, buffer_capacity, stock_initial,
-               'IESA-Opt' AS model_source
-        FROM jl.technologies
+    _create_merged_table!(con, "hourly_profile_types", """
+        SELECT 'IESA-Opt' AS model_source, * FROM jl.hourly_profile_types
         UNION ALL
-        SELECT id, seq, category, sector, subsector, name, unit, activity, cap2act,
-               CAST(lifetime AS DOUBLE) AS lifetime, hourly_profile,
-               shedding_capacity, shedding_limits,
-               flexibility_form, flexibility_capacity, flexibility_volume, flexibility_range,
-               flexibility_losses, flexibility_nonnegotiable,
-               buffer_up, buffer_down, buffer_capacity, stock_initial,
-               'IESA-Sim' AS model_source
-        FROM sim.technologies
-    """)
-    push!(written, "technologies")
+        SELECT 'IESA-Sim' AS model_source, * FROM sim.hourly_profile_types
+    """; pk = ["model_source", "name"])
+    push!(written, "hourly_profile_types")
 
-    DBInterface.execute(con, """
-        CREATE TABLE infrastructure AS
-        SELECT id, seq, category, name, unit, activity, cap2act,
-               CAST(lifetime AS DOUBLE) AS lifetime, stock_initial, 'IESA-Opt' AS model_source
-        FROM jl.infrastructure
+    _create_merged_table!(con, "interconnectors", """
+        SELECT 'IESA-Opt' AS model_source, * FROM jl.interconnectors
         UNION ALL
-        SELECT id, seq, category, name, unit, activity, cap2act,
-               CAST(lifetime AS DOUBLE) AS lifetime, stock_initial, 'IESA-Sim' AS model_source
-        FROM sim.infrastructure
-    """)
-    push!(written, "infrastructure")
+        SELECT 'IESA-Sim' AS model_source, * FROM sim.interconnectors
+    """; pk = ["model_source", "id"])
+    push!(written, "interconnectors")
 
     # activities: after the rename in input_tables.jl, Name/UoA/Node/Target/
     # activity_resolution/activity_type/energy_label/seq match verbatim.
-    DBInterface.execute(con, """
-        CREATE TABLE activities AS
-        SELECT "Name", "UoA", activity_resolution, activity_type, "Node", "Target", energy_label, seq,
-               'IESA-Opt' AS model_source
+    _create_merged_table!(con, "activities", """
+        SELECT 'IESA-Opt' AS model_source, "Name", "UoA", activity_resolution, activity_type, "Node", "Target", energy_label, seq
         FROM jl.activities
         UNION ALL
-        SELECT "Name", "UoA", activity_resolution, activity_type, "Node", "Target", energy_label, seq,
-               'IESA-Sim' AS model_source
+        SELECT 'IESA-Sim' AS model_source, "Name", "UoA", activity_resolution, activity_type, "Node", "Target", energy_label, seq
         FROM sim.activities
-    """)
+    """; pk = ["model_source", "Name"])
     push!(written, "activities")
+
+    # ---- technologies / infrastructure (FK -> activities) ------------------
+    # IESA-Sim's lifetime is INTEGER, IESA-Opt.jl's economic-lifetime-derived
+    # `lifetime` is DOUBLE — cast to DOUBLE so the union doesn't need an
+    # implicit narrowing cast.
+    _create_merged_table!(con, "technologies", """
+        SELECT 'IESA-Opt' AS model_source, id, seq, category, sector, subsector, name, unit, activity, cap2act,
+               CAST(lifetime AS DOUBLE) AS lifetime, hourly_profile,
+               shedding_capacity, shedding_limits,
+               flexibility_form, flexibility_capacity, flexibility_volume, flexibility_range,
+               flexibility_losses, flexibility_nonnegotiable,
+               buffer_up, buffer_down, buffer_capacity, stock_initial
+        FROM jl.technologies
+        UNION ALL
+        SELECT 'IESA-Sim' AS model_source, id, seq, category, sector, subsector, name, unit, activity, cap2act,
+               CAST(lifetime AS DOUBLE) AS lifetime, hourly_profile,
+               shedding_capacity, shedding_limits,
+               flexibility_form, flexibility_capacity, flexibility_volume, flexibility_range,
+               flexibility_losses, flexibility_nonnegotiable,
+               buffer_up, buffer_down, buffer_capacity, stock_initial
+        FROM sim.technologies
+    """; pk = ["model_source", "id"], fks = [
+        (["model_source", "activity"], "activities", ["model_source", "Name"]),
+        (["model_source", "hourly_profile"], "hourly_profile_types", ["model_source", "name"]),
+    ])
+    push!(written, "technologies")
+
+    _create_merged_table!(con, "infrastructure", """
+        SELECT 'IESA-Opt' AS model_source, id, seq, category, name, unit, activity, cap2act,
+               CAST(lifetime AS DOUBLE) AS lifetime, stock_initial
+        FROM jl.infrastructure
+        UNION ALL
+        SELECT 'IESA-Sim' AS model_source, id, seq, category, name, unit, activity, cap2act,
+               CAST(lifetime AS DOUBLE) AS lifetime, stock_initial
+        FROM sim.infrastructure
+    """; pk = ["model_source", "id"], fks = [
+        (["model_source", "activity"], "activities", ["model_source", "Name"]),
+    ])
+    push!(written, "infrastructure")
+
+    # ---- per-period fact tables (FK -> technologies/infrastructure/periods) --
+    # technology_stocks: IESA-Opt.jl has extra use_min/use_max/no_new_invest/
+    # no_eco_decom columns IESA-Sim's reader never captures — union only the
+    # shared (tech_id, period, dec_planned, min, max).
+    _create_merged_table!(con, "technology_stocks", """
+        SELECT 'IESA-Opt' AS model_source, tech_id, period, dec_planned, min, max FROM jl.technology_stocks
+        UNION ALL
+        SELECT 'IESA-Sim' AS model_source, tech_id, period, dec_planned, min, max FROM sim.technology_stocks
+    """; pk = ["model_source", "tech_id", "period"], fks = [
+        (["model_source", "tech_id"], "technologies", ["model_source", "id"]),
+        (["model_source", "period"], "periods", ["model_source", "period"]),
+    ])
+    push!(written, "technology_stocks")
+
+    _create_merged_table!(con, "technology_costs", """
+        SELECT 'IESA-Opt' AS model_source, * FROM jl.technology_costs
+        UNION ALL
+        SELECT 'IESA-Sim' AS model_source, * FROM sim.technology_costs
+    """; pk = ["model_source", "tech_id", "period"], fks = [
+        (["model_source", "tech_id"], "technologies", ["model_source", "id"]),
+        (["model_source", "period"], "periods", ["model_source", "period"]),
+    ])
+    push!(written, "technology_costs")
+
+    _create_merged_table!(con, "infrastructure_costs", """
+        SELECT 'IESA-Opt' AS model_source, * FROM jl.infrastructure_costs
+        UNION ALL
+        SELECT 'IESA-Sim' AS model_source, * FROM sim.infrastructure_costs
+    """; pk = ["model_source", "infra_id", "period"], fks = [
+        (["model_source", "infra_id"], "infrastructure", ["model_source", "id"]),
+        (["model_source", "period"], "periods", ["model_source", "period"]),
+    ])
+    push!(written, "infrastructure_costs")
+
+    _create_merged_table!(con, "hourly_profiles", """
+        SELECT 'IESA-Opt' AS model_source, * FROM jl.hourly_profiles
+        UNION ALL
+        SELECT 'IESA-Sim' AS model_source, * FROM sim.hourly_profiles
+    """; pk = ["model_source", "hour", "profile_type"], fks = [
+        (["model_source", "profile_type"], "hourly_profile_types", ["model_source", "name"]),
+    ])
+    push!(written, "hourly_profiles")
+
+    _create_merged_table!(con, "price_profiles", """
+        SELECT 'IESA-Opt' AS model_source, * FROM jl.price_profiles
+        UNION ALL
+        SELECT 'IESA-Sim' AS model_source, * FROM sim.price_profiles
+    """; pk = ["model_source", "hour", "interconnector_id", "period"], fks = [
+        (["model_source", "interconnector_id"], "interconnectors", ["model_source", "id"]),
+        (["model_source", "period"], "periods", ["model_source", "period"]),
+    ])
+    push!(written, "price_profiles")
 
     # activity_volumes: IESA-Sim stores volumes as wide volumes_<year> columns
     # (hardcoded to its own scenario's period set); IESA-Opt.jl stores them
@@ -133,55 +253,64 @@ try
     # scenarios with *different* period sets — so IESA-Sim's wide columns are
     # unpivoted to match, not the other way around.
     sim_volume_cols = DBInterface.execute(con,
-        "SELECT column_name FROM information_schema.columns WHERE table_catalog='sim' AND table_name='activities' AND column_name LIKE 'volumes\\_%' ESCAPE '\\'"
+        "SELECT column_name FROM information_schema.columns WHERE table_catalog='sim' AND table_name='activities' AND column_name LIKE 'volumes\\_%' ESCAPE '\\' ORDER BY column_name"
     ) |> x -> [row[1] for row in x]
-    if isempty(sim_volume_cols)
-        @warn "merge_with_iesa_sim: no volumes_<year> columns found on sim.activities, skipping activity_volumes union"
-        DBInterface.execute(con, """
-            CREATE TABLE activity_volumes AS
-            SELECT activity_name, period, value, 'IESA-Opt' AS model_source FROM jl.activity_volumes
-        """)
+    sim_volumes_select = if isempty(sim_volume_cols)
+        @warn "merge_with_iesa_sim: no volumes_<year> columns found on sim.activities, activity_volumes will only have IESA-Opt rows"
+        "SELECT CAST(NULL AS VARCHAR) AS activity_name, CAST(NULL AS INTEGER) AS period, CAST(NULL AS DOUBLE) AS value WHERE FALSE"
     else
-        unpivot_parts = [
-            "SELECT \"Name\" AS activity_name, $(parse(Int, replace(c, "volumes_" => ""))) AS period, $(c) AS value FROM sim.activities WHERE $(c) IS NOT NULL"
-            for c in sim_volume_cols
-        ]
-        sim_volumes_sql = join(unpivot_parts, " UNION ALL ")
-        DBInterface.execute(con, """
-            CREATE TABLE activity_volumes AS
-            SELECT activity_name, period, value, 'IESA-Opt' AS model_source FROM jl.activity_volumes
-            UNION ALL
-            SELECT activity_name, period, value, 'IESA-Sim' AS model_source FROM ($(sim_volumes_sql))
-        """)
+        join(
+            ["SELECT \"Name\" AS activity_name, $(parse(Int, replace(c, "volumes_" => ""))) AS period, $(c) AS value FROM sim.activities WHERE $(c) IS NOT NULL"
+             for c in sim_volume_cols],
+            " UNION ALL ",
+        )
     end
+    _create_merged_table!(con, "activity_volumes", """
+        SELECT 'IESA-Opt' AS model_source, activity_name, period, value FROM jl.activity_volumes
+        UNION ALL
+        SELECT 'IESA-Sim' AS model_source, activity_name, period, value FROM ($(sim_volumes_select))
+    """; pk = ["model_source", "activity_name", "period"], fks = [
+        (["model_source", "activity_name"], "activities", ["model_source", "Name"]),
+        (["model_source", "period"], "periods", ["model_source", "period"]),
+    ])
     push!(written, "activity_volumes")
 
     # energy_balance / retrofittings: IESA-Sim's reader never captured a
     # period dimension (single snapshot); rather than fabricate one, its rows
-    # get period = NULL ("applies to all periods / not period-resolved"),
-    # unioned alongside IESA-Opt.jl's real per-period rows.
-    DBInterface.execute(con, """
-        CREATE TABLE energy_balance AS
-        SELECT tech_id, activity_name, period, value, 'IESA-Opt' AS model_source FROM jl.energy_balance
+    # get period = NULL. That also means neither table can carry a PK
+    # spanning period (PRIMARY KEY columns can't hold NULL, and IESA-Opt.jl's
+    # own rows repeat the same (tech_id, activity_name)/(from_tech, to_tech)
+    # once per period) — these stay keyless fact tables, same as e.g.
+    # IESA-Sim's own `population`/`criteria_weights`, but keep their FKs.
+    _create_merged_table!(con, "energy_balance", """
+        SELECT 'IESA-Opt' AS model_source, tech_id, activity_name, period, value FROM jl.energy_balance
         UNION ALL
-        SELECT tech_id, activity_name, CAST(NULL AS INTEGER) AS period, value, 'IESA-Sim' AS model_source FROM sim.energy_balance
-    """)
+        SELECT 'IESA-Sim' AS model_source, tech_id, activity_name, CAST(NULL AS INTEGER) AS period, value FROM sim.energy_balance
+    """; fks = [
+        (["model_source", "tech_id"], "technologies", ["model_source", "id"]),
+        (["model_source", "activity_name"], "activities", ["model_source", "Name"]),
+        (["model_source", "period"], "periods", ["model_source", "period"]),
+    ])
     push!(written, "energy_balance")
 
-    DBInterface.execute(con, """
-        CREATE TABLE retrofittings AS
-        SELECT from_tech, to_tech, period, cost, 'IESA-Opt' AS model_source FROM jl.retrofittings
+    _create_merged_table!(con, "retrofittings", """
+        SELECT 'IESA-Opt' AS model_source, from_tech, to_tech, period, cost FROM jl.retrofittings
         UNION ALL
-        SELECT from_tech, to_tech, CAST(NULL AS INTEGER) AS period, cost, 'IESA-Sim' AS model_source FROM sim.retrofittings
-    """)
+        SELECT 'IESA-Sim' AS model_source, from_tech, to_tech, CAST(NULL AS INTEGER) AS period, cost FROM sim.retrofittings
+    """; fks = [
+        (["model_source", "from_tech"], "technologies", ["model_source", "id"]),
+        (["model_source", "to_tech"], "technologies", ["model_source", "id"]),
+        (["model_source", "period"], "periods", ["model_source", "period"]),
+    ])
     push!(written, "retrofittings")
 
     DBInterface.execute(con, "DETACH jl")
     DBInterface.execute(con, "DETACH sim")
 
+    println()
     println("Merged tables written to $(out_db):")
     for t in written
-        n = DBInterface.execute(con, "SELECT COUNT(*) AS n FROM $(t)") |> x -> first(x)[1]
+        n = (DBInterface.execute(con, "SELECT COUNT(*) AS n FROM \"$(t)\"") |> first)[1]
         println("  $(t): $(n) rows")
     end
     println()
