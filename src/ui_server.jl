@@ -169,6 +169,8 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         return _json_response(_explorer_model_browser(_json_body(req)))
     elseif method == "POST" && path == "/api/explorer/inputAtlas"
         return _json_response(_explorer_input_atlas(_json_body(req)))
+    elseif method == "POST" && path == "/api/input"
+        return _json_response(_ui_upload_input!(req))
     elseif method == "POST" && path == "/api/run"
         config = _json_body(req)
         job_id = _start_ui_job!(config)
@@ -562,6 +564,41 @@ try {
         catch
         end
     end
+end
+
+# Container-facing counterpart to _browse_for_input_file: there is no native
+# file-picker dialog to open inside a Docker container, so callers (e.g. the
+# unified-project home page, running in the user's browser) upload the file
+# bytes over HTTP instead, and get back a server-side path they can then pass
+# as "inputWorkbook" to POST /api/run. Accepts .xlsx/.xlsm/.xls (parsed by
+# read_data) and .duckdb (parsed by the Phase 3 read_data_from_duckdb loader).
+const _UI_UPLOAD_EXTENSIONS = (".xlsx", ".xlsm", ".xls", ".duckdb")
+
+function _ui_uploads_dir()
+    dir = get(ENV, "IESAOPT_UPLOAD_DIR", joinpath(tempdir(), "iesaopt_uploads"))
+    mkpath(dir)
+    return dir
+end
+
+function _ui_upload_input!(req::HTTP.Request)
+    parts = HTTP.parse_multipart_form(req)
+    parts === nothing && error("Expected a multipart/form-data upload with one file part")
+    part = findfirst(p -> p.filename !== nothing, parts)
+    part === nothing && error("No file part found in upload")
+    upload = parts[part]
+
+    original_name = basename(String(upload.filename))
+    ext = lowercase(splitext(original_name)[2])
+    ext in _UI_UPLOAD_EXTENSIONS ||
+        error("Unsupported file type \"$(ext)\" — expected one of $(_UI_UPLOAD_EXTENSIONS)")
+
+    stamp = Dates.format(now(), "yyyymmdd_HHMMSS")
+    safe_base = replace(first(splitext(original_name)), r"[^A-Za-z0-9_.-]+" => "_")
+    dest = joinpath(_ui_uploads_dir(), "$(stamp)_$(safe_base)$(ext)")
+    open(dest, "w") do io
+        write(io, read(upload.data))
+    end
+    return Dict("file_name" => dest)
 end
 
 function _warm_default_workbook_cache!(input_workbook::AbstractString)
