@@ -709,11 +709,18 @@ function _activities_df(s::ModelSets, p::ModelParams)
     df = DataFrames.DataFrame()
     df[!, :Name] = String.(ids)
     df[!, :seq] = collect(0:length(ids)-1)
-    df[!, :unit] = sym_col(p.act_units)
+    # UoA/Node/Target match IESA-Sim's activities table verbatim (its own
+    # column names, taken straight from the shared "UoA"/"Node"/"Target"
+    # Excel headers) — everything else here has no IESA-Sim counterpart to
+    # align to and keeps its descriptive IESA-Opt.jl name.
+    df[!, :UoA] = sym_col(p.act_units)
     df[!, :activity_resolution] = sym_col(p.dispatchType_act)
     df[!, :activity_type] = sym_col(p.activityType_act)
-    df[!, :node] = sym_col(p.nodePer_act)
-    df[!, :emission_target_bin] = sym_col(p.emissionTarget_bin)
+    df[!, :Node] = sym_col(p.nodePer_act)
+    df[!, :Target] = [begin
+        raw = get(p.emissionTarget_bin, a, missing)
+        raw === missing ? missing : tryparse(Int, String(raw))
+    end for a in ids]
     df[!, :energy_label] = sym_col(p.labelPer_act)
     df[!, :act_change_max] = [get(p.actChange_maxOrig, a, missing) for a in ids]
     _add_membership_columns!(df, ids, s, _ACTIVITIES_SUBSET_FIELDS)
