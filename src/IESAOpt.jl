@@ -41,9 +41,11 @@ include("types.jl")
 # ---------------------------------------------------------------------------
 # Phase 1: data layer
 include("column_names.jl")
+include("column_names_iesa_sim.jl")
 include("data_reading.jl")
 include("data_cache.jl")
 include("input_tables.jl")
+include("compat_check.jl")
 include("sets.jl")
 include("parameters.jl")
 include("data_writing.jl")
@@ -119,6 +121,8 @@ export ModelSets, ModelParams, ModelData, RunResult
 export read_data, derive_sets!, compute_derived_params!
 export read_data_cached, clear_data_cache
 export write_input_tables_duckdb!
+export check_file_compatibility, check_iesa_opt_excel_compatibility
+export check_iesa_sim_excel_compatibility, check_duckdb_compatibility
 export compute_temporal_helpers!, compute_period_indicators!
 export compute_financial_params!, compute_investment_matrices!
 export compute_activity_balances!, compute_chp_eps!, compute_activity_indicators!

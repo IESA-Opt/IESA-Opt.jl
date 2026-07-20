@@ -589,6 +589,15 @@ function _col_by_header(header_texts::Vector{String}, name::AbstractString)::Int
 end
 
 """
+    _col_by_header_or_nothing(header_texts, name) -> Union{Int,Nothing}
+
+Non-throwing sibling of `_col_by_header`, for compatibility probing
+(`compat_check.jl`) where a missing header is a result to report, not a
+reader-breaking error.
+"""
+_col_by_header_or_nothing(header_texts::Vector{String}, name::AbstractString) = findfirst(==(name), header_texts)
+
+"""
     _hcol(header_texts, name) -> String
 
 Like `_col_by_header`, but returns the Excel column letter — the form the
