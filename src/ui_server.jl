@@ -176,6 +176,15 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         return _json_response(_explorer_input_atlas(_json_body(req)))
     elseif method == "POST" && path == "/api/input"
         return _json_response(_ui_upload_input!(req))
+    elseif method == "POST" && path == "/api/checkFile"
+        return _json_response(_ui_check_file!(req))
+    elseif method == "POST" && path == "/api/excelToDuckdb"
+        return _json_response(_ui_start_excel_to_duckdb_job!(req); status = 202)
+    elseif method == "GET" && startswith(path, "/api/files/")
+        parts = _url_parts(path)
+        if length(parts) == 4 && parts[4] == "download"
+            return _ui_download_job_file(parts[3])
+        end
     elseif method == "POST" && path == "/api/run"
         config = _json_body(req)
         job_id = _start_ui_job!(config)
@@ -604,6 +613,93 @@ function _ui_upload_input!(req::HTTP.Request)
         write(io, read(upload.data))
     end
     return Dict("file_name" => dest)
+end
+
+# =============================================================================
+# Stateless file-analysis endpoints — POST /api/checkFile, POST
+# /api/excelToDuckdb, GET /api/files/{jobId}/download.
+#
+# Unlike the data-merge wizard above (a multi-step session keyed on a
+# native-file-browser path, built for the desktop dashboard), these are
+# single-shot calls a plain browser upload can drive directly: save the
+# upload, run the existing check/parse machinery, hand back a report or a
+# job id. No session state, no gap-model detection — the unified-project
+# frontend already knows which upload is meant to be the Sim side vs the
+# OPT side and only needs a yes/no per file plus a way to get a DuckDB out
+# of an Opt-shaped Excel workbook.
+# =============================================================================
+
+"""
+    _ui_check_file!(req) -> Dict
+
+Save the uploaded file and run `check_file_compatibility` on it — a fast
+sheet/header presence probe (not a full parse), same one the merge wizard
+uses. Works for `.xlsx`/`.xlsm`/`.xls` or `.duckdb` input.
+"""
+function _ui_check_file!(req::HTTP.Request)
+    upload = _ui_upload_input!(req)
+    return check_file_compatibility(String(upload["file_name"]))
+end
+
+function _run_excel_to_duckdb_job!(job_id::String, xlsx_path::String, out_path::String)
+    _job_update!(job_id; status = "running", stage = "reading", message = "Reading $(xlsx_path)")
+    try
+        md = read_data_cached(xlsx_path)
+        _job_update!(job_id; stage = "writing", message = "Writing relational tables to $(out_path)")
+        write_input_tables_duckdb!(md, out_path)
+        _job_update!(job_id; status = "done", stage = "done", message = "Conversion complete",
+                     extra = Dict{String,Any}("outputPath" => out_path))
+    catch err
+        _job_update!(job_id; status = "error", stage = "error", message = "Conversion failed: $(sprint(showerror, err))")
+    end
+    return nothing
+end
+
+"""
+    _ui_start_excel_to_duckdb_job!(req) -> Dict
+
+Save an uploaded IESA-Opt-shaped Excel workbook and start a background job
+that parses it (`read_data_cached`) and writes it out as a relational DuckDB
+(`write_input_tables_duckdb!`) — the same conversion `read_data`/merge-wizard
+callers already rely on, just exposed as its own job so a plain upload can
+get a downloadable DuckDB back without going through the stateful merge
+session. Poll with the existing `GET /api/jobs/{id}`; download the result
+from `GET /api/files/{id}/download` once done.
+"""
+function _ui_start_excel_to_duckdb_job!(req::HTTP.Request)
+    upload = _ui_upload_input!(req)
+    xlsx_path = String(upload["file_name"])
+    ext = lowercase(splitext(xlsx_path)[2])
+    ext in (".xlsx", ".xlsm", ".xls") ||
+        error("excelToDuckdb expects an Excel workbook (.xlsx/.xlsm/.xls), got \"$(ext)\"")
+
+    stamp = Dates.format(now(), "yyyymmdd_HHMMSS")
+    out_path = joinpath(_ui_uploads_dir(), "$(stamp)_$(randstring(6))_converted.duckdb")
+
+    job_id = _merge_start_job!()
+    task = Base.Threads.@spawn _run_excel_to_duckdb_job!(job_id, xlsx_path, out_path)
+    lock(UI_JOBS_LOCK)
+    try
+        UI_TASKS[job_id] = task
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    return Dict("ok" => true, "jobId" => job_id)
+end
+
+"""
+    _ui_download_job_file(job_id) -> HTTP.Response
+
+Serve the file at a completed job's `outputPath` (set by
+`_ui_start_excel_to_duckdb_job!`'s runner, or the merge wizard's own save
+job) as a raw byte-stream download.
+"""
+function _ui_download_job_file(job_id::AbstractString)
+    snap = _job_snapshot(job_id)
+    path = String(get(snap, "outputPath", ""))
+    isempty(path) && error("Job $(job_id) has no downloadable output (yet)")
+    isfile(path) || error("Output file no longer exists: $(path)")
+    return _file_response(path, "application/octet-stream")
 end
 
 function _warm_default_workbook_cache!(input_workbook::AbstractString)
