@@ -42,35 +42,57 @@ const _IESA_OPT_SIM_SHARED_TABLES = [
      opt_select = "SELECT id, name FROM opt.interconnectors",
      sim_select = "SELECT id, name FROM sim.interconnectors"),
 
+    # act_change_max has no IESA-Sim counterpart (IESA-Opt.jl-only concept,
+    # like technologies'/infrastructure's WACC/lifetime/process_type fields
+    # below) — cast NULL on the sim side so read_data_from_duckdb's full
+    # column list (input_tables.jl's _activities_df) still resolves against
+    # a merged table, not just a plain write_input_tables_duckdb! output.
     (name = "activities", key = ["Name"], pk = ["Name"], fks = Tuple{Vector{String},String,Vector{String}}[],
-     opt_select = "SELECT \"Name\", \"UoA\", activity_resolution, activity_type, \"Node\", \"Target\", energy_label, seq FROM opt.activities",
-     sim_select = "SELECT \"Name\", \"UoA\", activity_resolution, activity_type, \"Node\", \"Target\", energy_label, seq FROM sim.activities"),
+     opt_select = "SELECT \"Name\", \"UoA\", activity_resolution, activity_type, \"Node\", \"Target\", energy_label, seq, act_change_max FROM opt.activities",
+     sim_select = "SELECT \"Name\", \"UoA\", activity_resolution, activity_type, \"Node\", \"Target\", energy_label, seq, CAST(NULL AS DOUBLE) AS act_change_max FROM sim.activities"),
 
+    # sector_kev/wacc/construction_time/technical_lifetime/salvage_value/
+    # ramping/process_type/change_max have no IESA-Sim counterpart (see
+    # input_tables.jl's _tech_metadata_df comment) — cast NULL on the sim
+    # side, same reasoning as activities.act_change_max above.
     (name = "technologies", key = ["id"], pk = ["id"],
      fks = [(["activity"], "activities", ["Name"]), (["hourly_profile"], "hourly_profile_types", ["name"])],
      opt_select = """
-        SELECT id, seq, category, sector, subsector, name, unit, activity, cap2act,
-               CAST(lifetime AS DOUBLE) AS lifetime, hourly_profile,
+        SELECT id, seq, category, sector, subsector, sector_kev, name, unit, activity, cap2act, wacc,
+               construction_time, CAST(lifetime AS DOUBLE) AS lifetime, technical_lifetime, salvage_value,
+               ramping, process_type, hourly_profile,
                shedding_capacity, shedding_limits,
                flexibility_form, flexibility_capacity, flexibility_volume, flexibility_range,
                flexibility_losses, flexibility_nonnegotiable,
-               buffer_up, buffer_down, buffer_capacity, stock_initial
+               buffer_up, buffer_down, buffer_capacity, stock_initial, change_max
         FROM opt.technologies""",
      sim_select = """
-        SELECT id, seq, category, sector, subsector, name, unit, activity, cap2act,
-               CAST(lifetime AS DOUBLE) AS lifetime, hourly_profile,
+        SELECT id, seq, category, sector, subsector, CAST(NULL AS VARCHAR) AS sector_kev, name, unit, activity, cap2act,
+               CAST(NULL AS DOUBLE) AS wacc, CAST(NULL AS DOUBLE) AS construction_time,
+               CAST(lifetime AS DOUBLE) AS lifetime, CAST(NULL AS DOUBLE) AS technical_lifetime,
+               CAST(NULL AS DOUBLE) AS salvage_value, CAST(NULL AS DOUBLE) AS ramping,
+               CAST(NULL AS VARCHAR) AS process_type, hourly_profile,
                shedding_capacity, shedding_limits,
                flexibility_form, flexibility_capacity, flexibility_volume, flexibility_range,
                flexibility_losses, flexibility_nonnegotiable,
-               buffer_up, buffer_down, buffer_capacity, stock_initial
+               buffer_up, buffer_down, buffer_capacity, stock_initial, CAST(NULL AS DOUBLE) AS change_max
         FROM sim.technologies"""),
 
+    # sector/subsector/sector_kev/wacc/technical_lifetime/salvage_value/
+    # change_max/infra_range have no IESA-Sim counterpart — same NULL-cast
+    # treatment as technologies above.
     (name = "infrastructure", key = ["id"], pk = ["id"], fks = [(["activity"], "activities", ["Name"])],
      opt_select = """
-        SELECT id, seq, category, name, unit, activity, cap2act, CAST(lifetime AS DOUBLE) AS lifetime, stock_initial
+        SELECT id, seq, category, sector, subsector, sector_kev, name, unit, activity, cap2act, wacc,
+               CAST(lifetime AS DOUBLE) AS lifetime, technical_lifetime, salvage_value, stock_initial,
+               change_max, infra_range
         FROM opt.infrastructure""",
      sim_select = """
-        SELECT id, seq, category, name, unit, activity, cap2act, CAST(lifetime AS DOUBLE) AS lifetime, stock_initial
+        SELECT id, seq, category, CAST(NULL AS VARCHAR) AS sector, CAST(NULL AS VARCHAR) AS subsector,
+               CAST(NULL AS VARCHAR) AS sector_kev, name, unit, activity, cap2act, CAST(NULL AS DOUBLE) AS wacc,
+               CAST(lifetime AS DOUBLE) AS lifetime, CAST(NULL AS DOUBLE) AS technical_lifetime,
+               CAST(NULL AS DOUBLE) AS salvage_value, stock_initial,
+               CAST(NULL AS DOUBLE) AS change_max, CAST(NULL AS VARCHAR) AS infra_range
         FROM sim.infrastructure"""),
 
     (name = "technology_costs", key = ["tech_id", "period"], pk = ["tech_id", "period"],
@@ -78,10 +100,17 @@ const _IESA_OPT_SIM_SHARED_TABLES = [
      opt_select = "SELECT tech_id, period, investment, fom, vom FROM opt.technology_costs",
      sim_select = "SELECT tech_id, period, investment, fom, vom FROM sim.technology_costs"),
 
+    # use_min/use_max/no_new_invest/no_eco_decom have no IESA-Sim counterpart.
     (name = "technology_stocks", key = ["tech_id", "period"], pk = ["tech_id", "period"],
      fks = [(["tech_id"], "technologies", ["id"]), (["period"], "periods", ["period"])],
-     opt_select = "SELECT tech_id, period, dec_planned, min, max FROM opt.technology_stocks",
-     sim_select = "SELECT tech_id, period, dec_planned, min, max FROM sim.technology_stocks"),
+     opt_select = """
+        SELECT tech_id, period, dec_planned, min, max, use_min, use_max, no_new_invest, no_eco_decom
+        FROM opt.technology_stocks""",
+     sim_select = """
+        SELECT tech_id, period, dec_planned, min, max,
+               CAST(NULL AS DOUBLE) AS use_min, CAST(NULL AS DOUBLE) AS use_max,
+               CAST(NULL AS BOOLEAN) AS no_new_invest, CAST(NULL AS BOOLEAN) AS no_eco_decom
+        FROM sim.technology_stocks"""),
 
     (name = "infrastructure_costs", key = ["infra_id", "period"], pk = ["infra_id", "period"],
      fks = [(["infra_id"], "infrastructure", ["id"]), (["period"], "periods", ["period"])],
