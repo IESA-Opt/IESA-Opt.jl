@@ -33,6 +33,16 @@ function compute_derived_params!(md::ModelData)
     compute_financial_params!(md)
     compute_investment_matrices!(md)
     _resolve_activity_names!(md)
+    # tech_materialConversion/act_infraH/act_infraD (sets.jl) read
+    # p.activityPer_tech/p.infra_activity, which _resolve_activity_names!
+    # (above) just populated — but derive_sets! (called before
+    # compute_derived_params! by every caller: read_data, read_data_from_duckdb)
+    # computes them earlier, while those dicts were still at their default-
+    # empty state. Re-run them now that the real values exist; both are
+    # idempotent, so this simply replaces an incorrect (empty) first pass with
+    # the correct one rather than double-counting anything.
+    _derive_tech_materialConversion!(md.sets, md.params)
+    _derive_infra_subsets!(md.sets, md.params)
     _derive_profile_and_node_maps!(md)
     compute_activity_balances!(md)
     _resolve_hourly_profiles_fh!(md)
