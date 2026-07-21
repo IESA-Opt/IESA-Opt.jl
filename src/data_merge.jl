@@ -47,7 +47,9 @@ const _IESA_OPT_SIM_SHARED_TABLES = [
     # below) — cast NULL on the sim side so read_data_from_duckdb's full
     # column list (input_tables.jl's _activities_df) still resolves against
     # a merged table, not just a plain write_input_tables_duckdb! output.
-    (name = "activities", key = ["Name"], pk = ["Name"], fks = Tuple{Vector{String},String,Vector{String}}[],
+    (name = "activities", key = ["Name"], pk = ["Name"],
+     fks = [(["activity_type"], "activity_types", ["activity_type"]), (["energy_label"], "energy_labels", ["labels"]),
+            (["Node"], "nodes", ["node"]), (["activity_resolution"], "dispatch_types", ["dispatch_type"])],
      opt_select = "SELECT \"Name\", \"UoA\", activity_resolution, activity_type, \"Node\", \"Target\", energy_label, seq, act_change_max FROM opt.activities",
      sim_select = "SELECT \"Name\", \"UoA\", activity_resolution, activity_type, \"Node\", \"Target\", energy_label, seq, CAST(NULL AS DOUBLE) AS act_change_max FROM sim.activities"),
 
@@ -56,7 +58,11 @@ const _IESA_OPT_SIM_SHARED_TABLES = [
     # input_tables.jl's _tech_metadata_df comment) — cast NULL on the sim
     # side, same reasoning as activities.act_change_max above.
     (name = "technologies", key = ["id"], pk = ["id"],
-     fks = [(["activity"], "activities", ["Name"]), (["hourly_profile"], "hourly_profile_types", ["name"])],
+     fks = [(["activity"], "activities", ["Name"]), (["hourly_profile"], "hourly_profile_types", ["name"]),
+            (["process_type"], "process_types", ["process_type"]),
+            (["flexibility_form"], "flexibility_types", ["flexibility_type"]),
+            (["flexibility_range"], "range_types", ["range_type"]),
+            (["sector"], "sectors", ["sectors"]), (["sector_kev"], "sectors_kev", ["sector_kev"])],
      opt_select = """
         SELECT id, seq, category, sector, subsector, sector_kev, name, unit, activity, cap2act, wacc,
                construction_time, CAST(lifetime AS DOUBLE) AS lifetime, technical_lifetime, salvage_value,
@@ -81,7 +87,9 @@ const _IESA_OPT_SIM_SHARED_TABLES = [
     # sector/subsector/sector_kev/wacc/technical_lifetime/salvage_value/
     # change_max/infra_range have no IESA-Sim counterpart — same NULL-cast
     # treatment as technologies above.
-    (name = "infrastructure", key = ["id"], pk = ["id"], fks = [(["activity"], "activities", ["Name"])],
+    (name = "infrastructure", key = ["id"], pk = ["id"],
+     fks = [(["activity"], "activities", ["Name"]), (["infra_range"], "range_types", ["range_type"]),
+            (["sector"], "sectors", ["sectors"]), (["sector_kev"], "sectors_kev", ["sector_kev"])],
      opt_select = """
         SELECT id, seq, category, sector, subsector, sector_kev, name, unit, activity, cap2act, wacc,
                CAST(lifetime AS DOUBLE) AS lifetime, technical_lifetime, salvage_value, stock_initial,

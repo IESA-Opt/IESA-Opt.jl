@@ -74,8 +74,8 @@ function read_data_from_duckdb(duckdb_path::AbstractString)::ModelData
         _load_infrastructure_stocks!(p, con, tables)
         _load_technology_flexibility_activities!(p, con, tables)
 
-        _load_energy_balance!(p, con, tables)
-        _load_retrofittings!(p, con, tables)
+        _load_energy_balance!(s, p, con, tables)
+        _load_retrofittings!(s, p, con, tables)
         _load_feedstock_use!(p, con, tables)
         _load_activity_efficiency_improvement!(p, con, tables)
         _load_activity_grouping!(p, con, tables)
@@ -385,29 +385,53 @@ end
 # Relations
 # ----------------------------------------------------------------------------
 
-function _load_energy_balance!(p::ModelParams, con, tables::Set{String})
+function _load_energy_balance!(s::ModelSets, p::ModelParams, con, tables::Set{String})
     "energy_balance" in tables || return nothing
     # No PK by design (data_merge.jl's shared-table registry deliberately
     # excludes `period` from the join key so a merged source's period-less
     # IESA-Sim rows don't collide with IESA-Opt's legitimately-repeated
-    # (tech_id, activity_name) rows across periods) — filter NULL periods
-    # (only possible from a merge against a period-less source) and let a
-    # later row win on any true duplicate key.
-    df = _duckdb_query_df(con, "SELECT tech_id, activity_name, period, value FROM energy_balance WHERE period IS NOT NULL")
+    # (tech_id, activity_name) rows across periods). A NULL period here means
+    # "this tech/activity coefficient is time-invariant" (IESA-Sim's own
+    # energy_balance has no period dimension at all) — NOT "unknown" — so it
+    # must be broadcast across every solve period rather than dropped.
+    # Dropping it instead silently removes a technology's only supply/demand
+    # link for every period, which can turn an otherwise-satisfiable balance
+    # into an infeasible one (found via a real merge: IESA-Sim-only techs
+    # like electricity imports and waste-to-energy plants lost their sole
+    # energy_balance coefficient this way). Priority-fill's key already
+    # excludes `period`, so a (tech_id, activity_name) pair's rows always
+    # come from a single source — no risk of a broadcasted row overwriting a
+    # genuine per-period value from the other source.
+    df = _duckdb_query_df(con, "SELECT tech_id, activity_name, period, value FROM energy_balance")
     for row in eachrow(df)
         ismissing(row.value) && continue
-        p.activity_balancesRef[(Symbol(row.tech_id), Symbol(row.activity_name), Int(row.period))] = Float64(row.value)
+        t, a = Symbol(row.tech_id), Symbol(row.activity_name)
+        if ismissing(row.period)
+            for per in s.periods
+                p.activity_balancesRef[(t, a, per)] = Float64(row.value)
+            end
+        else
+            p.activity_balancesRef[(t, a, Int(row.period))] = Float64(row.value)
+        end
     end
     return nothing
 end
 
-function _load_retrofittings!(p::ModelParams, con, tables::Set{String})
+function _load_retrofittings!(s::ModelSets, p::ModelParams, con, tables::Set{String})
     "retrofittings" in tables || return nothing
-    df = _duckdb_query_df(con, "SELECT from_tech, to_tech, period, cost FROM retrofittings WHERE period IS NOT NULL")
+    # Same period-less-means-time-invariant reasoning as energy_balance above.
+    df = _duckdb_query_df(con, "SELECT from_tech, to_tech, period, cost FROM retrofittings")
     for row in eachrow(df)
         ft, tt = Symbol(row.from_tech), Symbol(row.to_tech)
         p.retrofit_relations[(ft, tt)] = true
-        ismissing(row.cost) || (p.retrofit_cost[(ft, tt, Int(row.period))] = Float64(row.cost))
+        ismissing(row.cost) && continue
+        if ismissing(row.period)
+            for per in s.periods
+                p.retrofit_cost[(ft, tt, per)] = Float64(row.cost)
+            end
+        else
+            p.retrofit_cost[(ft, tt, Int(row.period))] = Float64(row.cost)
+        end
     end
     return nothing
 end

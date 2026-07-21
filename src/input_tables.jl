@@ -82,7 +82,8 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
 
         # ------------------------------------------------------- activities --
         _write_input_table!(con, _activities_df(s, p), "activities", written, skipped, mismatches;
-            pk = [:Name], fks = [(:activity_type, "activity_types", "activity_type"), (:energy_label, "energy_labels", "labels")])
+            pk = [:Name], fks = [(:activity_type, "activity_types", "activity_type"), (:energy_label, "energy_labels", "labels"),
+                                  (:Node, "nodes", "node"), (:activity_resolution, "dispatch_types", "dispatch_type")])
         _write_input_table!(con, _period_long_df(:activity_name, s.activities_original, s.periods,
                 [:value => p.activities_netVolumesOrig]), "activity_volumes", written, skipped, mismatches;
             pk = [:activity_name, :period], fks = [(:activity_name, "activities", "Name"), (:period, "periods", "period")])
@@ -96,7 +97,11 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
 
         # ---------------------------------------------------- technologies --
         _write_input_table!(con, _tech_metadata_df(s.tech_balancers, s, p), "technologies", written, skipped, mismatches;
-            pk = [:id], fks = [(:activity, "activities", "Name"), (:hourly_profile, "hourly_profile_types", "name")])
+            pk = [:id], fks = [(:activity, "activities", "Name"), (:hourly_profile, "hourly_profile_types", "name"),
+                                (:process_type, "process_types", "process_type"),
+                                (:flexibility_form, "flexibility_types", "flexibility_type"),
+                                (:flexibility_range, "range_types", "range_type"),
+                                (:sector, "sectors", "sectors"), (:sector_kev, "sectors_kev", "sector_kev")])
         _write_input_table!(con, _period_long_df(:tech_id, s.tech_balancers, s.periods,
                 [:investment => p.inv_cost, :fom => p.fom_cost, :vom => p.vom_cost]), "technology_costs", written, skipped, mismatches;
             pk = [:tech_id, :period], fks = [(:tech_id, "technologies", "id"), (:period, "periods", "period")])
@@ -107,7 +112,8 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
 
         # ---------------------------------------------------- infrastructure --
         _write_input_table!(con, _infra_metadata_df(s.tech_infra, s, p), "infrastructure", written, skipped, mismatches;
-            pk = [:id], fks = [(:activity, "activities", "Name")])
+            pk = [:id], fks = [(:activity, "activities", "Name"), (:infra_range, "range_types", "range_type"),
+                                (:sector, "sectors", "sectors"), (:sector_kev, "sectors_kev", "sector_kev")])
         _write_input_table!(con, _period_long_df(:infra_id, s.tech_infra, s.periods,
                 [:investment => p.inv_cost, :fom => p.fom_cost]), "infrastructure_costs", written, skipped, mismatches;
             pk = [:infra_id, :period], fks = [(:infra_id, "infrastructure", "id"), (:period, "periods", "period")])
@@ -120,7 +126,8 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
         _write_input_table!(con, _tuple_dict_to_named_df(p.activity_balancesRef, [:tech_id, :activity_name, :period]), "energy_balance", written, skipped, mismatches;
             pk = [:tech_id, :activity_name, :period], fks = [(:tech_id, "technologies", "id"), (:activity_name, "activities", "Name"), (:period, "periods", "period")])
         _write_input_table!(con, _retrofittings_df(p, valid_tech_ids, mismatches), "retrofittings", written, skipped, mismatches;
-            pk = [:from_tech, :to_tech, :period], fks = [(:from_tech, "technologies", "id"), (:to_tech, "technologies", "id")])
+            pk = [:from_tech, :to_tech, :period], fks = [(:from_tech, "technologies", "id"), (:to_tech, "technologies", "id"),
+                                                          (:period, "periods", "period")])
         _write_input_table!(con, _tuple_dict_to_named_df(p.feedstockUse_techOrig, [:tech_id, :activity_name]; value_name = :fraction), "feedstock_use", written, skipped, mismatches;
             pk = [:tech_id, :activity_name], fks = [(:tech_id, "technologies", "id"), (:activity_name, "activities", "Name")])
         _write_input_table!(con, _tuple_dict_to_named_df(p.activity_EffImprov, [:tech_id, :activity_name, :period]), "activity_efficiency_improvement", written, skipped, mismatches;
