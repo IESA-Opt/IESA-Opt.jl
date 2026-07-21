@@ -123,7 +123,12 @@ function serve_ui!(; host::AbstractString = "127.0.0.1",
     # DuckDB-cache deserialize path is paid before the user clicks Run.
     _warm_default_workbook_cache!("data/default_data.xlsx")
     @info "IESA-Opt UI serving" url julia_threads = Base.Threads.nthreads()
-    HTTP.serve(_ui_handler, host, port; verbose = false)
+    # HTTP.jl's default max_body_bytes (64 MiB) is smaller than a typical
+    # IESA-Opt relational DuckDB file (the input cache alone routinely runs
+    # ~90 MB) — POST /api/input would 413 on exactly the files it needs to
+    # accept. 500 MiB matches the unified-project gateway's own
+    # client_max_body_size so neither hop is more restrictive than the other.
+    HTTP.serve(_ui_handler, host, port; verbose = false, max_body_bytes = 500 * 1024 * 1024)
 end
 
 function _ui_handler(req::HTTP.Request)
@@ -2905,16 +2910,19 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
     total_start = queued_start
     try
         _check_cancel(job_id) && throw(UICancelled("Run was stopped before reading the workbook."))
+        is_duckdb_input = lowercase(splitext(config["inputPath"])[2]) == ".duckdb"
         memory_hit = _ui_model_data_cache_hit(config["inputPath"])
-        duckdb_ready = !memory_hit && _ui_data_cache_valid(config["inputPath"])
-        cache_warm_running = !memory_hit && !duckdb_ready && _ui_cache_warm_running(config["inputPath"])
+        duckdb_ready = !memory_hit && !is_duckdb_input && _ui_data_cache_valid(config["inputPath"])
+        cache_warm_running = !memory_hit && !duckdb_ready && !is_duckdb_input && _ui_cache_warm_running(config["inputPath"])
         read_message = memory_hit ?
             "Loading workbook $(config["inputWorkbook"]) from in-memory cache" :
             duckdb_ready ?
                 "Loading workbook $(config["inputWorkbook"]) from DuckDB input cache" :
                 cache_warm_running ?
                     "Waiting for workbook cache warm-up, then loading $(config["inputWorkbook"])" :
-                    "Reading workbook $(config["inputWorkbook"]) from XLSX and building DuckDB input cache for faster next runs"
+                    is_duckdb_input ?
+                        "Reading relational database $(config["inputWorkbook"])" :
+                        "Reading workbook $(config["inputWorkbook"]) from XLSX and building DuckDB input cache for faster next runs"
         _job_update!(job_id; status = "running", stage = "reading", message = read_message)
         md, read_seconds = _elapsed() do
             _read_ui_data_cached(config["inputPath"])
@@ -2924,7 +2932,9 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
             "Workbook loaded from in-memory cache in $(read_seconds) seconds" :
             duckdb_ready ?
                 "Workbook loaded from DuckDB input cache in $(read_seconds) seconds" :
-                "Workbook read and DuckDB input cache updated in $(read_seconds) seconds"
+                is_duckdb_input ?
+                    "Relational database read in $(read_seconds) seconds" :
+                    "Workbook read and DuckDB input cache updated in $(read_seconds) seconds"
         _job_update!(job_id; stage = "reading", message = done_message)
 
         selected_periods = [p for p in config["periods"] if p in md.sets.periods]
