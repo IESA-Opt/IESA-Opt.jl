@@ -116,28 +116,43 @@ end
 
 function _read_types_sheet!(s::ModelSets, p::ModelParams, xf)
     sh = xf["Types"]
-    last_row = _last_row(sh, "A")
     hdr = _header_row_texts(sh, 2, _col_index(_last_col(sh)))
     C = ColumnNames.Types
 
-    s.dispatch_type    = _read_column_symbols(sh, _hcol(hdr, C.dispatch_type), 4, last_row)
-    s.activity_type    = _read_column_symbols(sh, _hcol(hdr, C.activity_type), 4, last_row)
-    s.process_type     = _read_column_symbols(sh, _hcol(hdr, C.process_type), 4, last_row)
-    s.flexibility_type = _read_column_symbols(sh, _hcol(hdr, C.flexibility_type), 4, last_row)
-    s.range_type       = _read_column_symbols(sh, _hcol(hdr, C.range_type), 4, last_row)
-    s.sectors          = _read_column_symbols(sh, _hcol(hdr, C.sectors), 4, last_row)
-    s.nodes            = _read_column_symbols(sh, _hcol(hdr, C.nodes), 4, last_row)
-    s.node_names       = _read_column_symbols(sh, _hcol(hdr, C.node_name), 4, last_row)
-    s.energy_labels    = _read_column_symbols(sh, _hcol(hdr, C.energy_labels), 4, last_row)
-    s.sectors_kev      = _read_column_symbols(sh, _hcol(hdr, C.sectors_kev), 4, last_row)
+    # Each column in this sheet is an independent list with its own length
+    # (e.g. Market Types has 5 rows, Sectors has 15) — a single shared
+    # last_row (previously taken from column A alone) silently truncated
+    # every longer list to column A's length.
+    col_dispatch = _hcol(hdr, C.dispatch_type)
+    col_activity = _hcol(hdr, C.activity_type)
+    col_process  = _hcol(hdr, C.process_type)
+    col_flex     = _hcol(hdr, C.flexibility_type)
+    col_range    = _hcol(hdr, C.range_type)
+    col_sectors  = _hcol(hdr, C.sectors)
+    col_nodes    = _hcol(hdr, C.nodes)
+    col_node_nm  = _hcol(hdr, C.node_name)
+    col_labels   = _hcol(hdr, C.energy_labels)
+    col_sec_kev  = _hcol(hdr, C.sectors_kev)
 
-    col_sectors = _hcol(hdr, C.sectors)
-    col_nodes   = _hcol(hdr, C.nodes)
-    col_labels  = _hcol(hdr, C.energy_labels)
-    _read_list_to_sym!(p.IEM_sector,   sh, col_sectors, _hcol(hdr, C.iem_sector), 4, last_row)
-    _read_list_to_sym!(p.namePer_node, sh, col_nodes,   _hcol(hdr, C.node_name), 4, last_row)
-    _read_list_to_sym!(p.IEM_node,     sh, col_nodes,   _hcol(hdr, C.iem_node), 4, last_row)
-    _read_list_to_float!(p.is_renewable, sh, col_labels, _hcol(hdr, C.is_renewable), 4, last_row)
+    s.dispatch_type    = _read_column_symbols(sh, col_dispatch, 4, _last_row(sh, col_dispatch))
+    s.activity_type    = _read_column_symbols(sh, col_activity, 4, _last_row(sh, col_activity))
+    s.process_type     = _read_column_symbols(sh, col_process, 4, _last_row(sh, col_process))
+    s.flexibility_type = _read_column_symbols(sh, col_flex, 4, _last_row(sh, col_flex))
+    s.range_type       = _read_column_symbols(sh, col_range, 4, _last_row(sh, col_range))
+    s.sectors          = _read_column_symbols(sh, col_sectors, 4, _last_row(sh, col_sectors))
+    s.nodes            = _read_column_symbols(sh, col_nodes, 4, _last_row(sh, col_nodes))
+    s.node_names       = _read_column_symbols(sh, col_node_nm, 4, _last_row(sh, col_node_nm))
+    s.energy_labels    = _read_column_symbols(sh, col_labels, 4, _last_row(sh, col_labels))
+    s.sectors_kev      = _read_column_symbols(sh, col_sec_kev, 4, _last_row(sh, col_sec_kev))
+
+    # These pair a key column (Sectors / Nodes / Energy Labels) with an
+    # adjacent per-row attribute column (IEM sector, Country name, IEM node,
+    # Renewables) — the attribute is only meaningful for as many rows as the
+    # key list itself has, so it's read out to the key column's own last_row.
+    _read_list_to_sym!(p.IEM_sector,   sh, col_sectors, _hcol(hdr, C.iem_sector), 4, _last_row(sh, col_sectors))
+    _read_list_to_sym!(p.namePer_node, sh, col_nodes,   col_node_nm, 4, _last_row(sh, col_nodes))
+    _read_list_to_sym!(p.IEM_node,     sh, col_nodes,   _hcol(hdr, C.iem_node), 4, _last_row(sh, col_nodes))
+    _read_list_to_float!(p.is_renewable, sh, col_labels, _hcol(hdr, C.is_renewable), 4, _last_row(sh, col_labels))
     return nothing
 end
 
