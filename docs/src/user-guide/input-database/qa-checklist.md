@@ -36,4 +36,14 @@ julia --project=. test/runtests.jl
 
 For a private workbook, replace the path in the load-only command and inspect the printed summary before solving.
 
+## Known infeasibility fixes
+
+- `TRD01_02` (`Electric Battery Vehicle - Motorcycle`) is the only technology serving `Motorcycles`. Its 2022 and 2025 `techStock_max` values must be high enough for `cap2act * techStock` to meet `activities_netVolumes`; otherwise standalone 2022/2025 solves are infeasible.
+- Driver activity stock constraints must be lower bounds, not exact equalities. Fixed energy and material-conversion balances still enforce exact quantities where needed, but `actStock` for driver activities represents available stock/service capacity and must allow legacy capacity overhang in multi-period solves. In the Julia formulation, `actStock` is therefore `>= activities_netVolumes` rather than `== activities_netVolumes`.
+
+Additional default workbook data fixes applied during the same infeasibility review:
+
+- `neE01_01` through `neE01_14` are exogenous non-energy GHG pathway technologies with declining driver-activity volumes, no retrofit relations, and no other technologies serving their activities. Their `techStock_exist` values must represent the baseline legacy stock; in `default_data.xlsx`, they are set to their 2022 `techStock_max` values so multi-period solves can decommission the declining trajectory.
+- `ICH01_01` (`Existing naphtha steam cracker - Petrochemical industry`) has a planned retirement trajectory that interacts with hourly shedding for `ICH01_05` in chained solves. The 2035 planned decommissioning value in `default_data.xlsx` is reduced from `1.3` to `0.81`, allowing the model to retire excess Ethylene stock earlier in 2030 while preserving nonnegative stock through 2040.
+
 Back to [Input Database](index.md).
