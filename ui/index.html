@@ -121,6 +121,7 @@
                 <label class="field checkbox"><input id="showViolations" type="checkbox"><span>Show violations</span></label>
                 <label class="field checkbox"><input id="extremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
                 <label class="field checkbox"><input id="boundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
+                <label class="field checkbox" id="barHomogeneousField" title="Gurobi's homogeneous barrier algorithm. Substantially improves convergence on numerically marginal models (fewer 'Numerical trouble / may be infeasible' aborts) at the cost of some solve time. Gurobi-only; ignored for HiGHS."><input id="barHomogeneous" type="checkbox" checked><span>Force BarHomogeneous (Gurobi)</span></label>
                 <label class="field"><span>Constraint group</span><select id="constraintGroup"></select></label>
                 <label class="field"><span>Output name</span><select id="outputMode"><option value="automatic">Automatic</option><option value="custom">Custom</option></select></label>
                 <label id="outputNameWrap" class="field hidden"><span>Custom output folder</span><input id="outputName" type="text" placeholder="my_run_name"></label>
