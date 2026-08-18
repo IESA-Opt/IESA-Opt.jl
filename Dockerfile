@@ -63,4 +63,8 @@ RUN timeout 900 julia --project=. -e 'using Pkg; Pkg.precompile()'
 
 EXPOSE 8001
 
-CMD ["julia", "--project=.", "scripts/serve_ui_docker.jl"]
+# --threads=auto: the server's own startup log warns that a single-threaded
+# Julia blocks HTTP handling (including progress-poll JSON requests) while a
+# solve or data read is running on that same thread, making the UI look like
+# it "lost connection" mid-run even though the process is still alive.
+CMD ["julia", "--project=.", "--threads=auto", "scripts/serve_ui_docker.jl"]

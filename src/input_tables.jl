@@ -225,6 +225,19 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
         scalars_df = DataFrames.DataFrame(name = scalar_names, value = scalar_values, julia_type = scalar_types)
         _write_input_table!(con, scalars_df, "parameters_scalar", written, skipped, mismatches; pk = [:name])
     finally
+        # Without an explicit CHECKPOINT, DuckDB.jl's close! can leave freshly
+        # written tables sitting only in the .wal file next to db_path - a
+        # same-process reconnect (e.g. read_data_cached) replays the WAL
+        # transparently so this was never noticed locally, but db_path is
+        # served as a raw byte download (GET /api/files/{jobId}/download)
+        # without its .wal sidecar, so a downstream reader opening just the
+        # .duckdb file (dbcompare-backend's own `ATTACH ... READ_ONLY`) saw a
+        # database with zero tables. Best-effort: a failed checkpoint here
+        # shouldn't mask whatever error the try block above already raised.
+        try
+            _duckdb_execute!(con, "CHECKPOINT")
+        catch
+        end
         DBInterface.close!(con)
         GC.gc()
     end

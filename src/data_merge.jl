@@ -285,6 +285,15 @@ function merge_or_copy_into(out_db::AbstractString;
         _duckdb_execute!(con, "DETACH opt")
         _duckdb_execute!(con, "DETACH sim")
     finally
+        # See input_tables.jl's write_input_tables_duckdb! for why this is
+        # needed: without it, out_db's freshly merged tables can sit
+        # uncheckpointed in a .wal sidecar that GET /unify/download never
+        # ships, so a downstream READ_ONLY attach of out_db alone sees an
+        # empty database.
+        try
+            _duckdb_execute!(con, "CHECKPOINT")
+        catch
+        end
         DBInterface.close!(con)
         GC.gc()
     end
