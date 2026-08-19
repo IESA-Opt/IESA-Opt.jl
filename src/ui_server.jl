@@ -224,6 +224,10 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
     elseif method == "POST" && path == "/api/outputs/delete"
         body = _json_body(req)
         return _json_response(_delete_output_runs!(body))
+    elseif method == "POST" && path == "/api/outputs/download"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        return _download_result_db(out_dir)
     elseif method == "POST" && path == "/api/browseInputFile"
         return _json_response(Dict("path" => _browse_for_input_file()))
     elseif method == "POST" && path == "/api/scenario/validate"
@@ -427,6 +431,7 @@ function _ui_options()
             "extremePeriods" => true,
             "extremeDays" => 5,
             "boundaryRamping" => true,
+            "barHomogeneous" => true,
             "hourlyReports" => true,
             "showViolations" => false,
             "outputMode" => "automatic",
@@ -2886,6 +2891,18 @@ function _normalize_run_config(raw_config)
         "extremePeriods" => _as_bool(_config_get(raw_config, "extremePeriods", true), true),
         "extremeDays" => _as_int(_config_get(raw_config, "extremeDays", 5), 5),
         "boundaryRamping" => _as_bool(_config_get(raw_config, "boundaryRamping", true), true),
+        # GUI "Force BarHomogeneous (Gurobi)" toggle - overrides whatever
+        # _apply_gurobi_method! would otherwise pick for the chosen solve
+        # method (barrier_crossover deletes it by default). Default true:
+        # reproduced real cases where the default method hit "Numerical
+        # trouble... may be infeasible or unbounded" and fell into an
+        # unstable, non-deterministic simplex fallback (same model, same
+        # settings, feasible on one run and stuck oscillating on another);
+        # BarHomogeneous=1 roughly doubled how far Barrier converged before
+        # that fallback in both a native and a merged-database repro. Not a
+        # complete fix for every marginal model, but strictly an improvement,
+        # so it defaults on rather than requiring users to know to enable it.
+        "barHomogeneous" => _as_bool(_config_get(raw_config, "barHomogeneous", true), true),
         "hourlyReports" => _as_bool(_config_get(raw_config, "hourlyReports", true), true),
         "showViolations" => _as_bool(_config_get(raw_config, "showViolations", false), false),
         "constraintGroup" => String(_config_get(raw_config, "constraintGroup", "Base + Bunkers + Scope3")),
@@ -3083,7 +3100,7 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         # residual "Other" segment shrinks.
         local optimizer, attrs, effective_solver, model
         _, optimizer_init_seconds = _elapsed() do
-            optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path, rep_days = config["representativeDays"])
+            optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path, rep_days = config["representativeDays"], bar_homogeneous = get(config, "barHomogeneous", nothing))
             model_label = mode == :ts ? "time-slice" : "full-hourly"
             _job_update!(job_id; stage = "generation", message = "Generating $(model_label) model with $(effective_solver)", extra = Dict("effectiveSolver" => effective_solver))
             model = Model(optimizer)
@@ -3214,7 +3231,7 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
     return nothing
 end
 
-function _optimizer_for_ui_run(requested_solver::AbstractString, method::AbstractString, threads::Integer; solver_log_path::AbstractString = "", rep_days::Union{Nothing,Integer} = nothing)
+function _optimizer_for_ui_run(requested_solver::AbstractString, method::AbstractString, threads::Integer; solver_log_path::AbstractString = "", rep_days::Union{Nothing,Integer} = nothing, bar_homogeneous::Union{Nothing,Bool} = nothing)
     solver = lowercase(String(requested_solver))
     solver = solver == "auto" ? _choose_auto_solver() : solver
     if solver == "highs"
@@ -3224,6 +3241,15 @@ function _optimizer_for_ui_run(requested_solver::AbstractString, method::Abstrac
     elseif solver == "gurobi"
         attrs = default_gurobi_attributes(; threads = Int(threads), rep_days = rep_days)
         _apply_gurobi_method!(attrs, method)
+        # GUI "Force BarHomogeneous" toggle (config["barHomogeneous"]) takes
+        # priority over _apply_gurobi_method!'s own per-method default - the
+        # "barrier_crossover" branch above deletes!() it, so without this the
+        # user's explicit choice would be silently discarded for the default
+        # solve method. See _normalize_run_config's own comment for why this
+        # defaults to true.
+        if bar_homogeneous !== nothing
+            attrs["BarHomogeneous"] = bar_homogeneous ? 1 : 0
+        end
         isempty(solver_log_path) || (attrs["LogFile"] = solver_log_path)
         return gurobi_optimizer(; attrs), attrs, "Gurobi"
     elseif solver == "cplex"
@@ -4058,6 +4084,24 @@ end
 
 function _result_db_path(out_dir::AbstractString)
     return joinpath(out_dir, IESA_RESULTS_DUCKDB_FILE)
+end
+
+"""
+    _download_result_db(out_dir) -> HTTP.Response
+
+Stream `results.duckdb` for a finished run as a raw byte download - the
+combined Sim/Opt results-comparison page (dbcompare-backend's POST
+/results/load) uploads this file directly, the same way it already uploads
+IESA-Sim's own simulation_excel.duckdb. Unlike the other /api/outputs/*
+endpoints, which read the DuckDB server-side and return computed JSON, this
+one hands back the file itself - there was previously no route that did
+this at all (parquet-mode runs have no single file to download instead;
+that's a pre-existing limitation, not one this endpoint needs to solve).
+"""
+function _download_result_db(out_dir::AbstractString)
+    db_path = _result_db_path(out_dir)
+    isfile(db_path) || error("No results.duckdb in $(out_dir) (parquet-mode run?)")
+    return _file_response(db_path, "application/octet-stream")
 end
 
 function _result_file_names(out_dir::AbstractString)
