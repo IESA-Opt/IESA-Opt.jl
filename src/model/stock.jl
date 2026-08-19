@@ -131,9 +131,10 @@ function add_stock_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     #       techStock(t, ps) * cap2act(t)
     #     + (if use_clustering then sum[hc, clusterHourWeight(hc)*deltaS_shed_TS(hc,t,ps)]
     #        else sum[h, deltaS_shed(h,t,ps)] endif)
-    #   ] = activities_netVolumes(av, ps)
-    # Shedding acts as a slack — without it, IESA-Opt 1.0-derived data with
-    # techStock_max < activities_netVolumes/cap2act is infeasible.
+    #   ] >= activities_netVolumes(av, ps)
+    # Relaxed from IESA-Opt 1.0's `=` to `>=`: installed capacity must at least
+    # cover the driver activity's net volume, but is no longer forced to land
+    # exactly on it. Shedding remains available as a slack on top of that.
     # -------------------------------------------------------------------------
     shed_set = Set(s.tech_shedding)
     for av in s.activities_driver, ps in pss
@@ -143,7 +144,7 @@ function add_stock_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
         @constraint(m,
             sum(get(p.cap2act, t, 0.0) * ts[t, ps] for t in techs_for_av) +
             sum(_shed_sum_for_tech(vars, s, p, t, ps) for t in techs_for_av if t in shed_set; init = AffExpr(0.0))
-                == rhs,
+                >= rhs,
             base_name = "actStock[$(av),$(ps)]")
     end
 

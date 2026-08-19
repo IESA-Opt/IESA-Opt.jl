@@ -27,7 +27,14 @@ end
 const GUROBI_TUNED_RD_RANGES = (
     (lo = 1,  hi = 7,            attrs = Pair{String,Any}[]),
     (lo = 8,  hi = 12,           attrs = Pair{String,Any}["AggFill" => 0, "Presolve" => 1, "PreSparsify" => 2, "ScaleFlag" => 0]),
-    (lo = 13, hi = 17,           attrs = Pair{String,Any}["AggFill" => 10, "NumericFocus" => 1, "ScaleFlag" => 0]),
+    (lo = 13, hi = 17,           attrs = Pair{String,Any}["AggFill" => 10, "NumericFocus" => 1, "ScaleFlag" => -1]),  # ScaleFlag changed from the original grbtune value (0, scaling off) to -1
+                                                                                                                        # (Gurobi auto-scales) on 2026-08-19: with scaling off, the elastic-slack
+                                                                                                                        # diagnostic solve on the chained 2045+2050 model — matrix range
+                                                                                                                        # [1e-07, 9e+03], 10 orders of magnitude — went numerically unstable
+                                                                                                                        # (objective spiked to 1e17, silent restart, NUMERICAL_ERROR). With
+                                                                                                                        # ScaleFlag=-1 the identical model converged cleanly to OPTIMAL in 250
+                                                                                                                        # barrier iterations. Not re-validated against the original grbtune
+                                                                                                                        # benchmark suite for smaller/unchained runs.
     (lo = 18, hi = 22,           attrs = Pair{String,Any}["AggFill" => 100, "PreDepRow" => 1, "PreSparsify" => 0, "ScaleFlag" => 0]),
     (lo = 23, hi = 27,           attrs = Pair{String,Any}["AggFill" => 100, "PrePasses" => 1, "ScaleFlag" => 0]),
     (lo = 28, hi = 32,           attrs = Pair{String,Any}["AggFill" => 100, "PrePasses" => 3, "ScaleFlag" => 0]),
