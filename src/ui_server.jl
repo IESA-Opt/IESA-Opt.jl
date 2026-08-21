@@ -3165,10 +3165,19 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         _job_update!(job_id; stage = "solve", message = "Solve complete in $(solve_seconds) seconds, status=$(term), objective=$(round(obj, digits = 4))")
 
         # Diagnostics: report constraints with nonzero slack (elastic mode)
-        # or run an IIS analysis when the model came back infeasible.
+        # or run an IIS analysis when the model came back infeasible. Gurobi's
+        # default DualReductions=1 often can't tell infeasible from unbounded
+        # during presolve and reports the ambiguous combined status instead
+        # (its own console message literally says "Infeasible or unbounded
+        # model") - JuMP surfaces that as termination_status
+        # INFEASIBLE_OR_UNBOUNDED, not INFEASIBLE, so this diagnostic never
+        # fired for exactly the runs it exists for. compute_conflict!/Gurobi's
+        # own IIS routine doesn't need a prior disambiguated status - it
+        # re-solves as needed internally - so widening this check is enough,
+        # no solver attribute change required.
         if elastic_penalties !== nothing
             _report_elastic_slacks!(job_id, elastic_penalties)
-        elseif term == "INFEASIBLE"
+        elseif term in ("INFEASIBLE", "INFEASIBLE_OR_UNBOUNDED")
             _report_iis!(job_id, model, effective_solver)
         end
 
