@@ -241,166 +241,6 @@ function check_iesa_opt_excel_compatibility(path::AbstractString)::Dict{String,A
 end
 
 # =============================================================================
-# IESA-Sim Excel compatibility (check-only — see column_names_iesa_sim.jl)
-# =============================================================================
-
-"""
-    check_iesa_sim_excel_compatibility(path) -> Dict{String,Any}
-
-Check whether the workbook at `path` has the sheets/header text IESA-Sim's
-own Python reader (`mod0_read_data_save_duck.py`) needs. This is a shape
-check only — there is no Julia parser for IESA-Sim's Excel layout, so a
-workbook reported compatible here still cannot be used to fill an IESA-Sim
-gap in the merge wizard (only an already-built IESA-Sim DuckDB can); callers
-should treat this report as `mergeCapable => false`.
-"""
-function check_iesa_sim_excel_compatibility(path::AbstractString)::Dict{String,Any}
-    missing_sheets = String[]
-    missing_headers = String[]
-    C = ColumnNamesIesaSim
-    try
-        XLSX.openxlsx(path, mode = "r") do xf
-            sheetnames = Set(XLSX.sheetnames(xf))
-            need(name) = name in sheetnames
-
-            if need("Parameters")
-                sh = xf["Parameters"]
-                found(name) = any(r -> _str(sh[r, 1]) == name, 1:100)
-                for n in (C.Parameters.powinv_spbt_benchmark, C.Parameters.powinv_spbt_min,
-                          C.Parameters.powinv_cr_threshold, C.Parameters.powinv_cr_min,
-                          C.Parameters.powinv_nuf_threshold, C.Parameters.powinv_nuf_min,
-                          C.Parameters.scarcity_penalization, C.Parameters.gas_premium,
-                          C.Parameters.voll_value, C.Parameters.min_spread_value,
-                          C.Parameters.gov_dr, C.Parameters.exports_value)
-                    found(n) || push!(missing_headers, "Parameters: $(n)")
-                end
-            else
-                push!(missing_sheets, "Parameters")
-            end
-
-            if need("Types")
-                sh = xf["Types"]
-                hdr = _header_row_texts(sh, 1, _col_index(_last_col(sh)))
-                _check_headers!(missing_headers, "Types", hdr, (
-                    C.Types.activity_type, C.Types.sectors, C.Types.energy_labels, C.Types.energy_price_init,
-                ))
-            else
-                push!(missing_sheets, "Types")
-            end
-
-            if need("Agents")
-                sh = xf["Agents"]
-                hdr = _header_row_texts(sh, 1, _col_index(_last_col(sh)))
-                _check_headers!(missing_headers, "Agents", hdr, (
-                    C.Agents.types, C.Agents.profiles, C.Agents.ic_criteria, C.Agents.rates,
-                ))
-            else
-                push!(missing_sheets, "Agents")
-            end
-
-            if need("Activities")
-                sh = xf["Activities"]
-                idx = _col_index(_last_col_at_row(sh, 1))
-                hdr = _header_row_texts(sh, 1, idx)
-                _check_headers!(missing_headers, "Activities", hdr, (
-                    C.Activities.name, C.Activities.periods_start, C.Activities.activity_resolution,
-                    C.Activities.activity_type, C.Activities.energy_label, C.Activities.agent_profile,
-                ))
-            else
-                push!(missing_sheets, "Activities")
-            end
-
-            if need("HourlyProfiles")
-                sh = xf["HourlyProfiles"]
-                hdr = _header_row_texts(sh, 1, _col_index(_last_col(sh)))
-                _check_headers!(missing_headers, "HourlyProfiles", hdr, (C.HourlyProfiles.hour, C.HourlyProfiles.day, C.HourlyProfiles.month))
-            else
-                push!(missing_sheets, "HourlyProfiles")
-            end
-
-            if need("PriceProfiles")
-                sh = xf["PriceProfiles"]
-                hdr = _header_row_texts(sh, 1, _col_index(_last_col(sh)))
-                _check_headers!(missing_headers, "PriceProfiles", hdr, (C.PriceProfiles.interconnector,))
-            else
-                push!(missing_sheets, "PriceProfiles")
-            end
-
-            if need("Technologies")
-                sh = xf["Technologies"]
-                idx = _col_index(_last_col(sh))
-                hdr_group = _header_row_texts(sh, 1, idx)
-                hdr_field = _header_row_texts(sh, 2, idx)
-                hdr = _flatten_header(hdr_group, hdr_field)
-                _check_headers!(missing_headers, "Technologies", hdr, (
-                    C.Technologies.tech_id, C.Technologies.category, C.Technologies.sector,
-                    C.Technologies.subsector, C.Technologies.main_activity, C.Technologies.name,
-                    C.Technologies.unit, C.Technologies.investment, C.Technologies.fixed_om,
-                    C.Technologies.variable_om, C.Technologies.ec_lifetime, C.Technologies.cap2act,
-                    C.Technologies.dispatch_type, C.Technologies.hourly_profile,
-                    C.Technologies.social_perception, C.Technologies.perceived_complexity,
-                    C.Technologies.subsidy_subject, C.Technologies.feedin_subject,
-                    C.Technologies.shedding_capacity, C.Technologies.shedding_volume,
-                    C.Technologies.shedding_guarantee, C.Technologies.flexibility_form,
-                    C.Technologies.flexibility_activity, C.Technologies.flexibility_capacity,
-                    C.Technologies.flexibility_volume, C.Technologies.flexibility_range,
-                    C.Technologies.flexibility_losses, C.Technologies.flexibility_nonnegotiable,
-                    C.Technologies.buffer_up, C.Technologies.buffer_down, C.Technologies.buffer_capacity,
-                    C.Technologies.tech_stock_deploy, C.Technologies.tech_stock_exist,
-                ))
-            else
-                push!(missing_sheets, "Technologies")
-            end
-
-            if need("Infrastructure")
-                sh = xf["Infrastructure"]
-                idx = _col_index(_last_col(sh))
-                hdr_group = _header_row_texts(sh, 1, idx)
-                hdr_field = _header_row_texts(sh, 2, idx)
-                hdr = _flatten_header(hdr_group, hdr_field)
-                _check_headers!(missing_headers, "Infrastructure", hdr, (
-                    C.Infrastructure.tech_id, C.Infrastructure.category, C.Infrastructure.name,
-                    C.Infrastructure.unit, C.Infrastructure.investment, C.Infrastructure.fixed_om,
-                    C.Infrastructure.ec_lifetime, C.Infrastructure.cap2act, C.Infrastructure.activity,
-                ))
-                _check_headers!(missing_headers, "Infrastructure", hdr_group, (
-                    C.Infrastructure.planned_decommissioning_group, C.Infrastructure.stock_min_group,
-                    C.Infrastructure.stock_max_group,
-                ))
-            else
-                push!(missing_sheets, "Infrastructure")
-            end
-
-            if !need("EnergyBalance")
-                push!(missing_sheets, "EnergyBalance")
-            end
-
-            if need("Retrofitting")
-                sh = xf["Retrofitting"]
-                hdr = _header_row_texts(sh, 1, _col_index(_last_col(sh)))
-                _check_headers!(missing_headers, "Retrofitting", hdr, (
-                    C.Retrofitting.tech_id_original, C.Retrofitting.tech_id_new,
-                    C.Retrofitting.enabled, C.Retrofitting.investment_cost,
-                ))
-            else
-                push!(missing_sheets, "Retrofitting")
-            end
-
-            if !need("Policies")
-                push!(missing_sheets, "Policies")
-            end
-        end
-    catch err
-        return Dict{String,Any}("compatible" => false, "missingSheets" => ["<could not open as an Excel workbook: $(sprint(showerror, err))>"], "missingHeaders" => String[])
-    end
-    return Dict{String,Any}(
-        "compatible" => isempty(missing_sheets) && isempty(missing_headers),
-        "missingSheets" => missing_sheets,
-        "missingHeaders" => missing_headers,
-    )
-end
-
-# =============================================================================
 # DuckDB compatibility (either model)
 # =============================================================================
 
@@ -476,10 +316,13 @@ Dict("kind" => "excel"|"duckdb",
      "iesaOpt" => Dict("compatible"=>Bool, "missing"=>[...]),
      "iesaSim" => Dict("compatible"=>Bool, "missing"=>[...], "mergeCapable"=>Bool))
 ```
-`mergeCapable` is `false` whenever `kind == "excel"` — there is no Julia
-parser for IESA-Sim's Excel layout, so an IESA-Sim-shaped Excel file can be
-recognized as compatible but cannot fill an IESA-Sim gap in the merge
-wizard; only an IESA-Sim DuckDB can.
+For `kind == "excel"`, the `iesaSim` field is always a fixed
+`compatible => false, mergeCapable => false` stub — IESA-Sim's own Excel
+compatibility is now checked by IESA-Sim-v1.09-py itself (`POST /checkFile`
+on its own service), not guessed here; there is still no Julia parser for
+IESA-Sim's Excel layout regardless, so an Excel file could never have filled
+an IESA-Sim gap in the merge wizard anyway (only an IESA-Sim DuckDB can) —
+this field exists only so callers that used to read it don't break.
 """
 function check_file_compatibility(path::AbstractString)::Dict{String,Any}
     isfile(path) || return Dict{String,Any}("kind" => "unknown",
@@ -489,11 +332,10 @@ function check_file_compatibility(path::AbstractString)::Dict{String,Any}
     ext = lowercase(splitext(path)[2])
     if ext in (".xlsx", ".xlsm", ".xls")
         opt = check_iesa_opt_excel_compatibility(path)
-        sim = check_iesa_sim_excel_compatibility(path)
         return Dict{String,Any}(
             "kind" => "excel",
             "iesaOpt" => Dict("compatible" => opt["compatible"], "missing" => vcat(opt["missingSheets"], opt["missingHeaders"])),
-            "iesaSim" => Dict("compatible" => sim["compatible"], "missing" => vcat(sim["missingSheets"], sim["missingHeaders"]), "mergeCapable" => false),
+            "iesaSim" => Dict("compatible" => false, "missing" => String[], "mergeCapable" => false),
         )
     elseif ext == ".duckdb"
         report = check_duckdb_compatibility(path)
