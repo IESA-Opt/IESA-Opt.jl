@@ -426,6 +426,27 @@ function compute_investment_matrices!(md::ModelData)
     #     (ps > pa + tec_lifetime(t)) * (ps >= pa)
     #   - (ps-1 > pa + tec_lifetime(t)) * (ps >= pa)
     # i.e. = 1 only on the FIRST ps after the lifetime expiry; 0 elsewhere.
+    #
+    # IESA-Opt 1.0's "ps-1" means "the previous *modeled* period" (this
+    # function's own docstring already says so: retirement lands in `solve_p`
+    # if the expiry falls within `(prev_solve_p, solve_p]`) - but the literal
+    # calendar arithmetic `ps - 1` only actually IS the previous period when
+    # periods are consecutive integer years. Real period grids are sparse and
+    # irregularly spaced (e.g. 2022, 2025, 2030, 2035, ... - a 3-year gap then
+    # 5-year gaps), so `ps - 1` is almost never itself a modeled period - it's
+    # just some arbitrary calendar year sitting inside the gap. That collapses
+    # the whole edge-detector to a near-coincidence: it only fires when
+    # `pa + lifetime + 1` happens to land exactly on a modeled year. Verified
+    # this is not a rare edge case on the actual period grid here - lifetimes
+    # 1, 10, 15, 20, 25, 30, 35, 40, 50 and 60 (the vast majority of values
+    # actually used, including the common 20-year one) never fire at all,
+    # silently leaving every technology using them unable to ever be forced
+    # into decommissioning once invested, for any chained multi-period solve.
+    # Using the actual previous *modeled* period (matching every other
+    # prev-period lookup in this codebase, e.g. stock.jl's own techStock/
+    # decomStock recursions) instead of raw ps-1 arithmetic makes the check
+    # correctly catch an expiry landing anywhere inside the gap, not just on
+    # the one calendar year immediately before ps.
     for (t, L_inv) in p.economic_lifetime
         L_decom = get(p.technical_lifetime, t, L_inv)
         for pa in periods
@@ -434,8 +455,9 @@ function compute_investment_matrices!(md::ModelData)
                 if ps < pa
                     continue
                 end
+                prev_ps = _prev_period(periods, ps)
                 a = (ps > decom_threshold) ? 1 : 0
-                b = ((ps - 1) > decom_threshold) ? 1 : 0
+                b = (prev_ps !== nothing && prev_ps > decom_threshold) ? 1 : 0
                 if (a - b) == 1
                     p.decomMat_NewInv[(t, pa, ps)] = 1.0
                 end
