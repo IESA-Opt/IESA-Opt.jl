@@ -352,6 +352,19 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
     nl_node = :NL
     eu_node = :EU
 
+    # Every emission-target constraint built below is registered here by
+    # (kind, node, period) - node = Symbol("") for the node-less ones, period
+    # = 0 for the cumulative ones - so _extract_co2_prices/_extract_emission_
+    # prices (ui_server.jl) can pull its shadow price back out directly.
+    # constraint_by_name can't do that job: apply_lp_generation_speedups!
+    # strips every constraint's name by default (showViolations=false, the
+    # normal case) to save time/RAM on these large LPs, which silently made
+    # emission_prices/CO2_price come back empty on every such run - confirmed
+    # live, the constraint itself was always being built correctly with the
+    # real input cap, only the post-solve name lookup was failing.
+    targets = Dict{Tuple{Symbol,Symbol,Int},JuMP.ConstraintRef}()
+    m.ext[:emission_targets] = targets
+
     # ------------------------------------------------------------------------
     # 2026-06-15: IESA-Opt 1.0 BaseET_BFS group includes only:
     #   balance_activities_EmissionTargetAir / Bunker / FS.
@@ -475,7 +488,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
             end
         end
 
-        @constraint(m, expr <= cap, base_name = "emTargetAir[$(n),$(ps)]")
+        targets[(:emTargetAir, n, ps)] = @constraint(m, expr <= cap, base_name = "emTargetAir[$(n),$(ps)]")
     end
 
     # ─── balance_activities_EmissionTargetBunker (IESA-Opt 1.0 line ~2534) ───
@@ -499,7 +512,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
                 end
             end
             cap = get(p.emissionTargetBunker, (n, ps), 0.0)
-            @constraint(m, expr <= cap, base_name = "emTargetBunker[$(n),$(ps)]")
+            targets[(:emTargetBunker, n, ps)] = @constraint(m, expr <= cap, base_name = "emTargetBunker[$(n),$(ps)]")
         end
     end
 
@@ -524,7 +537,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
             end
             _add_delta_terms!(expr, s.activities_target_FeedStocks, n, ps)
             cap = get(p.emissionTargetFS, (n, ps), 0.0)
-            @constraint(m, expr <= cap, base_name = "emTargetFS[$(n),$(ps)]")
+            targets[(:emTargetFS, n, ps)] = @constraint(m, expr <= cap, base_name = "emTargetFS[$(n),$(ps)]")
         end
     end
 
@@ -564,7 +577,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
             end
         end
 
-        @constraint(m, expr <= cap, base_name = "emTargetAll[$(n),$(ps)]")
+        targets[(:emTargetAll, n, ps)] = @constraint(m, expr <= cap, base_name = "emTargetAll[$(n),$(ps)]")
     end
     end  # end if enable_em("ALL")
 
@@ -604,7 +617,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
             end
         end
 
-        @constraint(m, expr <= cap, base_name = "emTargetInclScope3[$(ps)]")
+        targets[(:emTargetInclScope3, Symbol(""), ps)] = @constraint(m, expr <= cap, base_name = "emTargetInclScope3[$(ps)]")
     end
     end  # end if enable_em("INCLSCOPE3")
 
@@ -627,7 +640,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
             w == 0.0 && continue
             add_to_expression!(expr, coef * w * ti_scalar, tu[tb, per])
         end
-        @constraint(m, expr <= cap, base_name = "emTargetCum[$(ni)]")
+        targets[(:emTargetCum, ni, 0)] = @constraint(m, expr <= cap, base_name = "emTargetCum[$(ni)]")
     end
     end  # end if enable_em("CUM")
 
@@ -649,7 +662,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
             w == 0.0 && continue
             add_to_expression!(expr, w * ti_scalar2, tu[tb, ps])
         end
-        @constraint(m, expr <= cap, base_name = "co2StorageCum[$(ni)]")
+        targets[(:co2StorageCum, ni, 0)] = @constraint(m, expr <= cap, base_name = "co2StorageCum[$(ni)]")
     end
     end  # end if enable_em("CO2STORAGECUM")
 

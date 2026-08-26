@@ -3482,24 +3482,27 @@ end
 # Returns an empty dict if duals are unavailable for the active solver/method.
 function _extract_co2_prices(model, md::ModelData)
     prices = Dict{Int,Float64}()
-    # Probe a generous set of constraint names per period. The first one that
-    # actually exists with a finite shadow price wins (per IESA-Opt 1.0
-    # convention this is `emTargetAir[NL,p]` when air-only mode is on).
-    candidate_names = ps -> String[
-        "emTargetAir[NL,$(ps)]",
-        "emTargetInclScope3FuelEx[$(ps)]",
-        "emTargetInclScope3[$(ps)]",
-        "emTargetAll[NL,$(ps)]",
-        "emTargetBunker[NL,$(ps)]",
-        "emTargetFS[NL,$(ps)]",
+    # Read back the exact ConstraintRefs _add_emission_targets! (balance.jl)
+    # registered while building the model, keyed by (kind, node, period) -
+    # NOT by re-finding the constraint by name afterward. Names are stripped
+    # by apply_lp_generation_speedups! whenever showViolations=false (the
+    # normal case), which silently made every name-based lookup here fail on
+    # essentially every real run; ext[:emission_targets] is unaffected by
+    # that speedup since it's populated at construction time, not read back
+    # from the solved model's name table.
+    targets = get(model.ext, :emission_targets, Dict{Tuple{Symbol,Symbol,Int},JuMP.ConstraintRef}())
+    # First match wins per period (per IESA-Opt 1.0 convention this is
+    # `emTargetAir[NL,p]` when air-only mode is on).
+    candidate_keys = ps -> [
+        (:emTargetAir, :NL, ps),
+        (:emTargetInclScope3, Symbol(""), ps),
+        (:emTargetAll, :NL, ps),
+        (:emTargetBunker, :NL, ps),
+        (:emTargetFS, :NL, ps),
     ]
     for ps in md.sets.periods_solve
-        for name in candidate_names(ps)
-            con = try
-                constraint_by_name(model, name)
-            catch
-                nothing
-            end
+        for key in candidate_keys(ps)
+            con = get(targets, key, nothing)
             con === nothing && continue
             price = try
                 # `<= cap` minimization: shadow_price ≤ 0; the implied CO2 price
@@ -3518,49 +3521,27 @@ function _extract_co2_prices(model, md::ModelData)
     return prices
 end
 
-# Sweep every per-period emission-cap constraint registered in the model and
-# extract its absolute shadow price (EUR / tCO2eq). Returns a Vector of Dicts
-# suitable for `write_emission_prices_parquet`. Robust to constraints that are
-# not in this build (returns an empty list when no duals are available).
+# Sweep every emission-cap constraint _add_emission_targets! registered
+# (balance.jl) and extract its absolute shadow price (EUR / tCO2eq). Returns
+# a Vector of Dicts suitable for `write_emission_prices_parquet`. Robust to
+# constraints that are not in this build (returns an empty list when no
+# targets were registered at all - e.g. no cap defined for this dataset).
 function _extract_emission_prices(model, md::ModelData)
     out = Vector{Dict{String,Any}}()
-    nodes = unique(vcat([:NL, :EU], md.sets.nodes))
-    # (constraint base name, node-scoped?) — for each period we generate every
-    # plausible registered name and capture the shadow price if it exists.
-    cap_kinds = [
-        ("emTargetAir",                true),
-        ("emTargetBunker",             true),
-        ("emTargetFS",                 true),
-        ("emTargetAll",                true),
-        ("emTargetInclScope3",         false),
-        ("emTargetInclScope3FuelEx",   false),
-        ("co2StorageCum",              true),  # cumulative, period column = 0
-    ]
-    for ps in md.sets.periods_solve
-        for (base, per_node) in cap_kinds
-            iter = per_node ? nodes : [Symbol("")]
-            for n in iter
-                name = per_node ? "$(base)[$(n),$(ps)]" : "$(base)[$(ps)]"
-                con = try
-                    constraint_by_name(model, name)
-                catch
-                    nothing
-                end
-                con === nothing && continue
-                price = try
-                    abs(shadow_price(con))
-                catch
-                    NaN
-                end
-                isfinite(price) || continue
-                push!(out, Dict{String,Any}(
-                    "name"   => base,
-                    "node"   => per_node ? string(n) : "",
-                    "period" => Int(ps),
-                    "price"  => Float64(price),
-                ))
-            end
+    targets = get(model.ext, :emission_targets, Dict{Tuple{Symbol,Symbol,Int},JuMP.ConstraintRef}())
+    for ((kind, node, period), con) in targets
+        price = try
+            abs(shadow_price(con))
+        catch
+            NaN
         end
+        isfinite(price) || continue
+        push!(out, Dict{String,Any}(
+            "name"   => String(kind),
+            "node"   => node == Symbol("") ? "" : string(node),
+            "period" => Int(period),
+            "price"  => Float64(price),
+        ))
     end
     return out
 end
