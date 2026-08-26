@@ -11,7 +11,8 @@ hoursPer_day >= 12 branch (the TS sweep hot path).
 
 Default Gurobi attributes for the production TS solve path. Mirrors the
 IESA-Opt 1.0 Phase 7 settings: Barrier method, no crossover, BarHomogeneous=1
-for Optimal certification, all tolerances at 1e-7, all-cores threading. When
+for Optimal certification, all tolerances at 1e-7, threading left to Julia's
+scheduler minus a couple reserved cores. When
 `rep_days` is provided, representative-day tuning ranges add Gurobi presolve
 and scaling settings validated with `grbtune` on 2026-06-14.
 
@@ -70,8 +71,14 @@ function default_gurobi_attributes(; threads::Int = 0, rep_days::Union{Nothing,I
         "Crossover"         => 0,        # No crossover (we accept Barrier endpoint)
         "BarHomogeneous"    => 1,        # Required for Optimal on smaller WY1 LPs
 
-        # Threading
-        "Threads"           => threads,  # 0 = all cores
+        # Threading. threads=0 ("auto") used to mean literally every logical
+        # core - on the UI server that starves the Julia scheduler of a core
+        # to run on, so /api/outputs, job polling and downloads all hang for
+        # the whole solve (confirmed live: /api/outputs timed out repeatedly
+        # during a 16-thread barrier solve, only responding once it let up).
+        # Reserve 2 cores for that scheduler instead; an explicit non-zero
+        # threads value from a caller still passes through unchanged.
+        "Threads"           => threads == 0 ? max(1, Base.Threads.nthreads() - 2) : threads,
 
         # Presolve & scaling (Auto: let Gurobi pick)
         "Presolve"          => -1,

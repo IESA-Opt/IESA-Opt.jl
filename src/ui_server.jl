@@ -4110,6 +4110,36 @@ that's a pre-existing limitation, not one this endpoint needs to solve).
 function _download_result_db(out_dir::AbstractString)
     db_path = _result_db_path(out_dir)
     isfile(db_path) || error("No results.duckdb in $(out_dir) (parquet-mode run?)")
+    # A `persist=true` write connection (see _with_duckdb_write_connection)
+    # is kept open past the end of the run so /api/outputs/* can keep
+    # querying it live - which means recently-written tables can still be
+    # sitting in results.duckdb.wal, uncommitted to the main file. This
+    # endpoint hands back db_path's raw bytes directly (unlike every other
+    # /api/outputs/* route, which reads through DuckDB and would pick up
+    # the WAL transparently), so it has to force a checkpoint first or the
+    # download silently omits everything not yet flushed - e.g. a chained
+    # hand-off run's reverse-seed step reading an empty techStock table.
+    active_con = _active_duckdb_write_connection(db_path)
+    if active_con !== nothing
+        try
+            DBInterface.execute(active_con, "CHECKPOINT")
+        catch
+        end
+    elseif isfile(db_path * ".wal")
+        # No cached connection for this path (e.g. the server restarted
+        # since the run finished) but a stale WAL is still sitting next to
+        # it - opening a connection replays the WAL, so a checkpoint+close
+        # here folds it into db_path the same way a live connection would.
+        try
+            con = _duckdb_connect(db_path)
+            try
+                DBInterface.execute(con, "CHECKPOINT")
+            finally
+                DBInterface.close!(con)
+            end
+        catch
+        end
+    end
     return _file_response(db_path, "application/octet-stream")
 end
 
@@ -4151,8 +4181,17 @@ function _read_duckdb_table_df(db_path::AbstractString, table_name::AbstractStri
     catch
         return DataFrames.DataFrame()
     finally
+        # No GC.gc() here - this runs up to 3x per output directory from
+        # _list_output_runs() (timing_summary/run_statistics/totalCosts),
+        # so /api/outputs was forcing dozens of full, multi-threaded,
+        # stop-the-world collections per request. Confirmed live: that
+        # single endpoint pegged all 16 threads at 1000%+ CPU and never
+        # returned even after 90s on an otherwise-idle server with ~40
+        # output dirs on disk, while the identical connect/query logic
+        # without GC.gc() ran the same 40-dir scan in ~3s in isolation.
+        # Julia's normal incremental GC already reclaims connection
+        # memory; forcing a full collection per query was never needed.
         con !== nothing && DBInterface.close!(con)
-        GC.gc()
     end
 end
 

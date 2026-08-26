@@ -1026,7 +1026,7 @@ function write_flexibility_profile_parquet(vars::AnnualVars, md::ModelData,
                                             mode::Symbol = :fh,
                                             activity_prices_hourly::Union{Nothing,AbstractVector} = nothing)
     s = md.sets
-    p = md.parameters
+    p = md.params
 
     flex_techs = s.tech_flexible
     isempty(flex_techs) && return _write_table(_empty_flex_profile_df(), path)
