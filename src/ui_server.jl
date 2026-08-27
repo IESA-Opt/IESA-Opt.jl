@@ -5495,8 +5495,9 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
     end
 
     on_result = function (_r)
-        # Reserved for streaming per-variant detail (results table /
-        # DuckDB write). on_progress already drives the dashboard.
+        # Results are persisted from the complete master-side return vector
+        # below. The callback is intentionally kept side-effect free because
+        # distributed workers can finish variants in arbitrary order.
         return nothing
     end
 
@@ -5553,7 +5554,7 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
     sampler_done = Ref(false)
     sampler = Base.Threads.@spawn _campaign_rss_sampler!(id, sampler_done)
     try
-        run_campaign(md, subset_changes;
+        campaign_results = run_campaign(md, subset_changes;
                      n_workers = state[:n_workers],
                      threads_per_worker = state[:threads_per_worker],
                      solver = state[:solver],
@@ -5562,6 +5563,19 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                      on_progress = on_progress,
                      on_result = on_result,
                      on_phase = on_phase)
+        # Persist from the master-side result vector. This is both append-safe
+        # and reliable for distributed campaigns: every result collected by
+        # run_campaign is written once, including results completed before a
+        # cooperative cancellation.
+        for result in campaign_results
+            try
+                save_robustness_variant!(id, state[:scenario_spec], state[:samples], result;
+                    solver = String(state[:solver]), mode = state[:mode],
+                    input_workbook = state[:input_path])
+            catch err
+                @error "Could not persist scenario robustness result" id variant_id = result.variant_id error = sprint(showerror, err)
+            end
+        end
     finally
         sampler_done[] = true
         try; wait(sampler); catch; end

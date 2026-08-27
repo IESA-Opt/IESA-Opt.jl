@@ -38,6 +38,37 @@ parameter values used for this variant (post-`:multiply`), aligned with the
 `LeafChange` list the caller passed in. `error === nothing` for successful
 solves; on failure it carries a short stringified message.
 """
+struct DesignValue
+    variable::String
+    variable_name::String
+    value::Float64
+end
+
+const _DESIGN_VARIABLE_PREFIXES = (
+    "cap_investments[", "techStock[", "decomStock[",
+    "retrofitting[", "eco_decommisioning[",
+)
+
+function _capture_design_values(model::JuMP.Model, term::AbstractString)
+    term == "OPTIMAL" || return DesignValue[]
+    values = DesignValue[]
+    for variable in JuMP.all_variables(model)
+        name = JuMP.name(variable)
+        any(startswith(name, prefix) for prefix in _DESIGN_VARIABLE_PREFIXES) || continue
+        value = try
+            Float64(JuMP.value(variable))
+        catch
+            continue
+        end
+        isfinite(value) || continue
+        family_end = findfirst(isequal('['), name)
+        family = family_end === nothing ? name : name[1:family_end - 1]
+        push!(values, DesignValue(family, name, value))
+    end
+    sort!(values; by = x -> (x.variable, x.variable_name))
+    return values
+end
+
 Base.@kwdef struct VariantResult
     variant_id::Int
     leaf_values::Vector{Float64}     = Float64[]
@@ -50,6 +81,7 @@ Base.@kwdef struct VariantResult
     solve_seconds::Float64           = 0.0
     worker_pid::Int                  = 1
     error::Union{String,Nothing}     = nothing
+    design_values::Vector{DesignValue} = DesignValue[]
 end
 
 function _variant_co2_price(model::JuMP.Model, md::ModelData)
@@ -209,6 +241,7 @@ function _run_one_variant!(model::JuMP.Model, md::ModelData,
             primal_status  = prim,
             apply_seconds  = t_apply,
             solve_seconds  = t_solve,
+            design_values  = _capture_design_values(model, term),
         )
     catch err
         return VariantResult(
@@ -380,6 +413,7 @@ function _run_one_variant_filtered!(model::JuMP.Model, md_template::ModelData,
             primal_status  = prim,
             apply_seconds  = t_apply,
             solve_seconds  = t_solve,
+            design_values  = _capture_design_values(model, term),
         )
     catch err
         return VariantResult(
@@ -455,7 +489,7 @@ function _run_campaign_serial(base_md::ModelData,
                 build_seconds = (k == 1 ? t_build : 0.0),
                 apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
                 worker_pid = pid,
-                error = r.error)
+                error = r.error, design_values = r.design_values)
             results[vid] = r
             on_result(r)
             on_progress((variant_id = vid, total = n, stage = "done", result = r))
@@ -521,7 +555,7 @@ function _worker_loop(task_ch::RemoteChannel, result_ch::RemoteChannel,
                 build_seconds = t_build_this,
                 apply_seconds = r.apply_seconds, solve_seconds = r.solve_seconds,
                 worker_pid = pid,
-                error = r.error)
+                error = r.error, design_values = r.design_values)
             n_done += 1
             put!(result_ch, r)
         end

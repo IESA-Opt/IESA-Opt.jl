@@ -101,6 +101,8 @@ include("scenario/runner.jl")
 # Phase 4: high-level orchestrator + result persistence
 include("scenario/orchestrator.jl")
 include("scenario/persistence.jl")
+include("scenario/robustness_persistence.jl")
+include("scenario/robustness_evaluation.jl")
 # Phase 5: analysis helpers (objective_table, sensitivity_scan, pareto_front)
 include("scenario/analysis.jl")
 
@@ -158,7 +160,10 @@ export register_mutation!, is_mutation_registered, registered_mutation_fields
 export build_mutations, apply_mutation!, apply_mutations!
 export apply_leaf_change!, apply_leaf_changes!, apply_variant!
 # Scenario-space exploration (Phase 3: campaign runner)
-export VariantResult, run_campaign
+export DesignValue, VariantResult, run_campaign
+export save_robustness_variant!
+export SavedScenarioRun, load_saved_scenario_runs
+export run_cross_scenario_robustness
 # Scenario-space exploration (Phase 3.5: per-variant clustering)
 export register_clustering_affecting!, unregister_clustering_affecting!
 export is_clustering_affecting, clustering_affecting_fields, variant_affects_clustering

@@ -530,7 +530,7 @@
     // number instead of "auto": total threads = detected, workers = half.
     const detected = state.cpuThreads;
     const defaultThreads = Math.max(1, Math.min(detected || 4, Number(cpuThreads)));
-    const defaultWorkers = Math.max(1, Math.min(detected ? Math.floor(detected / 2) : 4, Number(cpuThreads)));
+    const defaultWorkers = 1;
     if ($("scThreads") && !$("scThreads").dataset.touched) $("scThreads").value = defaultThreads;
     if ($("scThreadsNumber") && !$("scThreadsNumber").dataset.touched) $("scThreadsNumber").value = defaultThreads;
     if ($("scWorkers") && !$("scWorkers").dataset.touched) $("scWorkers").value = defaultWorkers;

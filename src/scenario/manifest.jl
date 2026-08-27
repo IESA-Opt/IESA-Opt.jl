@@ -261,6 +261,76 @@ const _NODE_ONLY_RHS_PARAMS = (
     (:cumulative_CO2storage, "co2StorageCum"),
 )
 
+function _inv_cost_mutations(md::ModelData, idx::Tuple, value::Float64)
+    length(idx) == 2 || throw(ArgumentError(
+        "Mutation builder for `inv_cost` expects (technology, period); got $(idx)"))
+    tech, period = idx
+    s = md.sets
+    p = md.params
+    isempty(s.periods_solve) || period in s.periods_solve || throw(ArgumentError(
+        "inv_cost period $(period) is not in periods_solve $(s.periods_solve)"))
+    isempty(s.technologies) || tech in s.technologies || throw(ArgumentError(
+        "inv_cost technology $(tech) is not in technologies"))
+
+    lifetime_weight = sum(w for ((t_life, _jp, ps_life), w) in p.InvMat_lifeTime
+                          if t_life == tech && ps_life == period; init = 0.0)
+    sdf = get(p.social_discount_factor, period, 1.0)
+    crf = get(p.CRF, tech, 0.0)
+    cap_coef = sdf * lifetime_weight * value * crf
+    mutations = Mutation[Mutation(:obj, "", "cap_investments[$(tech),$(period)]", cap_coef)]
+
+    salvage = get(p.Salvage_value, tech, 0.0)
+    if salvage != 0.0
+        salvage_coef = -sdf * salvage * value * crf
+        push!(mutations, Mutation(:obj, "", "eco_decommisioning[$(tech),$(period)]", salvage_coef))
+        prev = _prev_period(s.periods_solve, period)
+        prev === nothing || push!(mutations,
+            Mutation(:obj, "", "eco_decommisioning[$(tech),$(prev)]", -salvage_coef))
+    end
+    return mutations
+end
+
+function _vom_cost_mutations(md::ModelData, idx::Tuple, value::Float64)
+    length(idx) == 2 || throw(ArgumentError(
+        "Mutation builder for `vom_cost` expects (technology, period); got $(idx)"))
+    tech, period = idx
+    s = md.sets
+    isempty(s.periods_solve) || period in s.periods_solve || throw(ArgumentError(
+        "vom_cost period $(period) is not in periods_solve $(s.periods_solve)"))
+    isempty(s.technologies) || tech in s.technologies || throw(ArgumentError(
+        "vom_cost technology $(tech) is not in technologies"))
+
+    sdf = get(md.params.social_discount_factor, period, 1.0)
+    mutations = Mutation[]
+    if isempty(s.periods_solve)
+        # The UI validator calls builders with an empty placeholder ModelData.
+        push!(mutations, Mutation(:obj, "", "tech_use[$(tech),$(period)]", sdf * value))
+        return mutations
+    end
+    if tech in s.tech_balancers
+        push!(mutations, Mutation(:obj, "", "tech_use[$(tech),$(period)]", sdf * value))
+    end
+    if tech in s.tech_hourlyCHPflex
+        for h in s.hours
+            push!(mutations, Mutation(:obj, "", "deltaU_CHP[$(h),$(tech),$(period)]", sdf * value))
+        end
+    end
+    if tech in s.tech_shedding
+        for h in s.hours
+            push!(mutations, Mutation(:obj, "", "deltaS_shed[$(h),$(tech),$(period)]", sdf * value))
+        end
+    end
+    if tech in s.tech_hourlyDispatch
+        for hc in s.hours_cluster
+            weight = get(md.params.clusterHourWeight, hc, 1.0)
+            push!(mutations, Mutation(:obj, "", "tech_useHourly_TS[$(hc),$(tech),$(period)]", sdf * weight * value))
+        end
+    end
+    isempty(mutations) && throw(ArgumentError(
+        "vom_cost technology $(tech) is not used by a supported objective variable"))
+    return mutations
+end
+
 function _register_default_mutations!()
     empty!(MUTATION_REGISTRY)
     for (field, base) in _NODE_PERIOD_RHS_PARAMS
@@ -290,5 +360,7 @@ function _register_default_mutations!()
             return Mutation[Mutation(:rhs, "$(b)[$(n)]", "", v)]
         end)
     end
+    register_mutation!(:inv_cost, _inv_cost_mutations)
+    register_mutation!(:vom_cost, _vom_cost_mutations)
     return nothing
 end
