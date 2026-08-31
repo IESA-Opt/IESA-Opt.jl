@@ -3565,8 +3565,12 @@ function _extract_activity_prices(model, md::ModelData)
     prices = Dict{Tuple{Symbol,Int,Symbol},Float64}()
     refs = get(model.ext, :activity_balance_annual, Dict{Tuple{Symbol,Int,Symbol},JuMP.ConstraintRef}())
     for ((a, ps, kind), con) in refs
+        # abs(): JuMP's raw dual sign convention for these constraints comes
+        # out consistently <= 0 (confirmed live: every activity/period for a
+        # real solve) - the magnitude is the economically meaningful "price",
+        # same reasoning _extract_emission_prices already applies below.
         v = try
-            shadow_price(con)
+            abs(shadow_price(con))
         catch
             NaN
         end
@@ -3588,12 +3592,14 @@ function _extract_activity_prices_hourly(model, md::ModelData, mode_sym::Symbol;
     isempty(refs) && return out
     mode_str = mode_sym == :ts ? "ts" : "fh"
     for ((a, ps, h), con) in refs
+        # abs(): see _extract_activity_prices' comment - same raw-dual sign
+        # convention applies here.
         v = try
-            shadow_price(con)
+            abs(shadow_price(con))
         catch
             NaN
         end
-        (isfinite(v) && abs(v) > threshold) || continue
+        (isfinite(v) && v > threshold) || continue
         push!(out, Dict{String,Any}(
             "activity"   => String(a),
             "period"     => Int(ps),
@@ -3614,12 +3620,14 @@ function _extract_activity_prices_daily(model, md::ModelData, mode_sym::Symbol; 
     isempty(refs) && return out
     mode_str = mode_sym == :ts ? "ts" : "fh"
     for ((a, ps, d), con) in refs
+        # abs(): see _extract_activity_prices' comment - same raw-dual sign
+        # convention applies here.
         v = try
-            shadow_price(con)
+            abs(shadow_price(con))
         catch
             NaN
         end
-        (isfinite(v) && abs(v) > threshold) || continue
+        (isfinite(v) && v > threshold) || continue
         push!(out, Dict{String,Any}(
             "activity"   => String(a),
             "period"     => Int(ps),
