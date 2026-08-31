@@ -161,6 +161,13 @@ function _add_balance_hourly_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     isempty(s.activities_hour) && return
     tb_set = Set(s.tech_balancers)
 
+    # See balance.jl's activity_balance_annual for why this is keyed by
+    # ConstraintRef instead of relying on constraint_by_name. FH and TS builds
+    # are mutually exclusive per solve, so both this and _add_balance_hourly!
+    # (hourly.jl) sharing the same :activity_balance_hourly ext key is safe.
+    activity_balance_hourly = Dict{Tuple{Symbol,Int,Int},JuMP.ConstraintRef}()
+    m.ext[:activity_balance_hourly] = activity_balance_hourly
+
     bal_idx = _ts_build_balance_by_act(p, s.activities_hour, pss, tb_set)
 
     hdisp_set = Set(s.tech_hourlyDispatch)
@@ -275,7 +282,8 @@ function _add_balance_hourly_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 end
             end
 
-            @constraint(m, expr == 0.0, base_name = "balH_TS[$ah,$hc,$ps]")
+            con = @constraint(m, expr == 0.0, base_name = "balH_TS[$ah,$hc,$ps]")
+            activity_balance_hourly[(ah, Int(ps), Int(hc))] = con
         end
     end
 end
@@ -423,6 +431,13 @@ function _add_balance_daily_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     isempty(s.activities_day) && return
     isempty(s.repDays) && return
     tb_set = Set(s.tech_balancers)
+
+    # See balance.jl's activity_balance_annual for why this is keyed by
+    # ConstraintRef instead of relying on constraint_by_name. FH and TS builds
+    # are mutually exclusive per solve, so both this and _add_balance_daily!
+    # (hourly.jl) sharing the same :activity_balance_daily ext key is safe.
+    activity_balance_daily = Dict{Tuple{Symbol,Int,Int},JuMP.ConstraintRef}()
+    m.ext[:activity_balance_daily] = activity_balance_daily
     hdisp_set = Set(s.tech_hourlyDispatch)
     ddisp_set = Set(s.tech_dailyDispatch)
     chp_set   = Set(s.tech_hourlyCHPflex)
@@ -504,7 +519,8 @@ function _add_balance_daily_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 end
             end
 
-            @constraint(m, expr == 0.0, base_name = "balD_TS[$ad,$rd,$ps]")
+            con = @constraint(m, expr == 0.0, base_name = "balD_TS[$ad,$rd,$ps]")
+            activity_balance_daily[(ad, Int(ps), Int(rd))] = con
         end
     end
 

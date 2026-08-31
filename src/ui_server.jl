@@ -3552,57 +3552,42 @@ end
 # price::Float64. The constraint_kind tag distinguishes the three balance
 # families (one activity can appear in multiple). The dict can be passed
 # straight to `write_activity_prices_parquet`.
+#
+# Reads the ConstraintRefs straight out of `model.ext[:activity_balance_annual]`
+# (populated by balance.jl's add_balance_constraints! while it builds the LP)
+# instead of looking them up by name via constraint_by_name: names are
+# stripped by default (apply_lp_generation_speedups!, showViolations=false,
+# the normal case) to save time/RAM on these large LPs, which silently made
+# this come back empty on every such run - confirmed live, the constraints
+# themselves were always being built correctly, only the post-solve name
+# lookup was failing. Same bug/fix as _extract_emission_prices' emission_targets.
 function _extract_activity_prices(model, md::ModelData)
     prices = Dict{Tuple{Symbol,Int,Symbol},Float64}()
-    # Activities that ever appear in `activity_balances`; capture all three
-    # constraint families (most activities only show up in one of them).
-    activities_seen = Set{Symbol}()
-    for ((_, a, _), _) in md.params.activity_balances
-        push!(activities_seen, a)
-    end
-    isempty(activities_seen) && (activities_seen = Set(md.sets.activities))
-    constraint_families = (:balance, :balanceFix, :balanceMatconv)
-    for ps in md.sets.periods_solve, a in activities_seen, kind in constraint_families
-        name = "$(kind)[$(a),$(ps)]"
-        con = try
-            constraint_by_name(model, name)
-        catch
-            nothing
-        end
-        con === nothing && continue
+    refs = get(model.ext, :activity_balance_annual, Dict{Tuple{Symbol,Int,Symbol},JuMP.ConstraintRef}())
+    for ((a, ps, kind), con) in refs
         v = try
             shadow_price(con)
         catch
             NaN
         end
         isfinite(v) || continue
-        prices[(a, Int(ps), kind)] = Float64(v)
+        prices[(a, ps, kind)] = Float64(v)
     end
     return prices
 end
 
 # Hourly shadow prices for `balH_TS[<a>,<hc>,<ps>]` (TS) or `balH[<a>,<h>,<ps>]`
-# (FH). Iterates over `md.sets.activities_hour` × hours × periods. Only returns
-# entries whose absolute shadow price exceeds `threshold`. The mode tag is
-# stored alongside each entry so downstream tools can interpret `time_index`.
+# (FH). Reads `model.ext[:activity_balance_hourly]` (populated by whichever of
+# hourly.jl/ts.jl actually ran - see _extract_activity_prices' comment on why
+# name-based lookup doesn't work here). Only returns entries whose absolute
+# shadow price exceeds `threshold`. The mode tag is stored alongside each
+# entry so downstream tools can interpret `time_index`.
 function _extract_activity_prices_hourly(model, md::ModelData, mode_sym::Symbol; threshold::Float64 = 1e-6)
     out = Vector{Dict{String,Any}}()
-    activities = md.sets.activities_hour
-    isempty(activities) && return out
-    periods = md.sets.periods_solve
-    is_ts = mode_sym == :ts
-    hours = is_ts ? md.sets.hours_cluster : md.sets.hours
-    isempty(hours) && return out
-    base = is_ts ? "balH_TS" : "balH"
-    mode_str = is_ts ? "ts" : "fh"
-    for ps in periods, a in activities, h in hours
-        name = "$(base)[$(a),$(h),$(ps)]"
-        con = try
-            constraint_by_name(model, name)
-        catch
-            nothing
-        end
-        con === nothing && continue
+    refs = get(model.ext, :activity_balance_hourly, Dict{Tuple{Symbol,Int,Int},JuMP.ConstraintRef}())
+    isempty(refs) && return out
+    mode_str = mode_sym == :ts ? "ts" : "fh"
+    for ((a, ps, h), con) in refs
         v = try
             shadow_price(con)
         catch
@@ -3621,25 +3606,14 @@ function _extract_activity_prices_hourly(model, md::ModelData, mode_sym::Symbol;
 end
 
 # Daily shadow prices for `balD_TS[<a>,<rd>,<ps>]` (TS) or `balD[<a>,<d>,<ps>]`
-# (FH). Same convention as the hourly extractor.
+# (FH). Same convention as the hourly extractor, reading
+# `model.ext[:activity_balance_daily]`.
 function _extract_activity_prices_daily(model, md::ModelData, mode_sym::Symbol; threshold::Float64 = 1e-6)
     out = Vector{Dict{String,Any}}()
-    activities = md.sets.activities_day
-    isempty(activities) && return out
-    periods = md.sets.periods_solve
-    is_ts = mode_sym == :ts
-    days = is_ts ? md.sets.repDays : md.sets.days
-    isempty(days) && return out
-    base = is_ts ? "balD_TS" : "balD"
-    mode_str = is_ts ? "ts" : "fh"
-    for ps in periods, a in activities, d in days
-        name = "$(base)[$(a),$(d),$(ps)]"
-        con = try
-            constraint_by_name(model, name)
-        catch
-            nothing
-        end
-        con === nothing && continue
+    refs = get(model.ext, :activity_balance_daily, Dict{Tuple{Symbol,Int,Int},JuMP.ConstraintRef}())
+    isempty(refs) && return out
+    mode_str = mode_sym == :ts ? "ts" : "fh"
+    for ((a, ps, d), con) in refs
         v = try
             shadow_price(con)
         catch

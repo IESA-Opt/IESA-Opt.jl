@@ -35,6 +35,18 @@ function add_balance_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData
     # Precompute reverse map: activity → list of (tb, coef) for fast LP build
     bal_by_act = _build_balance_index(s, p, pss)
 
+    # Every balance/balanceFix/balanceMatconv constraint built below is
+    # registered here by (activity, period, kind) - kind ∈ (:balance,
+    # :balanceFix, :balanceMatconv) - so _extract_activity_prices (ui_server.jl)
+    # can pull its shadow price back out directly. constraint_by_name can't do
+    # that job: apply_lp_generation_speedups! strips every constraint's name by
+    # default (showViolations=false, the normal case) to save time/RAM on these
+    # large LPs, which silently made activity_prices come back empty on every
+    # such run - same bug already fixed for emission_targets below, now applied
+    # here too.
+    activity_balance_annual = Dict{Tuple{Symbol,Int,Symbol},JuMP.ConstraintRef}()
+    m.ext[:activity_balance_annual] = activity_balance_annual
+
     # -------------------------------------------------------------------------
     # balance_activities (IESA-Opt 1.0 line ~2426): >=
     #   sum[tb, tech_use(tb,ps)*activity_balances(tb,ab,ps)] >= activities_netVolumes(ab, ps)
@@ -51,10 +63,12 @@ function add_balance_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData
         has_terms |= _add_activity_deviation_terms!(expr, vars, s, p, ab, ps)
         if !has_terms
             rhs <= 0.0 && continue   # 0 >= rhs<=0 is trivially true
-            @constraint(m, 0.0 >= rhs, base_name = "balance[$(ab),$(ps)]")
+            con = @constraint(m, 0.0 >= rhs, base_name = "balance[$(ab),$(ps)]")
+            activity_balance_annual[(ab, Int(ps), :balance)] = con
             continue
         end
-        @constraint(m, expr >= rhs, base_name = "balance[$(ab),$(ps)]")
+        con = @constraint(m, expr >= rhs, base_name = "balance[$(ab),$(ps)]")
+        activity_balance_annual[(ab, Int(ps), :balance)] = con
     end
 
     # -------------------------------------------------------------------------
@@ -72,10 +86,12 @@ function add_balance_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData
         has_terms |= _add_activity_deviation_terms!(expr, vars, s, p, af, ps)
         if !has_terms
             rhs == 0.0 && continue
-            @constraint(m, 0.0 == rhs, base_name = "balanceFix[$(af),$(ps)]")
+            con = @constraint(m, 0.0 == rhs, base_name = "balanceFix[$(af),$(ps)]")
+            activity_balance_annual[(af, Int(ps), :balanceFix)] = con
             continue
         end
-        @constraint(m, expr == rhs, base_name = "balanceFix[$(af),$(ps)]")
+        con = @constraint(m, expr == rhs, base_name = "balanceFix[$(af),$(ps)]")
+        activity_balance_annual[(af, Int(ps), :balanceFix)] = con
     end
 
     # -------------------------------------------------------------------------
@@ -93,10 +109,12 @@ function add_balance_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData
         has_terms |= _add_activity_deviation_terms!(expr, vars, s, p, amc, ps)
         if !has_terms
             rhs == 0.0 && continue
-            @constraint(m, 0.0 == rhs, base_name = "balanceMatconv[$(amc),$(ps)]")
+            con = @constraint(m, 0.0 == rhs, base_name = "balanceMatconv[$(amc),$(ps)]")
+            activity_balance_annual[(amc, Int(ps), :balanceMatconv)] = con
             continue
         end
-        @constraint(m, expr == rhs, base_name = "balanceMatconv[$(amc),$(ps)]")
+        con = @constraint(m, expr == rhs, base_name = "balanceMatconv[$(amc),$(ps)]")
+        activity_balance_annual[(amc, Int(ps), :balanceMatconv)] = con
     end
 
     # -------------------------------------------------------------------------

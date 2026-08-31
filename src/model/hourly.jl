@@ -95,6 +95,11 @@ function _add_balance_hourly!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     # are also flex contribute to both the passive base and the flex-delta sums.
     op_set    = _build_tech_Operation(s, p)
 
+    # See balance.jl's activity_balance_annual for why this is keyed by
+    # ConstraintRef instead of relying on constraint_by_name.
+    activity_balance_hourly = Dict{Tuple{Symbol,Int,Int},JuMP.ConstraintRef}()
+    m.ext[:activity_balance_hourly] = activity_balance_hourly
+
     tuh  = vars.tech_useHourly
     tud  = vars.tech_useDaily
     dwUP = vars.deltaW_UP
@@ -193,7 +198,8 @@ function _add_balance_hourly!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 end
             end
 
-            @constraint(m, expr == 0.0, base_name = "balH[$ah,$h,$ps]")
+            con = @constraint(m, expr == 0.0, base_name = "balH[$ah,$h,$ps]")
+            activity_balance_hourly[(ah, Int(ps), Int(h))] = con
         end
     end
 end
@@ -334,6 +340,11 @@ function _add_balance_daily!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     isempty(s.activities_day) && return
     isempty(s.days) && return
     tb_set = Set(s.tech_balancers)
+
+    # See balance.jl's activity_balance_annual for why this is keyed by
+    # ConstraintRef instead of relying on constraint_by_name.
+    activity_balance_daily = Dict{Tuple{Symbol,Int,Int},JuMP.ConstraintRef}()
+    m.ext[:activity_balance_daily] = activity_balance_daily
     hdisp_set = Set(s.tech_hourlyDispatch)
     ddisp_set = Set(s.tech_dailyDispatch)
     chp_set   = Set(s.tech_hourlyCHPflex)
@@ -416,7 +427,8 @@ function _add_balance_daily!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 end
             end
 
-            @constraint(m, expr == 0.0, base_name = "balD[$ad,$d,$ps]")
+            con = @constraint(m, expr == 0.0, base_name = "balD[$ad,$d,$ps]")
+            activity_balance_daily[(ad, Int(ps), Int(d))] = con
         end
     end
 
