@@ -2,6 +2,8 @@
 # scenario/robustness_persistence.jl -- append-safe scenario run store
 # =============================================================================
 
+using CSV
+using DataFrames
 using DuckDB
 import DBInterface
 using JSON3
@@ -23,6 +25,7 @@ function _ensure_robustness_schema!(db)
             run_timestamp VARCHAR NOT NULL,
             campaign_name VARCHAR NOT NULL,
             input_workbook VARCHAR NOT NULL,
+            periods_json VARCHAR NOT NULL DEFAULT '[]',
             sampling_method VARCHAR NOT NULL,
             seed INTEGER NOT NULL,
             solver VARCHAR NOT NULL,
@@ -31,11 +34,14 @@ function _ensure_robustness_schema!(db)
             term_status VARCHAR NOT NULL,
             primal_status VARCHAR NOT NULL,
             feasible BOOLEAN NOT NULL,
+            worker_pid INTEGER,
             error VARCHAR,
             runtime_seconds DOUBLE
         )
     """)
     DBInterface.execute(db, "ALTER TABLE scenario_runs ADD COLUMN IF NOT EXISTS input_workbook VARCHAR DEFAULT ''")
+    DBInterface.execute(db, "ALTER TABLE scenario_runs ADD COLUMN IF NOT EXISTS periods_json VARCHAR DEFAULT '[]'")
+    DBInterface.execute(db, "ALTER TABLE scenario_runs ADD COLUMN IF NOT EXISTS worker_pid INTEGER")
     DBInterface.execute(db, """
         CREATE TABLE IF NOT EXISTS scenario_inputs (
             scenario_id VARCHAR NOT NULL,
@@ -82,6 +88,7 @@ function save_robustness_variant!(campaign_id::AbstractString,
                                   solver::AbstractString = "",
                                   mode::Symbol = :ts,
                                   input_workbook::AbstractString = "",
+                                  periods::AbstractVector{<:Integer} = Int[],
                                   runtime_seconds::Real = NaN,
                                   overwrite::Bool = false,
                                   path::Union{Nothing,AbstractString} = nothing)
@@ -110,15 +117,16 @@ function save_robustness_variant!(campaign_id::AbstractString,
             DBInterface.execute(db, """
                                 INSERT INTO scenario_runs (
                                     scenario_id, campaign_id, variant_id, run_timestamp,
-                                    campaign_name, input_workbook, sampling_method, seed,
+                                    campaign_name, input_workbook, periods_json, sampling_method, seed,
                                     solver, mode, objective, term_status, primal_status,
-                                    feasible, error, runtime_seconds
-                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                        """, [scenario_id, String(campaign_id), result.variant_id, string(now()),
-                                    spec.name, String(input_workbook), String(spec.method), spec.seed,
+                                    feasible, worker_pid, error, runtime_seconds
+                                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            """, [scenario_id, String(campaign_id), result.variant_id, string(now()),
+                                    spec.name, String(input_workbook), String(JSON3.write(Int.(periods))), String(spec.method), spec.seed,
                                     String(solver), String(mode),
                   isfinite(result.objective) ? result.objective : missing,
                   result.term_status, result.primal_status, feasible,
+                  result.worker_pid,
                   result.error === nothing ? missing : result.error,
                   isfinite(Float64(runtime_seconds)) ? Float64(runtime_seconds) : missing])
 
@@ -155,6 +163,7 @@ struct SavedScenarioRun
     campaign_id::String
     variant_id::Int
     input_workbook::String
+    periods::Vector{Int}
     inputs::Vector{LeafChange}
     objective::Union{Float64,Missing}
     term_status::String
@@ -202,8 +211,9 @@ function load_saved_scenario_runs(; path::Union{Nothing,AbstractString} = nothin
                        String(run.term_status) in ("OPTIMAL", "LOCALLY_SOLVED", "ALMOST_OPTIMAL") &&
                        !isempty(designs)
             complete || include_incomplete || continue
+            periods = try Int.(JSON3.read(String(run.periods_json))) catch; Int[] end
             push!(loaded, SavedScenarioRun(
-                sid, String(run.campaign_id), Int(run.variant_id), String(run.input_workbook), inputs,
+                sid, String(run.campaign_id), Int(run.variant_id), String(run.input_workbook), periods, inputs,
                 run.objective, String(run.term_status), String(run.primal_status),
                 Bool(run.feasible), designs))
         end
@@ -216,4 +226,152 @@ function load_saved_scenario_runs(; path::Union{Nothing,AbstractString} = nothin
     end
 end
 
-export DesignValue, save_robustness_variant!, SavedScenarioRun, load_saved_scenario_runs
+function _flatten_csv_column_name(raw::AbstractString, fallback::AbstractString = "value")
+    candidate = String(raw)
+    candidate = replace(candidate, r"[^A-Za-z0-9_]+" => "_")
+    candidate = replace(candidate, r"_+" => "_")
+    candidate = strip(candidate, '_')
+    if isempty(candidate)
+        candidate = fallback
+    end
+    return lowercase(candidate)
+end
+
+function _flatten_robustness_rows(db_path::AbstractString)
+    db = DuckDB.DB(db_path)
+    try
+        runs = DBInterface.execute(db, "SELECT * FROM scenario_runs ORDER BY variant_id") |> DataFrame
+        inputs = DBInterface.execute(db, "SELECT * FROM scenario_inputs ORDER BY scenario_id, target_id") |> DataFrame
+        designs = DBInterface.execute(db, "SELECT * FROM scenario_designs ORDER BY scenario_id, variable_name") |> DataFrame
+        kpis = DBInterface.execute(db, "SELECT * FROM scenario_kpis ORDER BY scenario_id, kpi") |> DataFrame
+
+        if isempty(runs)
+            return DataFrame()
+        end
+
+        base_cols = [
+            "scenario_id", "campaign_id", "variant_id", "run_timestamp", "campaign_name",
+            "input_workbook", "sampling_method", "seed", "solver", "mode", "objective",
+            "term_status", "primal_status", "feasible", "error", "runtime_seconds"
+        ]
+
+        input_names = String[]
+        design_names = String[]
+        kpi_names = String[]
+        for row in eachrow(inputs)
+            name = _flatten_csv_column_name(String(row.label), "input_value")
+            if name ∉ input_names
+                push!(input_names, name)
+            end
+        end
+        for row in eachrow(designs)
+            name = _flatten_csv_column_name(String(row.variable_name), "design_value")
+            if name ∉ design_names
+                push!(design_names, name)
+            end
+        end
+        for row in eachrow(kpis)
+            name = _flatten_csv_column_name(String(row.kpi), "kpi")
+            if name ∉ kpi_names
+                push!(kpi_names, name)
+            end
+        end
+
+        rows = Dict{String,Any}[]
+        for run in eachrow(runs)
+            row = Dict{String,Any}()
+            for col in base_cols
+                row[col] = getproperty(run, Symbol(col))
+            end
+            sid = String(run.scenario_id)
+            for input_row in eachrow(filter(r -> String(r.scenario_id) == sid, inputs))
+                input_name = _flatten_csv_column_name(String(input_row.label), "input_value")
+                row[input_name] = input_row.sampled_value
+            end
+            for design_row in eachrow(filter(r -> String(r.scenario_id) == sid, designs))
+                design_name = _flatten_csv_column_name(String(design_row.variable_name), "design_value")
+                row[design_name] = design_row.value
+            end
+            for kpi_row in eachrow(filter(r -> String(r.scenario_id) == sid, kpis))
+                kpi_name = _flatten_csv_column_name(String(kpi_row.kpi), "kpi")
+                row[kpi_name] = kpi_row.value
+            end
+            push!(rows, row)
+        end
+
+        if isempty(rows)
+            return DataFrame()
+        end
+
+        flattened = DataFrame(rows)
+        ordered = String[]
+        for col in base_cols
+            if col ∈ names(flattened)
+                push!(ordered, col)
+            end
+        end
+        for col in vcat(input_names, design_names, kpi_names)
+            if col ∈ names(flattened) && col ∉ ordered
+                push!(ordered, col)
+            end
+        end
+        for col in names(flattened)
+            if col ∉ ordered
+                push!(ordered, col)
+            end
+        end
+        return flattened[:, ordered]
+    finally
+        DBInterface.close!(db)
+        finalize(db)
+        GC.gc(true)
+    end
+end
+
+"""
+    flatten_robustness_runs_csv(; path=nothing, output_path=nothing, overwrite=false)
+
+Write a one-row-per-scenario CSV export from the canonical DuckDB robustness
+store. The DuckDB file remains the source of truth; this CSV is a derived,
+analysis-friendly export.
+"""
+function flatten_robustness_runs_csv(; path::Union{Nothing,AbstractString} = nothing,
+                                    output_path::Union{Nothing,AbstractString} = nothing,
+                                    overwrite::Bool = false)
+    db_path = path === nothing ? _robustness_runs_path() : String(path)
+    isfile(db_path) || throw(ArgumentError("Scenario robustness database not found: $db_path"))
+    out_path = output_path === nothing ? joinpath(dirname(db_path), "scenario_robustness_flat.csv") : String(output_path)
+    mkpath(dirname(out_path))
+    if isfile(out_path) && !overwrite
+        throw(ArgumentError("Output file already exists: $out_path. Use overwrite=true."))
+    end
+    df = _flatten_robustness_rows(db_path)
+    if isempty(df)
+        # Create a blank CSV with just the canonical column order so callers can
+        # still inspect the empty export without making the DB look missing.
+        empty_df = DataFrame(
+            scenario_id = String[],
+            campaign_id = String[],
+            variant_id = Int[],
+            run_timestamp = String[],
+            campaign_name = String[],
+            input_workbook = String[],
+            sampling_method = String[],
+            seed = Int[],
+            solver = String[],
+            mode = String[],
+            objective = Union{Missing,Float64}[],
+            term_status = String[],
+            primal_status = String[],
+            feasible = Bool[],
+            error = Union{Missing,String}[],
+            runtime_seconds = Union{Missing,Float64}[]
+        )
+        CSV.write(out_path, empty_df)
+        return abspath(out_path)
+    end
+    CSV.write(out_path, df)
+    return abspath(out_path)
+end
+
+export DesignValue, save_robustness_variant!, SavedScenarioRun, load_saved_scenario_runs, flatten_robustness_runs_csv

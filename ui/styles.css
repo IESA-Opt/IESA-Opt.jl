@@ -68,6 +68,7 @@ main { padding:16px 22px 30px; }
 .scenario-campaign-name { font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .scenario-campaign-meta,.scenario-campaign-time { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
 .scenario-results-main-panel { min-width:0; }
+.scenario-results-layout > .scenario-results-main-panel:nth-of-type(2) { grid-column: 1 / -1; }
 .span-2 { grid-column:1 / -1; }
 .panel,.metric { background:var(--surface); border:1px solid var(--line); border-radius:8px; box-shadow:var(--shadow); padding:14px; }
 .compact-panel { padding:12px; }

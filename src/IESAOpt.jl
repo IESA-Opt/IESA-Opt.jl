@@ -103,6 +103,9 @@ include("scenario/orchestrator.jl")
 include("scenario/persistence.jl")
 include("scenario/robustness_persistence.jl")
 include("scenario/robustness_evaluation.jl")
+include("scenario/robustness_matrix.jl")
+include("scenario/robustness_workbook.jl")
+include("scenario/technology_cost_matrix.jl")
 # Phase 5: analysis helpers (objective_table, sensitivity_scan, pareto_front)
 include("scenario/analysis.jl")
 
@@ -164,6 +167,9 @@ export DesignValue, VariantResult, run_campaign
 export save_robustness_variant!
 export SavedScenarioRun, load_saved_scenario_runs
 export run_cross_scenario_robustness
+export robustness_matrix, write_robustness_matrices, create_robustness_matrix
+export create_robustness_workbook_from_csv
+export create_technology_cost_matrix_from_csv
 # Scenario-space exploration (Phase 3.5: per-variant clustering)
 export register_clustering_affecting!, unregister_clustering_affecting!
 export is_clustering_affecting, clustering_affecting_fields, variant_affects_clustering

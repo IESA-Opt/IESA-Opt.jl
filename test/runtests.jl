@@ -39,3 +39,7 @@ end
     include("test_scenario_analysis.jl")
 end
 
+@testset "Scenario-space robustness matrices" begin
+    include("test_scenario_matrix.jl")
+end
+

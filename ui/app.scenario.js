@@ -93,6 +93,9 @@
     campaignId: null,
     scatter: [],
     campaigns: [],
+    robustnessRows: [],
+    robustnessMode: "objective",
+    robustnessTimer: null,
   };
 
   const GSA_METHODS = {
@@ -927,6 +930,131 @@
     if (refresh) refresh.addEventListener("click", () => {
       fetchScenarioCampaigns().catch((err) => console.warn("scenario/campaigns refresh failed", err));
     });
+    const download = $("scenarioDownloadResults");
+    if (download) download.addEventListener("click", downloadScenarioResults);
+    const run = $("scenarioRunRobustness");
+    if (run) run.addEventListener("click", runRobustnessAnalysis);
+    const exportBtn = $("scenarioExportRobustness");
+    if (exportBtn) exportBtn.addEventListener("click", exportRobustnessRows);
+    document.querySelectorAll("[data-robustness-mode]").forEach((button) => button.addEventListener("click", () => {
+      scenarioResultsState.robustnessMode = button.dataset.robustnessMode;
+      document.querySelectorAll("[data-robustness-mode]").forEach((item) => item.classList.toggle("active", item === button));
+      renderRobustnessMatrix();
+    }));
+  }
+
+  async function runRobustnessAnalysis() {
+    const id = scenarioResultsState.campaignId;
+    if (!id) return;
+    const response = await fetch("/api/scenario/robustness/" + encodeURIComponent(id), { method: "POST" });
+    const payload = await response.json();
+    if (!payload || payload.ok === false) throw new Error((payload && payload.error) || "Could not start robustness analysis.");
+    pollRobustness(id);
+  }
+
+  async function pollRobustness(id) {
+    if (scenarioResultsState.robustnessTimer) clearInterval(scenarioResultsState.robustnessTimer);
+    const update = async () => {
+      const status = await (await fetch("/api/scenario/robustness/" + encodeURIComponent(id))).json();
+      const text = $("scenarioRobustnessStatus");
+      if (text) text.textContent = `${status.completed || 0}/${status.total || 0} evaluations complete${status.current_design_id ? `; design ${status.current_design_id} in future ${status.current_future_id}` : ""}${status.failed ? `; ${status.failed} infeasible/failed` : ""}${status.error ? `; ${status.error}` : ""}`;
+      await fetchRobustnessRows(id);
+      if (status.state !== "running" && scenarioResultsState.robustnessTimer) { clearInterval(scenarioResultsState.robustnessTimer); scenarioResultsState.robustnessTimer = null; }
+    };
+    await update();
+    scenarioResultsState.robustnessTimer = setInterval(() => update().catch(console.warn), 1500);
+  }
+
+  async function fetchRobustnessRows(id) {
+    const payload = await (await fetch("/api/scenario/robustnessResults/" + encodeURIComponent(id))).json();
+    scenarioResultsState.robustnessRows = Array.isArray(payload && payload.rows) ? payload.rows : [];
+    const exportBtn = $("scenarioExportRobustness");
+    if (exportBtn) exportBtn.disabled = !scenarioResultsState.robustnessRows.length;
+    renderRobustnessMatrix();
+  }
+
+  function renderRobustnessMatrix() {
+    const el = $("scenarioRobustnessMatrix");
+    const rows = scenarioResultsState.robustnessRows;
+    if (!el || !window.Plotly) return;
+    if (!rows.length) { el.className = "bar-chart empty-state"; el.textContent = "No persisted robustness evaluations yet."; return; }
+    const mode = scenarioResultsState.robustnessMode;
+    const key = mode === "objective" ? "objective_value" : mode;
+    const designs = [...new Set(rows.map((row) => row.candidate_design_id))].sort();
+    const futures = [...new Set(rows.map((row) => row.evaluation_future_id))].sort();
+    const lookup = new Map(rows.map((row) => [row.candidate_design_id + "|" + row.evaluation_future_id, row]));
+    const z = designs.map((design) => futures.map((future) => { const row = lookup.get(design + "|" + future); return row && row[key] !== null ? (mode === "feasible" ? (row.feasible ? 1 : 0) : Number(row[key])) : null; }));
+    const warnings = designs.flatMap((design, y) => futures.map((future, x) => { const row = lookup.get(design + "|" + future); return row && design !== future && row.feasible && Number(row.objective_value) < Number(row.optimal_objective_evaluation_future) - 1e-6 * Math.max(1, Math.abs(Number(row.optimal_objective_evaluation_future))) ? { x: future, y: design } : null; }).filter(Boolean));
+    el.className = "bar-chart plotly-chart";
+    const traces = [{ type: "heatmap", x: futures, y: designs, z, colorscale: mode === "feasible" ? [[0,"#c94d48"],[1,"#25855a"]] : "Viridis", hovertemplate: "Design %{y}<br>Future %{x}<br>Value %{z}<extra></extra>", colorbar: { title: mode === "objective" ? "Cost" : mode === "relative_regret" ? "%" : "" } }];
+    if (warnings.length) traces.push({ type: "scatter", mode: "markers", x: warnings.map((p) => p.x), y: warnings.map((p) => p.y), marker: { symbol: "triangle-up", color: "#d97706", size: 10 }, name: "Below diagonal optimum" });
+    window.Plotly.react(el, traces, { margin: { l: 170, r: 40, t: 24, b: 140 }, xaxis: { title: "Evaluation future", tickangle: -45 }, yaxis: { title: "Candidate optimal design", autorange: "reversed" }, shapes: designs.flatMap((design, i) => { const j = futures.indexOf(design); return j < 0 ? [] : [{ type: "rect", xref: "x", yref: "y", x0: futures[j], x1: futures[j], y0: design, y1: design, line: { color: "#111827", width: 2 } }]; }), showlegend: warnings.length > 0 }, { responsive: true, displaylogo: false });
+  }
+
+  function exportRobustnessRows() {
+    const rows = scenarioResultsState.robustnessRows;
+    if (!rows.length) return;
+    const columns = Object.keys(rows[0]);
+    downloadText(`${safeFilenamePart(scenarioResultsState.campaignId)}_cross_evaluations.csv`, [columns.join(",")].concat(rows.map((row) => columns.map((key) => csvCell(row[key])).join(","))).join("\r\n") + "\r\n", "text/csv;charset=utf-8");
+  }
+
+  function scenarioResultsCsv(rows) {
+    const capacityFamily = "techStock";
+    const inputColumns = [];
+    const capacityColumns = [];
+    (Array.isArray(rows) ? rows : []).forEach((row) => {
+      const parameters = row && row.parameters && typeof row.parameters === "object" ? row.parameters : {};
+      Object.keys(parameters).forEach((key) => {
+        if (!inputColumns.includes(key)) inputColumns.push(key);
+      });
+      const designs = row && row.designs && typeof row.designs === "object" ? row.designs : {};
+      Object.keys(designs).forEach((name) => {
+        const value = Number(designs[name]);
+        const family = name.split("[", 1)[0];
+        if (family === capacityFamily && Number.isFinite(value) && Math.abs(value) > 1e-12 && !capacityColumns.includes(name)) {
+          capacityColumns.push(name);
+        }
+      });
+    });
+    const columns = ["scenario_id", "variant_id", "worker_id", "system_cost", "co2_price", "term_status"]
+      .concat(inputColumns, capacityColumns.map((name) => "capacity:" + name));
+    const header = columns.map(csvCell).join(",");
+    const data = (Array.isArray(rows) ? rows : []).map((row) => {
+      const designs = row && row.designs && typeof row.designs === "object" ? row.designs : {};
+      const base = [
+        row.scenario_id || `${scenarioResultsState.campaignId || "scenario_campaign"}_v${row.variant_id}`,
+        row.variant_id,
+        row.worker_id,
+        row.system_cost,
+        row.co2_price,
+        row.term_status,
+      ].concat(inputColumns.map((key) => row.parameters && row.parameters[key]));
+      return base.concat(capacityColumns.map((name) => designs[name])).map(csvCell).join(",");
+    });
+    return [header].concat(data).join("\r\n") + "\r\n";
+  }
+
+  function downloadScenarioResults() {
+    const rows = scenarioResultsState.scatter || [];
+    if (!rows.length) return;
+    const id = scenarioResultsState.campaignId;
+    if (!id) return;
+    const button = $("scenarioDownloadResults");
+    if (button) button.disabled = true;
+    fetch("/api/scenario/export/" + encodeURIComponent(id), { method: "POST" })
+      .then((response) => response.json())
+      .then((payload) => {
+        if (!payload || payload.ok === false) throw new Error((payload && payload.error) || "CSV export failed.");
+        const matrixNote = payload.matrix_paths && Object.keys(payload.matrix_paths).length
+          ? " Matrix files refreshed."
+          : "";
+        const workbookNote = payload.workbook_path
+          ? " Workbook saved to " + payload.workbook_path + "."
+          : (payload.workbook_error ? " Workbook not refreshed yet: " + payload.workbook_error : "");
+        setStatus("Results saved to " + payload.path + " (" + payload.rows + " scenarios)." + matrixNote + workbookNote, "ok");
+      })
+      .catch((err) => setStatus("Could not save results CSV: " + (err.message || err), "error"))
+      .finally(() => { if (button) button.disabled = false; });
   }
 
   // ---------------------------------------------------------------------------
@@ -1153,7 +1281,12 @@
     }
     scenarioResultsState.campaignId = id;
     scenarioResultsState.scatter = Array.isArray(payload.scatter) ? payload.scatter : [];
+    const download = $("scenarioDownloadResults");
+    if (download) download.disabled = scenarioResultsState.scatter.length === 0;
     renderScenarioResults(payload);
+    const run = $("scenarioRunRobustness");
+    if (run) run.disabled = !payload.done;
+    if (payload.done) pollRobustness(id).catch(console.warn);
   }
 
   async function fetchScenarioCampaigns() {
@@ -1203,6 +1336,10 @@
       + (started ? `<span class="scenario-campaign-time">Started ${escapeHtml(started)}</span>` : "");
     btn.addEventListener("click", () => {
       scenarioResultsState.campaignId = c.id;
+      scenarioResultsState.robustnessRows = [];
+      scenarioResultsState.scatter = [];
+      const download = $("scenarioDownloadResults");
+      if (download) download.disabled = true;
       renderScenarioCampaignList();
       fetchScenarioResult(c.id).catch((err) => {
         renderScenarioResults({ scatter: [], error: err && err.message ? err.message : String(err) });
@@ -1212,7 +1349,9 @@
   }
 
   function renderScenarioResults(payload) {
-    const rows = Array.isArray(payload && payload.scatter) ? payload.scatter : scenarioResultsState.scatter || [];
+    const rows = Array.isArray(payload && payload.scatter) ? payload.scatter : (scenarioResultsState.scatter || []);
+    const download = $("scenarioDownloadResults");
+    if (download) download.disabled = rows.length === 0;
     const summary = $("scenarioResultsSummary");
     const total = rows.length;
     const points = rows.map((r) => ({

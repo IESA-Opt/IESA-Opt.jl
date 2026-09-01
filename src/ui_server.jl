@@ -25,6 +25,8 @@ const UI_CAMPAIGN_CANCEL = Dict{String,Ref{Bool}}()
 # poll's deepcopy.
 const UI_CAMPAIGN_STATE = Dict{String,Dict{Symbol,Any}}()
 const UI_CAMPAIGNS_LOCK = ReentrantLock()
+const UI_ROBUSTNESS_RUNS = Dict{String,Dict{String,Any}}()
+const UI_ROBUSTNESS_LOCK = ReentrantLock()
 const UI_MGA_CAMPAIGNS = Dict{String,Dict{String,Any}}()
 const UI_MGA_TASKS = Dict{String,Task}()
 const UI_MGA_LOCK = ReentrantLock()
@@ -209,10 +211,18 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
             return _json_response(_scenario_status(parts[4]))
         elseif length(parts) == 4 && parts[3] == "result"
             return _json_response(_scenario_result(parts[4]))
+        elseif length(parts) == 4 && parts[3] == "robustness"
+            return _json_response(_scenario_robustness_status(parts[4]))
+        elseif length(parts) == 4 && parts[3] == "robustnessResults"
+            return _json_response(_scenario_robustness_results(parts[4]))
         end
     elseif method == "POST" && startswith(path, "/api/scenario/")
         parts = _url_parts(path)
-        if length(parts) == 4 && parts[3] == "stop"
+        if length(parts) == 4 && parts[3] == "export"
+            return _json_response(_scenario_export_csv(parts[4]))
+        elseif length(parts) == 4 && parts[3] == "robustness"
+            return _json_response(_scenario_start_robustness!(parts[4]); status = 202)
+        elseif length(parts) == 4 && parts[3] == "stop"
             return _json_response(_scenario_stop!(parts[4]))
         elseif length(parts) == 4 && parts[3] == "pause"
             return _json_response(_scenario_pause!(parts[4]))
@@ -5353,7 +5363,7 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
             snap["campaign"]["state"] = "completed"
             snap["campaign"]["stage"] = "All variants completed"
             _campaign_set_phase!(snap, "solve", "done"; detail = "No variants pending")
-            _campaign_set_phase!(snap, "write", "skipped"; detail = "Export not enabled")
+            _campaign_set_phase!(snap, "write", "done"; detail = "Results available for CSV download")
             snap["done"] = true
         end
         return nothing
@@ -5446,12 +5456,14 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                             0.05 * Float64(total))
                     end
                     push!(snap["result_points"], Dict{String,Any}(
+                        "scenario_id" => string(id, "_v", real_vid),
                         "variant_id" => real_vid,
                         "worker_id" => wid,
                         "system_cost" => obj,
                         "co2_price" => co2p,
                         "term_status" => term,
                         "parameters" => Dict(String(label) => val for (label, val) in zip(get(snap, "parameter_labels", String[]), res.leaf_values)),
+                        "designs" => Dict(design.variable_name => design.value for design in res.design_values),
                     ))
                 end
                 w["status"] = failed ? "failed" : "done"
@@ -5494,10 +5506,16 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
         end
     end
 
-    on_result = function (_r)
-        # Results are persisted from the complete master-side return vector
-        # below. The callback is intentionally kept side-effect free because
-        # distributed workers can finish variants in arbitrary order.
+    on_result = function (result)
+        # Persist each result as soon as the master receives it. The store has
+        # a primary key per campaign variant, so retries remain append-safe.
+        try
+            save_robustness_variant!(id, state[:scenario_spec], state[:samples], result;
+                solver = String(state[:solver]), mode = state[:mode],
+                input_workbook = state[:input_path], periods = state[:periods])
+        catch err
+            @error "Could not persist scenario robustness result" id variant_id = result.variant_id error = sprint(showerror, err)
+        end
         return nothing
     end
 
@@ -5563,19 +5581,6 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
                      on_progress = on_progress,
                      on_result = on_result,
                      on_phase = on_phase)
-        # Persist from the master-side result vector. This is both append-safe
-        # and reliable for distributed campaigns: every result collected by
-        # run_campaign is written once, including results completed before a
-        # cooperative cancellation.
-        for result in campaign_results
-            try
-                save_robustness_variant!(id, state[:scenario_spec], state[:samples], result;
-                    solver = String(state[:solver]), mode = state[:mode],
-                    input_workbook = state[:input_path])
-            catch err
-                @error "Could not persist scenario robustness result" id variant_id = result.variant_id error = sprint(showerror, err)
-            end
-        end
     finally
         sampler_done[] = true
         try; wait(sampler); catch; end
@@ -5635,7 +5640,7 @@ function _execute_pending_variants!(id::String, cancel::Ref{Bool})
             _campaign_set_phase!(snap, "solve", "done";
                                  detail = string(snap["campaign"]["completed"] + snap["campaign"]["failed"], "/",
                                                  snap["campaign"]["total"], " variants solved"))
-            _campaign_set_phase!(snap, "write", "skipped"; detail = "Export not enabled")
+            _campaign_set_phase!(snap, "write", "done"; detail = "Results available for CSV download")
             prev = get(snap["campaign"], "runtime_sec", 0.0)
             snap["campaign"]["runtime_sec"] = round(prev + leg_seconds, digits = 3)
             snap["done"] = true
@@ -5932,6 +5937,68 @@ end
 Final summary for a completed campaign. Returns `done=false` if the
 task is still running so the UI can keep polling.
 """
+function _scenario_stored_designs(id::AbstractString)
+    db_path = try
+        _robustness_runs_path()
+    catch
+        return Dict{Int,Dict{String,Any}}()
+    end
+    isfile(db_path) || return Dict{Int,Dict{String,Any}}()
+    db = nothing
+    try
+        db = DuckDB.DB(db_path; readonly = true)
+        rows = DBInterface.execute(db, """
+            SELECT scenario_id, variable_name, value
+            FROM scenario_designs
+            WHERE scenario_id LIKE ?
+            ORDER BY scenario_id, variable_name
+        """, [String(id) * "_v%"]) |> DataFrame
+        designs = Dict{Int,Dict{String,Any}}()
+        for row in eachrow(rows)
+            variant_match = Base.match(r"_v(\d+)$", String(row.scenario_id))
+            variant_match === nothing && continue
+            variant_id = parse(Int, variant_match.captures[1])
+            get!(designs, variant_id, Dict{String,Any}())[String(row.variable_name)] = row.value
+        end
+        return designs
+    catch
+        return Dict{Int,Dict{String,Any}}()
+    finally
+        db !== nothing && try DBInterface.close!(db) catch end
+    end
+end
+
+function _scenario_stored_input_ids(id::AbstractString)
+    db_path = try
+        _robustness_runs_path()
+    catch
+        return Dict{String,String}()
+    end
+    isfile(db_path) || return Dict{String,String}()
+    db = nothing
+    try
+        db = DuckDB.DB(db_path; readonly = true)
+        rows = DBInterface.execute(db, """
+            SELECT label, field, indices_json
+            FROM scenario_inputs
+            WHERE scenario_id LIKE ?
+            ORDER BY target_id
+        """, [String(id) * "_v%"]) |> DataFrame
+        ids = Dict{String,String}()
+        for row in eachrow(rows)
+            String(row.field) in ("inv_cost", "fom_cost", "vom_cost") || continue
+            indices = JSON3.read(String(row.indices_json))
+            isempty(indices) && continue
+            ids[String(row.label)] = String(first(indices))
+        end
+        return ids
+    catch
+        return Dict{String,String}()
+    finally
+        db !== nothing && try DBInterface.close!(db) catch end
+    end
+end
+
 function _scenario_result(id::AbstractString)
     lock(UI_CAMPAIGNS_LOCK)
     try
@@ -5940,13 +6007,21 @@ function _scenario_result(id::AbstractString)
             "ok" => false,
             "error" => "Unknown campaign id: $id",
         )
+        scatter = deepcopy(get(snap, "result_points", Vector{Dict{String,Any}}()))
+        stored_designs = _scenario_stored_designs(id)
+        for row in scatter
+            variant_id = try Int(row["variant_id"]) catch; 0 end
+            if (!haskey(row, "designs") || isempty(row["designs"])) && haskey(stored_designs, variant_id)
+                row["designs"] = stored_designs[variant_id]
+            end
+        end
         return Dict{String,Any}(
             "ok" => true,
             "done" => snap["done"],
             "campaign" => snap["campaign"],
             "workers" => snap["workers"],
             "parameter_labels" => get(snap, "parameter_labels", String[]),
-            "scatter" => get(snap, "result_points", Vector{Dict{String,Any}}()),
+            "scatter" => scatter,
             "error" => snap["error"],
         )
     finally
@@ -5978,4 +6053,206 @@ function _scenario_campaigns()
     finally
         unlock(UI_CAMPAIGNS_LOCK)
     end
+end
+
+function _scenario_robustness_rows(campaign_id::AbstractString)
+    path = _cross_evaluation_path(nothing)
+    isfile(path) || return DataFrame()
+    db = DuckDB.DB(path; readonly = true)
+    try
+        return DBInterface.execute(db, """
+            SELECT * FROM cross_evaluations
+            WHERE candidate_design_id LIKE ? AND evaluation_future_id LIKE ?
+            ORDER BY candidate_design_id, evaluation_future_id
+        """, [String(campaign_id) * "_v%", String(campaign_id) * "_v%"]) |> DataFrame
+    finally
+        DBInterface.close!(db)
+    end
+end
+
+function _scenario_robustness_status(campaign_id::AbstractString)
+    rows = try _scenario_robustness_rows(campaign_id) catch; DataFrame() end
+    total = try length(_robustness_campaign_scenarios(load_saved_scenario_runs(), campaign_id))^2 catch; 0 end
+    lock(UI_ROBUSTNESS_LOCK)
+    try
+        state = get(UI_ROBUSTNESS_RUNS, String(campaign_id), Dict{String,Any}())
+        return Dict{String,Any}("ok" => true, "campaign_id" => String(campaign_id),
+            "state" => get(state, "state", nrow(rows) >= total && total > 0 ? "completed" : "idle"),
+            "completed" => nrow(rows), "total" => total,
+            "current_design_id" => get(state, "current_design_id", ""),
+            "current_future_id" => get(state, "current_future_id", ""),
+            "failed" => nrow(rows) == 0 ? 0 : count(!, rows.feasible),
+            "error" => get(state, "error", ""))
+    finally
+        unlock(UI_ROBUSTNESS_LOCK)
+    end
+end
+
+function _scenario_robustness_config(campaign_id::AbstractString)
+    db_path = _robustness_runs_path()
+    db = DuckDB.DB(db_path; readonly = true)
+    try
+        rows = DBInterface.execute(db, """
+            SELECT solver, mode FROM scenario_runs
+            WHERE campaign_id = ? ORDER BY variant_id LIMIT 1
+        """, [String(campaign_id)]) |> DataFrame
+        isempty(rows) && throw(ArgumentError("No persisted scenario configuration found for campaign '$campaign_id'."))
+        return (solver = Symbol(lowercase(String(rows[1, :solver]))),
+                mode = Symbol(lowercase(String(rows[1, :mode]))))
+    finally
+        DBInterface.close!(db)
+    end
+end
+
+function _scenario_start_robustness!(campaign_id::AbstractString)
+    campaign = String(campaign_id)
+    lock(UI_ROBUSTNESS_LOCK)
+    try
+        current = get(UI_ROBUSTNESS_RUNS, campaign, nothing)
+        current !== nothing && get(current, "state", "") == "running" &&
+            return Dict{String,Any}("ok" => true, "campaign_id" => campaign, "already_running" => true)
+        UI_ROBUSTNESS_RUNS[campaign] = Dict{String,Any}("state" => "running", "current_design_id" => "",
+            "current_future_id" => "", "error" => "")
+    finally
+        unlock(UI_ROBUSTNESS_LOCK)
+    end
+    config = _scenario_robustness_config(campaign)
+    Base.Threads.@spawn begin
+        try
+            run_cross_scenario_robustness(campaign_id = campaign, solver = config.solver, mode = config.mode,
+                on_progress = info -> begin
+                    lock(UI_ROBUSTNESS_LOCK)
+                    try
+                        state = UI_ROBUSTNESS_RUNS[campaign]
+                        state["current_design_id"] = info.candidate_design_id
+                        state["current_future_id"] = info.evaluation_future_id
+                    finally
+                        unlock(UI_ROBUSTNESS_LOCK)
+                    end
+                end)
+            lock(UI_ROBUSTNESS_LOCK)
+            try UI_ROBUSTNESS_RUNS[campaign]["state"] = "completed" finally unlock(UI_ROBUSTNESS_LOCK) end
+        catch err
+            lock(UI_ROBUSTNESS_LOCK)
+            try
+                UI_ROBUSTNESS_RUNS[campaign]["state"] = "failed"
+                UI_ROBUSTNESS_RUNS[campaign]["error"] = sprint(showerror, err)
+            finally
+                unlock(UI_ROBUSTNESS_LOCK)
+            end
+        end
+    end
+    return Dict{String,Any}("ok" => true, "campaign_id" => campaign)
+end
+
+function _scenario_robustness_results(campaign_id::AbstractString)
+    rows = _scenario_robustness_rows(campaign_id)
+    return Dict{String,Any}("ok" => true, "rows" => _df_rows(rows, max(1, nrow(rows))))
+end
+
+function _scenario_csv_cell(value)
+    text = value === nothing || value === missing ? "" : string(value)
+    escaped = replace(text, "\"" => "\"\"")
+    return occursin(r"[,\"\r\n]", text) ? "\"$(escaped)\"" : text
+end
+
+function _scenario_export_csv(id::AbstractString)
+    snap = nothing
+    lock(UI_CAMPAIGNS_LOCK)
+    try
+        snap = deepcopy(get(UI_CAMPAIGNS, String(id), nothing))
+    finally
+        unlock(UI_CAMPAIGNS_LOCK)
+    end
+    snap === nothing && return Dict{String,Any}("ok" => false, "error" => "Unknown campaign id: $id")
+
+    scatter = get(snap, "result_points", Vector{Dict{String,Any}}())
+    stored_designs = _scenario_stored_designs(id)
+    stored_input_ids = _scenario_stored_input_ids(id)
+    selected_tech_ids = Set(values(stored_input_ids))
+    rows = Dict{String,Any}[]
+    input_columns = String[]
+    capacity_columns = String[]
+    for source_row in scatter
+        row = deepcopy(source_row)
+        variant_id = try Int(row["variant_id"]) catch; 0 end
+        row["scenario_id"] = get(row, "scenario_id", string(id, "_v", variant_id))
+        designs = get(row, "designs", Dict{String,Any}())
+        if isempty(designs) && haskey(stored_designs, variant_id)
+            designs = stored_designs[variant_id]
+            row["designs"] = designs
+        end
+        parameters = get(row, "parameters", Dict{String,Any}())
+        for key in keys(parameters)
+            String(key) in input_columns || push!(input_columns, String(key))
+        end
+        for key in keys(designs)
+            name = String(key)
+            startswith(name, "techStock[") || continue
+            tech_match = Base.match(r"^techStock\[([^,\]]+),", name)
+            tech_match === nothing && continue
+            String(tech_match.captures[1]) in selected_tech_ids || continue
+            value = try Float64(designs[key]) catch; NaN end
+            isfinite(value) && abs(value) > 1e-12 || continue
+            name in capacity_columns || push!(capacity_columns, name)
+        end
+        push!(rows, row)
+    end
+    sort!(input_columns)
+    sort!(capacity_columns)
+
+    out_dir = joinpath(_repo_root(), "Output_Batch", "scenario_robustness")
+    mkpath(out_dir)
+    out_path = joinpath(out_dir, string(id, "_results.csv"))
+    columns = ["scenario_id", "variant_id", "worker_id", "system_cost", "co2_price", "term_status"]
+    append!(columns, input_columns)
+    append!(columns, ["capacity:" * name for name in capacity_columns])
+    tech_ids = Any["", "", "", "", "", ""]
+    append!(tech_ids, [get(stored_input_ids, key, "") for key in input_columns])
+    append!(tech_ids, [begin
+        tech_match = Base.match(r"^techStock\[([^,\]]+),", name)
+        tech_match === nothing ? "" : String(tech_match.captures[1])
+    end for name in capacity_columns])
+    open(out_path, "w") do io
+        println(io, join(_scenario_csv_cell.(columns), ","))
+        println(io, join(_scenario_csv_cell.(tech_ids), ","))
+        for row in rows
+            parameters = get(row, "parameters", Dict{String,Any}())
+            designs = get(row, "designs", Dict{String,Any}())
+            values = Any[
+                get(row, "scenario_id", ""), get(row, "variant_id", ""),
+                get(row, "worker_id", ""), get(row, "system_cost", ""),
+                get(row, "co2_price", ""), get(row, "term_status", ""),
+            ]
+            append!(values, [get(parameters, key, "") for key in input_columns])
+            append!(values, [get(designs, name, "") for name in capacity_columns])
+            println(io, join(_scenario_csv_cell.(values), ","))
+        end
+    end
+    matrix_paths = Dict{Symbol,String}()
+    cross_path = _cross_evaluation_path(nothing)
+    if isfile(cross_path)
+        try
+            matrix_paths = create_robustness_matrix_from_csv(out_path; overwrite = true).paths
+        catch err
+            @warn "Could not refresh robustness matrices from scenario CSV" id error = sprint(showerror, err)
+        end
+    end
+    workbook_path = ""
+    workbook_error = ""
+    try
+        report = create_robustness_workbook_from_csv(out_path; overwrite = true)
+        workbook_path = replace(relpath(report.path, _repo_root()), '\\' => '/')
+    catch err
+        workbook_error = sprint(showerror, err)
+    end
+    return Dict{String,Any}(
+        "ok" => true,
+        "path" => replace(relpath(out_path, _repo_root()), '\\' => '/'),
+        "rows" => length(rows),
+        "capacity_columns" => length(capacity_columns),
+        "matrix_paths" => Dict(String(key) => replace(value, '\\' => '/') for (key, value) in matrix_paths),
+        "workbook_path" => workbook_path,
+        "workbook_error" => workbook_error,
+    )
 end

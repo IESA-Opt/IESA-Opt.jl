@@ -140,3 +140,38 @@ end
     @test attrs["ScaleFlag"] == 2
     @test attrs["Crossover"] == -1
 end
+
+@testset "flatten robustness runs CSV export" begin
+    tmpdir = mktempdir()
+    db_path = joinpath(tmpdir, "robustness_flatten_test.duckdb")
+    spec = ScenarioSpec(
+        name = "test_flatten",
+        method = :sobol,
+        n_variants = 1,
+        seed = 7,
+        targets = [LeafTarget(:emissionTargetAir, (:NL, 2050); min = 0.5, max = 1.5, label = "co2_cap")],
+    )
+    samples = [0.75;;]
+    result = VariantResult(
+        variant_id = 1,
+        leaf_values = [0.75],
+        objective = 123.45,
+        co2_price = 42.0,
+        term_status = "OPTIMAL",
+        primal_status = "FEASIBLE_POINT",
+        design_values = [DesignValue("cap_investments", "cap_investments[NL,2050]", 7.5)],
+    )
+
+    saved = IESAOpt.save_robustness_variant!("campaign_flat", spec, samples, result; solver = "highs", mode = :ts, path = db_path)
+    @test saved.inserted == true
+
+    csv_path = IESAOpt.flatten_robustness_runs_csv(path = db_path, output_path = joinpath(tmpdir, "scenario_flat.csv"), overwrite = true)
+    @test isfile(csv_path)
+
+    df = CSV.read(csv_path, DataFrame)
+    @test nrow(df) == 1
+    @test df[1, :scenario_id] == "campaign_flat_v1"
+    @test df[1, :objective] == 123.45
+    @test df[1, :co2_cap] == 0.75
+    @test df[1, :design_cap_investments_NL_2050] == 7.5
+end

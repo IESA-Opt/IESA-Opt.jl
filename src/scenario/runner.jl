@@ -50,7 +50,7 @@ const _DESIGN_VARIABLE_PREFIXES = (
 )
 
 function _capture_design_values(model::JuMP.Model, term::AbstractString)
-    term == "OPTIMAL" || return DesignValue[]
+    term in ("OPTIMAL", "LOCALLY_SOLVED", "ALMOST_OPTIMAL") || return DesignValue[]
     values = DesignValue[]
     for variable in JuMP.all_variables(model)
         name = JuMP.name(variable)
@@ -769,14 +769,25 @@ function run_campaign(base_md::ModelData,
                                     on_progress = on_progress,
                                     on_result = on_result, cancel = cancel)
     else
-        return _run_campaign_distributed(base_md, changes_per_variant;
-                                         n_workers = n_workers,
-                                         threads_per_worker = threads_per_worker,
-                                         solver = solver, mode = mode,
-                                         attrs_override = solver_attrs,
-                                         on_progress = on_progress,
-                                         on_result = on_result, on_phase = on_phase,
-                                         cancel = cancel)
+        try
+            return _run_campaign_distributed(base_md, changes_per_variant;
+                                             n_workers = n_workers,
+                                             threads_per_worker = threads_per_worker,
+                                             solver = solver, mode = mode,
+                                             attrs_override = solver_attrs,
+                                             on_progress = on_progress,
+                                             on_result = on_result, on_phase = on_phase,
+                                             cancel = cancel)
+        catch err
+            cancel[] && rethrow()
+            @warn "Distributed Scenario Space workers failed to start; falling back to one in-process worker" error = sprint(showerror, err)
+            on_phase((phase = :rmprocs_failed, error = "Parallel workers unavailable; using one in-process worker", pids = Int[]))
+            return _run_campaign_serial(base_md, changes_per_variant;
+                                        solver = solver, threads = threads_per_worker,
+                                        mode = mode, attrs_override = solver_attrs,
+                                        on_progress = on_progress,
+                                        on_result = on_result, cancel = cancel)
+        end
     end
 end
 

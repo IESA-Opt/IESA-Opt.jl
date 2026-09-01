@@ -385,8 +385,17 @@
           <div class="panel-title">
             <h2>Campaign results</h2>
             <p id="scenarioResultsSummary" class="subtle">Select a campaign to view results.</p>
+            <button id="scenarioDownloadResults" type="button" class="secondary-button" disabled>Download long CSV</button>
           </div>
           <div id="scenarioCostCo2Scatter" class="bar-chart empty-state">No campaign selected.</div>
+        </section>
+        <section class="panel scenario-results-main-panel">
+          <div class="panel-title">
+            <div><h2>Robustness analysis</h2><p id="scenarioRobustnessStatus" class="subtle">Select a completed campaign to evaluate fixed designs across its futures.</p></div>
+            <div class="panel-toolbar"><button id="scenarioRunRobustness" type="button" class="primary-button" disabled>Run robustness analysis</button><button id="scenarioExportRobustness" type="button" class="secondary-button" disabled>Export evaluations CSV</button></div>
+          </div>
+          <div id="scenarioRobustnessModes" class="segmented"><button type="button" data-robustness-mode="objective" class="active">Total System Cost</button><button type="button" data-robustness-mode="absolute_regret">Absolute Regret</button><button type="button" data-robustness-mode="relative_regret">Relative Regret (%)</button><button type="button" data-robustness-mode="feasible">Feasibility</button></div>
+          <div id="scenarioRobustnessMatrix" class="bar-chart empty-state">No robustness evaluations loaded.</div>
         </section>
       </div>
     </section>
