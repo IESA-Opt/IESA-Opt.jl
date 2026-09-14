@@ -1025,7 +1025,8 @@ function _mga_task!(id::String)
     result_payload = try
         input_path = _scenario_input_path(Dict("inputWorkbook" => cfg["inputWorkbook"]))
         md = _read_ui_data_cached(input_path)
-        mga_hybrid_oracle_run(md, _mga_exact_config(cfg); progress = progress)
+        mga_hybrid_oracle_run(md, _mga_exact_config(cfg); progress = progress,
+            output_root = joinpath(_repo_root(), "Output_Batch"), campaign_id = id)
     catch err
         lock(UI_MGA_LOCK)
         try

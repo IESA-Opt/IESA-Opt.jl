@@ -566,7 +566,99 @@ function mga_hybrid_oracle_preview(md::ModelData; directions::Int = 12, cost_sla
     return mga_hybrid_oracle_preview(md, cfg)
 end
 
-function _mga_solve_baseline(md::ModelData, cfg::MGAExactConfig)
+# ---------------------------------------------------------------------------
+# Persisting MGA alternatives as ordinary Opt outputs
+#
+# Each MGA alternative is a real solve of the real IESA-Opt LP (see
+# `_mga_build_model`). Writing it out with the same `write_duckdb_results`
+# a normal single run uses turns every baseline/alternative into a
+# first-class entry under Output_Batch/ - discoverable by the existing
+# `/api/outputs` picker and comparable in compare-results.html with zero
+# changes to either: the picker's label is just `basename(out_dir)`
+# (`_output_run_summary` in ui_server.jl), and the comparison pipeline only
+# cares about the results.duckdb table shapes, which `write_duckdb_results`
+# already produces the same way a normal run does. Best-effort throughout -
+# a write failure is logged and swallowed rather than failing the MGA
+# campaign, since persistence is a bonus on top of the in-memory campaign
+# result, not required for MGA itself to work.
+# ---------------------------------------------------------------------------
+
+function _mga_slugify(text::AbstractString; max_len::Int = 48)
+    slug = replace(strip(String(text)), r"[^A-Za-z0-9]+" => "-")
+    slug = strip(slug, '-')
+    isempty(slug) && (slug = "x")
+    return length(slug) > max_len ? slug[1:max_len] : slug
+end
+
+function _mga_write_output!(model::JuMP.Model, vars::AnnualVars, md::ModelData, cfg::MGAExactConfig,
+                             out_dir::AbstractString, label::AbstractString, mode::Symbol,
+                             solver_label::AbstractString, solve_seconds::Float64,
+                             n_rows::Int, n_cols::Int)
+    try
+        mkpath(out_dir)
+        term = string(termination_status(model))
+        primal = string(primal_status(model))
+        obj = try
+            Float64(objective_value(model))
+        catch
+            NaN
+        end
+        rr = RunResult(
+            out_dir, now(), mode,
+            term, primal, _categorize_status(termination_status(model), primal_status(model)),
+            obj, solve_seconds, solve_seconds,
+            n_rows, n_cols, 0, 0, 0,
+            Dict{String,Any}("mgaLabel" => String(label)), String(label),
+            md.params.n_repDays, md.params.hoursPer_day, md.params.clustering_approach,
+        )
+
+        local co2_prices, emission_prices, activity_prices, activity_prices_hourly, activity_prices_daily
+        try
+            co2_prices = _extract_co2_prices(model, md)
+            emission_prices = _extract_emission_prices(model, md)
+            activity_prices = _extract_activity_prices(model, md)
+            activity_prices_hourly = _extract_activity_prices_hourly(model, md, mode)
+            activity_prices_daily  = _extract_activity_prices_daily(model, md, mode)
+        catch err
+            @warn "MGA output: dual-price extraction failed, writing without prices" label = label err = err
+            co2_prices = nothing; emission_prices = nothing; activity_prices = nothing
+            activity_prices_hourly = nothing; activity_prices_daily = nothing
+        end
+
+        db_path = joinpath(out_dir, IESA_RESULTS_DUCKDB_FILE)
+        _with_duckdb_write_connection(db_path) do
+            write_duckdb_results(rr, vars, md, out_dir; mode = mode, reset = false,
+                co2_prices = co2_prices, activity_prices = activity_prices,
+                emission_prices = emission_prices, activity_prices_hourly = activity_prices_hourly,
+                activity_prices_daily = activity_prices_daily)
+
+            # `write_duckdb_results` covers every real result table; the only
+            # thing it doesn't write is `timing_summary`, which is what the
+            # Output_Batch picker's mode/periods/solver columns read from
+            # (ui_server.jl `_output_run_summary`). Write a minimal version
+            # with the same column names so an MGA-derived run renders
+            # identically to one from the normal single-run UI job.
+            timing = DataFrames.DataFrame(
+                engine = ["Julia"], scenario = [String(label)], inputWorkbook = [""],
+                mode = [String(mode)], periods = [string(cfg.period)],
+                solver = [String(solver_label)], solverVersion = [""],
+                solveMethod = [String(cfg.solve_method)],
+                n_repDays = [md.params.n_repDays], hoursPer_day = [md.params.hoursPer_day],
+                queue_sec = [0.0], dataRead_sec = [0.0], derive_sec = [0.0], cluster_sec = [0.0],
+                optimizerInit_sec = [0.0], generation_sec = [0.0], solve_sec = [solve_seconds],
+                dualExtract_sec = [0.0], resultsWrite_sec = [0.0], total_sec = [solve_seconds],
+                n_rows = [n_rows], n_cols = [n_cols], objective = [obj], termination_status = [term],
+            )
+            _write_duckdb_table(timing, db_path, "timing_summary")
+        end
+        return true
+    catch err
+        @warn "MGA: failed to persist alternative as an Opt output" label = label out_dir = out_dir err = err
+        return false
+    end
+end
+
+function _mga_solve_baseline(md::ModelData, cfg::MGAExactConfig; output_dir::Union{Nothing,AbstractString} = nothing, label::AbstractString = "baseline")
     # First attempt: honor the user-selected solve method.
     model, vars, attrs, solver_label, threads = _mga_build_model(md, cfg)
     started = time()
@@ -596,6 +688,13 @@ function _mga_solve_baseline(md::ModelData, cfg::MGAExactConfig)
     groups = mga_design_groups(md)
     point = _mga_design_values(vars, md, groups)
     investments = _mga_capture_investments(vars, md)
+    n_rows = try num_constraints(model; count_variable_in_set_constraints = false) catch; 0 end
+    n_cols = num_variables(model)
+    output_written = false
+    if output_dir !== nothing
+        output_written = _mga_write_output!(model, vars, md, cfg, String(output_dir), label, cfg.mode,
+                                             solver_label, solve_seconds, n_rows, n_cols)
+    end
     return Dict{String,Any}(
         "model" => model,
         "vars" => vars,
@@ -609,10 +708,11 @@ function _mga_solve_baseline(md::ModelData, cfg::MGAExactConfig)
         "threadsPerSolve" => threads,
         "solveSeconds" => solve_seconds,
         "method" => used_method,
-        "rows" => try num_constraints(model; count_variable_in_set_constraints = false) catch; 0 end,
-        "columns" => num_variables(model),
+        "rows" => n_rows,
+        "columns" => n_cols,
         "terminationStatus" => string(termination_status(model)),
         "primalStatus" => string(primal_status(model)),
+        "outputDir" => output_written ? String(output_dir) : nothing,
     )
 end
 
@@ -633,7 +733,7 @@ function _mga_direction_objective(exprs::Vector{AffExpr}, weights::Vector{Float6
     return objective
 end
 
-function _mga_solve_alternative(md::ModelData, cfg::MGAExactConfig, direction::Dict{String,Any}, baseline_cost::Float64, cost_cap::Float64, lower::Vector{Float64}, upper::Vector{Float64}, baseline_point::Vector{Float64}; target_norm::Union{Nothing,Vector{Float64}} = nothing)
+function _mga_solve_alternative(md::ModelData, cfg::MGAExactConfig, direction::Dict{String,Any}, baseline_cost::Float64, cost_cap::Float64, lower::Vector{Float64}, upper::Vector{Float64}, baseline_point::Vector{Float64}; target_norm::Union{Nothing,Vector{Float64}} = nothing, output_dir::Union{Nothing,AbstractString} = nothing)
     started = time()
     model = nothing
     vars = nothing
@@ -646,6 +746,7 @@ function _mga_solve_alternative(md::ModelData, cfg::MGAExactConfig, direction::D
     term_status = "NotSolved"
     prim_status = "NotSolved"
     error_message = ""
+    written_dir = nothing
     try
         model, vars, _, solver_label, threads = _mga_build_model(md, cfg)
         cost_expr = objective_function(model)
@@ -673,6 +774,15 @@ function _mga_solve_alternative(md::ModelData, cfg::MGAExactConfig, direction::D
             raw_point = _mga_design_values(vars, md, groups)
             system_cost = Float64(value(cost_expr))
             investments = _mga_capture_investments(vars, md)
+            if output_dir !== nothing
+                n_rows = try num_constraints(model; count_variable_in_set_constraints = false) catch; 0 end
+                n_cols = num_variables(model)
+                partial_solve_seconds = round(time() - started; digits = 3)
+                label_text = String(get(direction, "label", "alternative"))
+                ok_write = _mga_write_output!(model, vars, md, cfg, String(output_dir), label_text, cfg.mode,
+                                               solver_label, partial_solve_seconds, n_rows, n_cols)
+                ok_write && (written_dir = String(output_dir))
+            end
         end
     catch err
         error_message = sprint(showerror, err)
@@ -704,6 +814,7 @@ function _mga_solve_alternative(md::ModelData, cfg::MGAExactConfig, direction::D
         "worker" => get(direction, "worker", 1),
         "status" => ok ? "solved" : "failed",
         "investments" => investments,
+        "outputDir" => written_dir,
     )
     isempty(error_message) || (row["errorMessage"] = error_message)
     return row
@@ -715,11 +826,28 @@ function _mga_progress(progress, payload::Dict{String,Any})
     return nothing
 end
 
-function mga_hybrid_oracle_run(md_source::ModelData, cfg::MGAExactConfig; progress = nothing)
+function mga_hybrid_oracle_run(md_source::ModelData, cfg::MGAExactConfig; progress = nothing,
+                                output_root::Union{Nothing,AbstractString} = nothing,
+                                campaign_id::Union{Nothing,AbstractString} = nothing)
+    # When `output_root`/`campaign_id` are given, every solved alternative
+    # (baseline included) is also written out as an ordinary Opt run under
+    # `output_root` - see `_mga_write_output!` above for why that's enough to
+    # make MGA results comparable in the existing Sim/Opt compare UI with no
+    # changes to it.
+    # `campaign_id` (ui_server.jl's job id) already starts with "mga_" - don't
+    # double-prefix it.
+    campaign_tag = campaign_id === nothing ? nothing : String(campaign_id)
+    _mga_output_dir = (id_num, label) -> begin
+        (output_root === nothing || campaign_tag === nothing) && return nothing
+        return joinpath(String(output_root), "$(campaign_tag)__d$(lpad(id_num, 2, '0'))_$(_mga_slugify(label))")
+    end
+    baseline_dir = (output_root === nothing || campaign_tag === nothing) ? nothing :
+                   joinpath(String(output_root), "$(campaign_tag)__baseline")
+
     _mga_progress(progress, Dict("phase" => "prepare", "message" => "Preparing model data (representative days, extreme periods)", "completed" => 0, "total" => cfg.directions))
     md = _mga_prepare_md(md_source, cfg)
     _mga_progress(progress, Dict("phase" => "baseline", "message" => "Solving least-cost baseline", "completed" => 0, "total" => cfg.directions))
-    baseline = _mga_solve_baseline(md, cfg)
+    baseline = _mga_solve_baseline(md, cfg; output_dir = baseline_dir, label = "MGA baseline (least-cost)")
     groups = [Dict{String,Any}(group) for group in baseline["groups"]]
     directions = _mga_planned_directions(groups, cfg)
     baseline_cost = Float64(baseline["cost"])
@@ -752,7 +880,8 @@ function mga_hybrid_oracle_run(md_source::ModelData, cfg::MGAExactConfig; progre
             "directionStatus" => "running",
             "directionStartedAt" => time(),
         ))
-        row = _mga_solve_alternative(md, cfg, direction, baseline_cost, cost_cap, lower, upper, baseline_point)
+        row = _mga_solve_alternative(md, cfg, direction, baseline_cost, cost_cap, lower, upper, baseline_point;
+                                      output_dir = _mga_output_dir(direction_id, direction["label"]))
         push!(results, row)
         raw = Vector{Float64}(row["rawPoint"])
         _mga_update_bounds!(lower, upper, raw)
@@ -802,7 +931,8 @@ function mga_hybrid_oracle_run(md_source::ModelData, cfg::MGAExactConfig; progre
                 "oracleIteration" => iter,
                 "oracleTrace" => trace,
             ))
-            row = _mga_solve_alternative(md, cfg, direction, baseline_cost, cost_cap, lower, upper, baseline_point; target_norm = candidate)
+            row = _mga_solve_alternative(md, cfg, direction, baseline_cost, cost_cap, lower, upper, baseline_point;
+                                          target_norm = candidate, output_dir = _mga_output_dir(direction_id, direction["label"]))
             push!(results, row)
             raw = Vector{Float64}(row["rawPoint"])
             if all(isfinite, raw) && !isempty(raw)
@@ -866,6 +996,7 @@ function mga_hybrid_oracle_run(md_source::ModelData, cfg::MGAExactConfig; progre
         "columns" => baseline["columns"],
         "solvedAlternatives" => count(row -> row["status"] == "solved", results),
         "failedAlternatives" => count(row -> row["status"] != "solved", results),
+        "baselineOutputDir" => get(baseline, "outputDir", nothing),
     )
     directions_out = [Dict{String,Any}(
         "id" => row["direction"],
@@ -873,6 +1004,7 @@ function mga_hybrid_oracle_run(md_source::ModelData, cfg::MGAExactConfig; progre
         "phase" => row["phase"],
         "dominantGroup" => row["dominantGroup"],
         "weights" => row["weights"],
+        "outputDir" => get(row, "outputDir", nothing),
         "point" => row["point"],
         "maxError" => row["maxError"],
         "coverageGain" => row["coverageGain"],
