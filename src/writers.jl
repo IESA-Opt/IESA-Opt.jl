@@ -912,7 +912,16 @@ function write_cost_breakdown_parquet(vars::AnnualVars, md::ModelData, path::Abs
         end
     end
 
-    df = DataFrames.DataFrame(tech = tech_col, period = period_col, component = component_col, cost_MEUR = cost_col; copycols = false)
+    # cost_MEUR above is NPV (every accumulation in this function is
+    # pre-multiplied by sdf = social_discount_factor(ps)), which is not
+    # comparable to IESA-Sim's system_costs - Sim's writer never discounts,
+    # it reports the nominal annualized cost for that period's own year
+    # (see results_system_costs.py). Undoing the same per-row sdf here
+    # recovers that nominal figure so dbcompare-backend can compare
+    # like-for-like instead of NPV-vs-nominal.
+    nominal_col = [cost_col[i] / get(p.social_discount_factor, period_col[i], 1.0) for i in eachindex(cost_col)]
+    df = DataFrames.DataFrame(tech = tech_col, period = period_col, component = component_col,
+                               cost_MEUR = cost_col, cost_MEUR_nominal = nominal_col; copycols = false)
     return _write_table(df, path)
 end
 

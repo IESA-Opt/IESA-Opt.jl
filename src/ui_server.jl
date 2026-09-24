@@ -204,6 +204,10 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
         group_by = String(_config_get(body, "groupBy", "activity"))
         return _json_response(_emissions_payload(out_dir, group_by))
+    elseif method == "POST" && path == "/api/outputs/periodSummary"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        return _json_response(_period_summary_payload(out_dir))
     elseif method == "POST" && path == "/api/outputs/hourlyDispatch"
         body = _json_body(req)
         out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
@@ -4212,6 +4216,125 @@ function _cost_by_technology(out_dir::AbstractString)
     sort!(grouped, :abs_cost; rev = true)
     select!(grouped, Not(:abs_cost))
     return _df_rows(grouped, 25)
+end
+
+# Period-indexed cost/tech-mix summary for one output, purpose-built for
+# compare-spread.html's many-runs-at-once view. Cheap: reads cost_breakdown
+# directly rather than the full /api/outputs/results bundle, which also
+# carries the large hourly tables this page never needs.
+function _period_summary_payload(out_dir::AbstractString)
+    df = _read_result_df(out_dir, "cost_breakdown")
+    cost_by_period = Vector{Dict{String,Any}}()
+    tech_mix_by_period = Vector{Dict{String,Any}}()
+    # cost_MEUR is NPV (discounted); Sim's system_costs (what
+    # fetchSimPeriodSummary sends this same page) is nominal, so plotting
+    # cost_MEUR here would make Opt's later periods look artificially cheap
+    # relative to Sim. cost_MEUR_nominal (= cost_MEUR / social_discount_factor)
+    # is the like-for-like column - use it when present, falling back to
+    # cost_MEUR for runs from before that column existed.
+    cost_col = "cost_MEUR_nominal" in names(df) ? :cost_MEUR_nominal : :cost_MEUR
+    # cost_breakdown's own "tech" column is the short internal id (e.g.
+    # "TRC01_02"), not the human-readable label - that lives in tech_meta's
+    # "name" column instead (see write_tech_meta_parquet). Read it once here
+    # and reuse for both the sector rollup below and the top-technologies
+    # table, so Opt's technologies display names the same way Sim's already
+    # do (Sim's technology_stock query joins t.name at the SQL level).
+    sector_by_tech = Dict{String,String}()
+    name_by_tech = Dict{String,String}()
+    # Technologies to leave out of the top-technologies ranking below -
+    # category "Emission" is Opt's dedicated GHG/carbon-accounting bucket
+    # (ETS quotas, non-ETS emission tracking, MACC components, "Indirect -"
+    # baseline accounting; verified via tech_meta on a real run - e.g.
+    # Emi02_01 "CO2 ETS quota", neE01_01 "Indirect - CO2 Residential") and
+    # subsector "Undispatched" is the VOLL scarcity-price placeholder (see
+    # results_system_costs.py's own exclusion of these same two markers for
+    # Sim's capital cost, for the identical reason: these are cost/policy
+    # bookkeeping lines, not physical technologies someone invested in).
+    placeholder_tech = Set{String}()
+    if "tech" in names(df)
+        meta = _read_result_df(out_dir, "tech_meta")
+        if !isempty(meta) && "tech" in names(meta)
+            has_sector = "sector" in names(meta)
+            has_name = "name" in names(meta)
+            has_category = "category" in names(meta)
+            has_subsector = "subsector" in names(meta)
+            for r in _df_rows(meta, 5_000)
+                tid = String(get(r, "tech", ""))
+                has_sector && (sector_by_tech[tid] = string(get(r, "sector", "")))
+                if has_name
+                    nm = strip(string(get(r, "name", "")))
+                    isempty(nm) || (name_by_tech[tid] = nm)
+                end
+                is_placeholder = (has_category && string(get(r, "category", "")) == "Emission") ||
+                                  (has_subsector && string(get(r, "subsector", "")) == "Undispatched")
+                is_placeholder && push!(placeholder_tech, tid)
+            end
+        end
+    end
+
+    if !isempty(df) && all(c in names(df) for c in ["period", String(cost_col)])
+        grouped = DataFrames.combine(DataFrames.groupby(df, :period), cost_col => sum => :value)
+        sort!(grouped, :period)
+        cost_by_period = _df_rows(grouped, 200)
+
+        if "tech" in names(df) && !isempty(sector_by_tech)
+            with_sector = copy(df)
+            with_sector.sector = [get(sector_by_tech, String(t), "Unspecified") for t in with_sector.tech]
+            grouped2 = DataFrames.combine(DataFrames.groupby(with_sector, [:period, :sector]), cost_col => sum => :value)
+            sort!(grouped2, [:period, :sector])
+            tech_mix_by_period = _df_rows(grouped2, 5_000)
+        end
+    end
+
+    # Top 5 technologies by total cost across every solved period, for the
+    # "top technologies" table under compare-spread.html's tech-mix chart -
+    # one row per run, not per period, so this collapses the whole run to a
+    # single ranked list. Percentage is each tech's share of the run's total
+    # |cost| (not net cost, so a negative line like salvage doesn't cancel
+    # out and hide a technology that's actually a big cost driver).
+    # Placeholder/accounting technologies (see placeholder_tech above) are
+    # excluded from the ranking itself but not from the percentage's
+    # denominator - keeping the total as true total system cost, not just
+    # the physical-technology share of it.
+    top_tech_by_cost = Vector{Dict{String,Any}}()
+    if !isempty(df) && "tech" in names(df) && String(cost_col) in names(df)
+        tech_totals = DataFrames.combine(DataFrames.groupby(df, :tech), cost_col => sum => :value)
+        tech_totals.abs_value = abs.(tech_totals.value)
+        total_abs = sum(tech_totals.abs_value)
+        tech_totals = tech_totals[.!in.(String.(tech_totals.tech), Ref(placeholder_tech)), :]
+        sort!(tech_totals, :abs_value; rev = true)
+        top5 = first(tech_totals, min(5, nrow(tech_totals)))
+        for row in eachrow(top5)
+            pct = total_abs > 0 ? 100 * row.abs_value / total_abs : 0.0
+            tid = String(row.tech)
+            display_name = get(name_by_tech, tid, tid)
+            push!(top_tech_by_cost, Dict{String,Any}("tech" => display_name, "value" => row.value, "pct" => pct))
+        end
+    end
+
+    emissions_by_period = Vector{Dict{String,Any}}()
+    try
+        payload = _emissions_payload(out_dir, "sector")
+        totals = Dict{Int,Float64}()
+        for r in get(payload, "rows", Any[])
+            per = _to_int_safe(get(r, "period", nothing))
+            per === nothing && continue
+            totals[per] = get(totals, per, 0.0) + Float64(get(r, "value", 0.0))
+        end
+        for (p, v) in sort(collect(totals))
+            push!(emissions_by_period, Dict{String,Any}("period" => p, "value" => v))
+        end
+    catch
+        # Emissions is best-effort - a run missing activity_balances/tech_use/
+        # activities_meta just reports none rather than failing the request.
+    end
+
+    return Dict{String,Any}(
+        "costByPeriod" => cost_by_period,
+        "techMixByPeriod" => tech_mix_by_period,
+        "emissionsByPeriod" => emissions_by_period,
+        "topTech" => top_tech_by_cost,
+    )
 end
 
 function _hourly_profile_preview(out_dir::AbstractString)
