@@ -4226,6 +4226,7 @@ function _period_summary_payload(out_dir::AbstractString)
     df = _read_result_df(out_dir, "cost_breakdown")
     cost_by_period = Vector{Dict{String,Any}}()
     tech_mix_by_period = Vector{Dict{String,Any}}()
+    top_tech_by_cost = Vector{Dict{String,Any}}()
     # cost_MEUR is NPV (discounted); Sim's system_costs (what
     # fetchSimPeriodSummary sends this same page) is nominal, so plotting
     # cost_MEUR here would make Opt's later periods look artificially cheap
@@ -4251,7 +4252,8 @@ function _period_summary_payload(out_dir::AbstractString)
     # Sim's capital cost, for the identical reason: these are cost/policy
     # bookkeeping lines, not physical technologies someone invested in).
     placeholder_tech = Set{String}()
-    if "tech" in names(df)
+    stock_df = _read_result_df(out_dir, "techStock")
+    if "tech" in names(df) || ("tech" in names(stock_df) && !isempty(stock_df))
         meta = _read_result_df(out_dir, "tech_meta")
         if !isempty(meta) && "tech" in names(meta)
             has_sector = "sector" in names(meta)
@@ -4265,8 +4267,20 @@ function _period_summary_payload(out_dir::AbstractString)
                     nm = strip(string(get(r, "name", "")))
                     isempty(nm) || (name_by_tech[tid] = nm)
                 end
+                # "Dummy"-prefixed names are the model's own placeholder/
+                # passthrough convention (e.g. "Dummy standard electricity
+                # consumption - EU", "Dummy C-G tech into A+,A,B - LT Heat
+                # for Houses") - scattered across ordinary categories/
+                # subsectors (Final/Appliances, Conversion/Heat, ...) with no
+                # single shared field to key off instead, so the name prefix
+                # is the only signal the modelers themselves consistently
+                # used to mark these as not-a-real-technology. "Imported X"
+                # (category "Primary") is deliberately NOT excluded here -
+                # that's genuine, if exogenously-capped, supply
+                # infrastructure, not a bookkeeping artifact.
                 is_placeholder = (has_category && string(get(r, "category", "")) == "Emission") ||
-                                  (has_subsector && string(get(r, "subsector", "")) == "Undispatched")
+                                  (has_subsector && string(get(r, "subsector", "")) == "Undispatched") ||
+                                  (has_name && startswith(strip(string(get(r, "name", ""))), "Dummy"))
                 is_placeholder && push!(placeholder_tech, tid)
             end
         end
@@ -4276,34 +4290,39 @@ function _period_summary_payload(out_dir::AbstractString)
         grouped = DataFrames.combine(DataFrames.groupby(df, :period), cost_col => sum => :value)
         sort!(grouped, :period)
         cost_by_period = _df_rows(grouped, 200)
+    end
 
-        if "tech" in names(df) && !isempty(sector_by_tech)
-            with_sector = copy(df)
+    # Technology mix and the top-technologies table both switched from
+    # cost_breakdown (M EUR) to techStock (installed capacity) so this page
+    # reports on the same basis IESA-Sim's own technology_stock does -
+    # compare-spread.html used to carry an explicit caveat that "Opt/MGA use
+    # cost share, Sim uses installed-stock share" because these were
+    # genuinely incomparable; this makes them comparable instead of just
+    # documenting the mismatch. cost_by_period above is untouched - that one
+    # legitimately is a cost metric, not a proxy for it.
+    if !isempty(stock_df) && all(c in names(stock_df) for c in ["tech", "period", "value"])
+        if !isempty(sector_by_tech)
+            with_sector = copy(stock_df)
             with_sector.sector = [get(sector_by_tech, String(t), "Unspecified") for t in with_sector.tech]
-            grouped2 = DataFrames.combine(DataFrames.groupby(with_sector, [:period, :sector]), cost_col => sum => :value)
+            grouped2 = DataFrames.combine(DataFrames.groupby(with_sector, [:period, :sector]), :value => sum => :value)
             sort!(grouped2, [:period, :sector])
             tech_mix_by_period = _df_rows(grouped2, 5_000)
         end
-    end
 
-    # Top 5 technologies by total cost across every solved period, for the
-    # "top technologies" table under compare-spread.html's tech-mix chart -
-    # one row per run, not per period, so this collapses the whole run to a
-    # single ranked list. Percentage is each tech's share of the run's total
-    # |cost| (not net cost, so a negative line like salvage doesn't cancel
-    # out and hide a technology that's actually a big cost driver).
-    # Placeholder/accounting technologies (see placeholder_tech above) are
-    # excluded from the ranking itself but not from the percentage's
-    # denominator - keeping the total as true total system cost, not just
-    # the physical-technology share of it.
-    top_tech_by_cost = Vector{Dict{String,Any}}()
-    if !isempty(df) && "tech" in names(df) && String(cost_col) in names(df)
-        tech_totals = DataFrames.combine(DataFrames.groupby(df, :tech), cost_col => sum => :value)
-        tech_totals.abs_value = abs.(tech_totals.value)
-        total_abs = sum(tech_totals.abs_value)
-        tech_totals = tech_totals[.!in.(String.(tech_totals.tech), Ref(placeholder_tech)), :]
-        sort!(tech_totals, :abs_value; rev = true)
-        top5 = first(tech_totals, min(5, nrow(tech_totals)))
+        # Top 5 by installed stock at the LAST solved period only (not summed
+        # across periods) - stock is a snapshot, so summing it across periods
+        # would double-count a long-lived technology once per period it
+        # survives. Matches compare-spread.html's own fetchSimPeriodSummary
+        # convention for IESA-Sim's top-technologies table exactly, so both
+        # engines' tables are now built the same way, not just reported on
+        # the same axis.
+        last_period = maximum(stock_df.period)
+        last_rows = stock_df[stock_df.period .== last_period, :]
+        last_rows = last_rows[.!in.(String.(last_rows.tech), Ref(placeholder_tech)), :]
+        last_rows.abs_value = abs.(last_rows.value)
+        total_abs = sum(last_rows.abs_value)
+        sort!(last_rows, :abs_value; rev = true)
+        top5 = first(last_rows, min(5, nrow(last_rows)))
         for row in eachrow(top5)
             pct = total_abs > 0 ? 100 * row.abs_value / total_abs : 0.0
             tid = String(row.tech)
