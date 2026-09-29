@@ -4351,6 +4351,59 @@ function _read_result_table_rows(out_dir::AbstractString, table_name::AbstractSt
     return _df_rows(_read_result_df(out_dir, table_name), limit)
 end
 
+# _period_summary_payload/_emissions_payload each read 6-7 tables from the
+# SAME out_dir's results.duckdb (cost_breakdown, techStock, tech_meta,
+# activity_balances, tech_use, activities_meta, tech_meta again) - the
+# per-call _read_result_df above opens and closes a fresh connection for
+# every one of those. Confirmed live: an MGA campaign's /mga/result
+# response (each of up to 7 directions now getting a full periodSummary -
+# see _mga_attach_period_summaries!) took ~5s per campaign, ~14-23s for a
+# full page's 21-campaign fetch - slow enough that compare-spread.html's
+# "Loading run list..." status looked permanently stuck even though it was
+# still progressing. Sharing ONE connection across a direction's table
+# reads cuts that to one connect/close pair per direction instead of one
+# per table.
+function _read_result_df(con, out_dir::AbstractString, table_name::AbstractString)
+    con === nothing && return _read_result_df(out_dir, table_name)
+    db_path = _result_db_path(out_dir)
+    if isfile(db_path)
+        query = "SELECT * FROM $(_duckdb_quote_identifier(table_name))"
+        df = try
+            _duckdb_query_df(con, query)
+        catch
+            DataFrames.DataFrame()
+        end
+        isempty(df) || return df
+    end
+    return _read_parquet_df(joinpath(out_dir, table_name * ".parquet"))
+end
+
+# Runs `f(con)` with one shared connection for every _read_result_df(con,
+# ...) call `f` makes - reusing the same active write connection
+# _read_duckdb_table_df already prefers when one exists (a run still being
+# written; never closed here, since this function didn't open it), and
+# closing only a connection it opened itself. `f(nothing)` runs when
+# there's no results.duckdb to open (parquet-mode run, or one that failed
+# before writing anything) - _read_result_df(nothing, ...) already falls
+# back to its original per-table-read behavior for that case.
+function _with_shared_duckdb_connection(f::Function, out_dir::AbstractString)
+    db_path = _result_db_path(out_dir)
+    isfile(db_path) || return f(nothing)
+    active_con = _active_duckdb_write_connection(db_path)
+    active_con !== nothing && return f(active_con)
+    con = try
+        _duckdb_connect(db_path; readonly = true)
+    catch
+        nothing
+    end
+    con === nothing && return f(nothing)
+    try
+        return f(con)
+    finally
+        DBInterface.close!(con)
+    end
+end
+
 function _read_duckdb_table_df(db_path::AbstractString, table_name::AbstractString)
     query = "SELECT * FROM $(_duckdb_quote_identifier(table_name))"
     active_con = _active_duckdb_write_connection(db_path)
@@ -4443,7 +4496,13 @@ end
 # directly rather than the full /api/outputs/results bundle, which also
 # carries the large hourly tables this page never needs.
 function _period_summary_payload(out_dir::AbstractString)
-    df = _read_result_df(out_dir, "cost_breakdown")
+    # Reads cost_breakdown, techStock, tech_meta and (via _emissions_payload)
+    # activity_balances/tech_use/activities_meta/tech_meta again - all from
+    # this one out_dir's results.duckdb. Wrapped in
+    # _with_shared_duckdb_connection so every _read_result_df(con, ...) call
+    # below reuses one connection instead of opening/closing 6-7 of them.
+    return _with_shared_duckdb_connection(out_dir) do con
+    df = _read_result_df(con, out_dir, "cost_breakdown")
     cost_by_period = Vector{Dict{String,Any}}()
     tech_mix_by_period = Vector{Dict{String,Any}}()
     top_tech_by_cost = Vector{Dict{String,Any}}()
@@ -4472,9 +4531,9 @@ function _period_summary_payload(out_dir::AbstractString)
     # Sim's capital cost, for the identical reason: these are cost/policy
     # bookkeeping lines, not physical technologies someone invested in).
     placeholder_tech = Set{String}()
-    stock_df = _read_result_df(out_dir, "techStock")
+    stock_df = _read_result_df(con, out_dir, "techStock")
     if "tech" in names(df) || ("tech" in names(stock_df) && !isempty(stock_df))
-        meta = _read_result_df(out_dir, "tech_meta")
+        meta = _read_result_df(con, out_dir, "tech_meta")
         if !isempty(meta) && "tech" in names(meta)
             has_sector = "sector" in names(meta)
             has_name = "name" in names(meta)
@@ -4553,7 +4612,7 @@ function _period_summary_payload(out_dir::AbstractString)
 
     emissions_by_period = Vector{Dict{String,Any}}()
     try
-        payload = _emissions_payload(out_dir, "sector")
+        payload = _emissions_payload(out_dir, "sector", con)
         totals = Dict{Int,Float64}()
         for r in get(payload, "rows", Any[])
             per = _to_int_safe(get(r, "period", nothing))
@@ -4568,12 +4627,13 @@ function _period_summary_payload(out_dir::AbstractString)
         # activities_meta just reports none rather than failing the request.
     end
 
-    return Dict{String,Any}(
+    Dict{String,Any}(
         "costByPeriod" => cost_by_period,
         "techMixByPeriod" => tech_mix_by_period,
         "emissionsByPeriod" => emissions_by_period,
         "topTech" => top_tech_by_cost,
     )
+    end
 end
 
 function _hourly_profile_preview(out_dir::AbstractString)
@@ -5150,11 +5210,11 @@ function _supply_demand_payload(out_dir::AbstractString, activity::AbstractStrin
     )
 end
 
-function _emissions_payload(out_dir::AbstractString, group_by::AbstractString)
-    bal = _read_result_df(out_dir, "activity_balances")
-    use = _read_result_df(out_dir, "tech_use")
-    acts = _read_result_df(out_dir, "activities_meta")
-    meta = _read_result_df(out_dir, "tech_meta")
+function _emissions_payload(out_dir::AbstractString, group_by::AbstractString, con = nothing)
+    bal = _read_result_df(con, out_dir, "activity_balances")
+    use = _read_result_df(con, out_dir, "tech_use")
+    acts = _read_result_df(con, out_dir, "activities_meta")
+    meta = _read_result_df(con, out_dir, "tech_meta")
     (isempty(bal) || isempty(use) || isempty(acts)) && return Dict("rows" => Vector{Dict{String,Any}}(), "groupBy" => String(group_by))
 
     emission_acts = Set{String}()
