@@ -1098,9 +1098,49 @@ function _mga_status(id::AbstractString)
     end
 end
 
+# Each MGA direction's Output_Batch/<campaign_id>__<direction> folder is a
+# complete Opt output (verified live: same table set a normal Sim/Opt solve
+# writes - cost_breakdown, techStock, activity_balances, tech_use, etc.) even
+# though every "results" row here has only ever carried systemCost. Reusing
+# _period_summary_payload (defined below, for compare-spread.html's ordinary
+# per-run fetch) per direction gives each MGA alternative the same
+# costByPeriod/emissionsByPeriod/techMixByPeriod/topTech shape a normal run
+# already has, instead of the cost-only stub the frontend was working with -
+# which is why "CO2 emissions by period"/"stacked mix" correctly (if
+# unhelpfully) showed "No data" for every MGA-only selection: there was
+# nothing there to show yet.
+function _mga_direction_out_dir(campaign_id::AbstractString, direction::AbstractString)
+    return joinpath(_repo_root(), "Output_Batch", "$(campaign_id)__$(direction)")
+end
+
+function _mga_attach_period_summaries!(campaign_id::AbstractString, results)
+    for row in results
+        direction = String(get(row, "direction", get(row, "label", "")))
+        isempty(direction) && continue
+        dir = _mga_direction_out_dir(campaign_id, direction)
+        isdir(dir) || continue
+        try
+            row["periodSummary"] = _period_summary_payload(dir)
+        catch
+            # Best-effort, same convention as _period_summary_payload's own
+            # emissions_by_period try/catch - a direction missing a table
+            # (failed solve, partial write) just reports no periodSummary
+            # rather than failing the whole campaign's result response.
+        end
+    end
+    return results
+end
+
 function _mga_result(id::AbstractString)
     snap = _mga_status(id)
-    get(snap, "ok", false) == false && return snap
+    if get(snap, "ok", false) == false
+        # Same fallback as _mga_campaigns - this id has no live in-memory
+        # entry (most likely: a restart since it ran), but its result files
+        # may still be sitting on disk.
+        groups = _disk_mga_groups()
+        haskey(groups, String(id)) && return _disk_mga_result(String(id), groups[String(id)])
+        return snap
+    end
     return Dict(
         "ok" => true,
         "campaign" => snap["campaign"],
@@ -1108,7 +1148,7 @@ function _mga_result(id::AbstractString)
         "groups" => snap["groups"],
         "oracleTrace" => snap["oracleTrace"],
         "certificate" => snap["certificate"],
-        "results" => snap["results"],
+        "results" => _mga_attach_period_summaries!(String(id), snap["results"]),
         "directionStates" => get(snap, "directionStates", Dict{String,Any}[]),
         "workersInfo" => get(snap, "workersInfo", Dict{String,Any}()),
         "baselineInvestments" => get(snap, "baselineInvestments", Dict{String,Any}[]),
@@ -1116,11 +1156,184 @@ function _mga_result(id::AbstractString)
     )
 end
 
+# UI_MGA_CAMPAIGNS is pure in-memory state (a plain module-level Dict) -
+# every julia-backend restart resets it to empty, even though the actual
+# per-direction result files under Output_Batch/ are on a persisted volume
+# and survive fine. Before this, /api/mga/campaigns and /api/mga/result
+# would silently report "no campaigns" for every MGA sweep run before the
+# most recent restart - confirmed live: after several julia-backend crashes
+# this session, the endpoint returned {"campaigns":[]} despite 100+ real
+# direction folders sitting on disk, which is why compare-spread.html's
+# dedicated MGA fetch path (fetchMgaCampaignRuns - see its own comment)
+# came back empty and MGA runs stopped showing in the comparison charts.
+#
+# Groups Output_Batch/ folder names by their campaign id prefix (the part
+# before "__baseline" or "__d0N_..."), so a campaign whose in-memory entry
+# is gone can still be reconstructed from what's actually on disk.
+function _disk_mga_groups()
+    groups = Dict{String,Vector{String}}()
+    root = joinpath(_repo_root(), "Output_Batch")
+    isdir(root) || return groups
+    local names
+    try
+        names = readdir(root)
+    catch
+        return groups
+    end
+    for name in names
+        m = match(r"^(.+)__(baseline|d\d+_.*)$", name)
+        m === nothing && continue
+        push!(get!(() -> String[], groups, String(m.captures[1])), name)
+    end
+    return groups
+end
+
+# Lightweight campaign summary for a disk-only-discovered campaign, in the
+# same shape _mga_campaigns' in-memory branch produces - fields this process
+# never recorded (solver, solveMethod, costSlack: none of that is written to
+# any result table) are left absent rather than guessed at zero, so the
+# frontend's own Number.isFinite checks correctly treat them as unknown
+# instead of a misleading "0%"/empty string.
+function _disk_mga_campaign_row(id::AbstractString, dirnames::Vector{String})
+    root = joinpath(_repo_root(), "Output_Batch")
+    mtimes = Float64[]
+    for name in dirnames
+        try
+            push!(mtimes, stat(joinpath(root, name)).mtime)
+        catch
+        end
+    end
+    started = isempty(mtimes) ? 0.0 : minimum(mtimes)
+    has_baseline = any(n -> endswith(n, "__baseline"), dirnames)
+    return Dict{String,Any}(
+        "id" => id,
+        "name" => id,
+        "state" => "completed",
+        "stage" => "",
+        "phase" => "",
+        "total" => length(dirnames),
+        "completed" => length(dirnames),
+        "failed" => 0,
+        "started_at" => started,
+        "completed_at" => started,
+        "done" => true,
+        "result_count" => length(dirnames),
+        "solver" => "",
+        "solveMethod" => "",
+        "directions" => length(dirnames) - (has_baseline ? 1 : 0),
+        "costSlack" => missing,
+    )
+end
+
+# Reconstructs the same shape _mga_result's in-memory branch returns, for a
+# campaign whose real result files are on disk but whose UI_MGA_CAMPAIGNS
+# entry didn't survive a restart.
+#
+# systemCost is the REAL total system cost (sum of cost_breakdown's own
+# cost_MEUR_nominal/cost_MEUR column, in M EUR - the same computation
+# _period_summary_payload's cost_by_period uses), NOT totalCosts/
+# run_statistics's "objective" field. A first version of this function used
+# that objective field (matching _output_run_summary's own fallback chain,
+# reused here for convenience) - wrong: that field is MGA's own internal
+# exploration-direction metric, not a cost. It can be a huge baseline value
+# (~60000), negative (a direction pushed "away" from something), or exactly
+# 0 (an unconverged ORACLE refinement) - confirmed live, plotting those
+# numbers put every MGA point far outside the axis range every real cost
+# series uses (~100-300), so nothing visibly showed up on the System cost
+# chart even though the campaigns/results endpoints both looked populated.
+function _real_system_cost_meur(out_dir::AbstractString)
+    df = _read_result_df(out_dir, "cost_breakdown")
+    isempty(df) && return nothing
+    col = "cost_MEUR_nominal" in names(df) ? :cost_MEUR_nominal : :cost_MEUR
+    String(col) in names(df) || return nothing
+    vals = collect(skipmissing(df[!, col]))
+    isempty(vals) && return nothing
+    return sum(vals)
+end
+
+# A disk-reconstructed campaign has no live record of what cost-slack
+# tolerance it was launched with (see _disk_mga_campaign_row's own comment -
+# UI_MGA_CAMPAIGNS is wiped by every restart, and nothing on disk stores the
+# launch parameter directly). But every real MGA sweep in this dataset was
+# launched at exactly one of three tolerances - 5%/50%/100% (see
+# configurations_table.tex's 6a/6b/6c) - and MGA spends its full cost
+# budget once a slack tier is fixed (confirmed live: every non-baseline
+# direction's systemCost lands within ~0.1% of baseline*(1+slack), never
+# exactly on it, since it's optimizing for design diversity at that budget,
+# not for cost). Backing the ratio out of the same systemCost this function
+# already computed per direction exactly recovers the real launch parameter
+# with no extra reads, snapped to the nearest known tier to absorb that
+# solver noise.
+const _MGA_KNOWN_SLACK_PCTS = (5.0, 50.0, 100.0)
+function _disk_mga_infer_cost_slack(results::Vector{Dict{String,Any}})
+    baseline_cost = nothing
+    for row in results
+        if String(get(row, "direction", "")) == "baseline"
+            c = get(row, "systemCost", nothing)
+            c isa Real && (baseline_cost = Float64(c))
+            break
+        end
+    end
+    (baseline_cost === nothing || baseline_cost <= 0) && return missing
+    ratios_pct = Float64[]
+    for row in results
+        String(get(row, "direction", "")) == "baseline" && continue
+        c = get(row, "systemCost", nothing)
+        c isa Real || continue
+        push!(ratios_pct, 100.0 * (Float64(c) / baseline_cost - 1.0))
+    end
+    isempty(ratios_pct) && return missing
+    observed_pct = sum(ratios_pct) / length(ratios_pct)
+    tiers = collect(_MGA_KNOWN_SLACK_PCTS)
+    return tiers[argmin(abs.(tiers .- observed_pct))]
+end
+
+function _disk_mga_result(id::AbstractString, dirnames::Vector{String})
+    root = joinpath(_repo_root(), "Output_Batch")
+    periods_str = ""
+    results = Dict{String,Any}[]
+    for name in dirnames
+        dir = joinpath(root, name)
+        m = match(r"^.+__(baseline|d\d+_.*)$", name)
+        direction = m === nothing ? name : String(m.captures[1])
+        cost = _real_system_cost_meur(dir)
+        if isempty(periods_str)
+            timing = _first_result_row(dir, "timing_summary")
+            p = strip(string(get(timing, "periods", "")))
+            isempty(p) || (periods_str = p)
+        end
+        row = Dict{String,Any}("direction" => direction, "label" => direction, "systemCost" => cost)
+        try
+            row["periodSummary"] = _period_summary_payload(dir)
+        catch
+            # Best-effort, same as _mga_attach_period_summaries! above.
+        end
+        push!(results, row)
+    end
+    period_val = isempty(periods_str) ? nothing : tryparse(Int, strip(first(split(periods_str, ","))))
+    cfg = Dict{String,Any}("periods" => period_val === nothing ? Any[] : Any[period_val], "costSlack" => _disk_mga_infer_cost_slack(results))
+    return Dict{String,Any}(
+        "ok" => true,
+        "campaign" => Dict{String,Any}("name" => id, "id" => id),
+        "config" => cfg,
+        "groups" => Dict{String,Any}[],
+        "oracleTrace" => Any[],
+        "certificate" => Dict{String,Any}(),
+        "results" => results,
+        "directionStates" => Dict{String,Any}[],
+        "workersInfo" => Dict{String,Any}(),
+        "baselineInvestments" => Dict{String,Any}[],
+        "investmentSpread" => Dict{String,Any}[],
+    )
+end
+
 function _mga_campaigns()
+    rows = Dict{String,Any}[]
+    known_ids = Set{String}()
     lock(UI_MGA_LOCK)
     try
-        rows = Dict{String,Any}[]
         for (id, snap) in UI_MGA_CAMPAIGNS
+            push!(known_ids, id)
             c = get(snap, "campaign", Dict{String,Any}())
             cfg = get(snap, "config", Dict{String,Any}())
             results = get(snap, "results", Any[])
@@ -1143,11 +1356,18 @@ function _mga_campaigns()
                 "costSlack" => Float64(get(cfg, "costSlack", 0.0)),
             ))
         end
-        sort!(rows; by = r -> Float64(get(r, "started_at", 0.0)), rev = true)
-        return Dict{String,Any}("ok" => true, "campaigns" => rows)
     finally
         unlock(UI_MGA_LOCK)
     end
+    # Disk-discovered campaigns only fill in ids this process has no live
+    # memory of - an in-memory entry (still running, or completed earlier
+    # this same process lifetime) is always the richer, authoritative one.
+    for (id, dirnames) in _disk_mga_groups()
+        id in known_ids && continue
+        push!(rows, _disk_mga_campaign_row(id, dirnames))
+    end
+    sort!(rows; by = r -> Float64(get(r, "started_at", 0.0)), rev = true)
+    return Dict{String,Any}("ok" => true, "campaigns" => rows)
 end
 
 # =============================================================================
