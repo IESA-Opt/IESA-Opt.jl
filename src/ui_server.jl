@@ -4612,7 +4612,19 @@ function _period_summary_payload(out_dir::AbstractString)
 
     emissions_by_period = Vector{Dict{String,Any}}()
     try
-        payload = _emissions_payload(out_dir, "sector", con)
+        # Excludes international bunker fuel (aviation/shipping, tech
+        # TAI01_01/TNB01_xx) from the TOTAL shown against compare-spread.html's
+        # "Real (historical)" CBS/RIVM reference line - UNFCCC/CBS convention
+        # excludes bunker fuels from a country's own territorial GHG total
+        # (reported as a separate memo item instead), so including it here
+        # inflated Opt's 2022 total to ~196 Mt against a real ~158 Mt figure.
+        # Confirmed live: excluding just this one activity brings the 2022
+        # total to ~157.5 Mt, matching CBS almost exactly. The dedicated
+        # /api/outputs/emissions breakdown endpoint (this same function,
+        # called without this keyword) still reports bunker as its own line -
+        # this exclusion is scoped to the single comparison-chart total only.
+        payload = _emissions_payload(out_dir, "sector", con;
+                                      exclude_activities = Set(["CO2 Air Int. Transport"]))
         totals = Dict{Int,Float64}()
         for r in get(payload, "rows", Any[])
             per = _to_int_safe(get(r, "period", nothing))
@@ -5210,7 +5222,8 @@ function _supply_demand_payload(out_dir::AbstractString, activity::AbstractStrin
     )
 end
 
-function _emissions_payload(out_dir::AbstractString, group_by::AbstractString, con = nothing)
+function _emissions_payload(out_dir::AbstractString, group_by::AbstractString, con = nothing;
+                             exclude_activities::Set{String} = Set{String}())
     bal = _read_result_df(con, out_dir, "activity_balances")
     use = _read_result_df(con, out_dir, "tech_use")
     acts = _read_result_df(con, out_dir, "activities_meta")
@@ -5265,6 +5278,7 @@ function _emissions_payload(out_dir::AbstractString, group_by::AbstractString, c
     for r in _df_rows(bal, 400_000)
         activity = String(get(r, "activity", ""))
         activity in emission_acts || continue
+        activity in exclude_activities && continue
         ps = Int(get(r, "period", 0))
         push!(period_set, ps)
         coef = Float64(get(r, "coef", 0))
