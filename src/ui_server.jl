@@ -4491,6 +4491,19 @@ function _cost_by_technology(out_dir::AbstractString)
     return _df_rows(grouped, 25)
 end
 
+# Sectors whose technologies count as "energy technologies" in
+# compare-spread.html's technology graphs (sector mix, TVD, top-technologies
+# table) - energy supply/conversion only. Every other sector measures
+# installed stock in non-capacity units (khouses, vehicles/vessels, Mton of
+# product, Mm2), which can't be summed with GW / PJ-per-year plant without
+# the demand side swamping the mix. Mirrored client-side by ENERGY_SECTORS in
+# frontend/compare-spread.html (applied there to Sim's own rows) - keep the
+# two lists identical.
+const _ENERGY_SECTORS = Set([
+    "Power NL", "Power EU", "Hydrogen", "Refineries", "Final Gas",
+    "Final Biomass", "Heat Network", "Fossil", "Renewable", "Ammonia",
+])
+
 # Period-indexed cost/tech-mix summary for one output, purpose-built for
 # compare-spread.html's many-runs-at-once view. Cheap: reads cost_breakdown
 # directly rather than the full /api/outputs/results bundle, which also
@@ -4580,34 +4593,96 @@ function _period_summary_payload(out_dir::AbstractString)
     # documenting the mismatch. cost_by_period above is untouched - that one
     # legitimately is a cost metric, not a proxy for it.
     if !isempty(stock_df) && all(c in names(stock_df) for c in ["tech", "period", "value"])
-        if !isempty(sector_by_tech)
-            with_sector = copy(stock_df)
-            with_sector.sector = [get(sector_by_tech, String(t), "Unspecified") for t in with_sector.tech]
-            grouped2 = DataFrames.combine(DataFrames.groupby(with_sector, [:period, :sector]), :value => sum => :value)
-            sort!(grouped2, [:period, :sector])
-            tech_mix_by_period = _df_rows(grouped2, 5_000)
-        end
+        # Energy technologies only (_ENERGY_SECTORS) with no placeholder/
+        # accounting lines (placeholder_tech above) - filtered once here so
+        # the sector mix and the top-technologies table below are built from
+        # the same population, matching what compare-spread.html applies to
+        # Sim's own rows (isEnergyTechRow). A run with no tech_meta has no
+        # sector information to filter on, so it falls back to the unfiltered
+        # stock (minus placeholders) instead of reporting nothing.
+        is_energy_tech(tid::AbstractString) = !(tid in placeholder_tech) &&
+            (isempty(sector_by_tech) || get(sector_by_tech, tid, "") in _ENERGY_SECTORS)
+        energy_df = stock_df[[is_energy_tech(String(t)) for t in stock_df.tech], :]
 
-        # Top 5 by installed stock at the LAST solved period only (not summed
-        # across periods) - stock is a snapshot, so summing it across periods
-        # would double-count a long-lived technology once per period it
-        # survives. Matches compare-spread.html's own fetchSimPeriodSummary
-        # convention for IESA-Sim's top-technologies table exactly, so both
-        # engines' tables are now built the same way, not just reported on
-        # the same axis.
-        last_period = maximum(stock_df.period)
-        last_rows = stock_df[stock_df.period .== last_period, :]
-        last_rows = last_rows[.!in.(String.(last_rows.tech), Ref(placeholder_tech)), :]
-        last_rows.abs_value = abs.(last_rows.value)
-        total_abs = sum(last_rows.abs_value)
-        sort!(last_rows, :abs_value; rev = true)
-        top5 = first(last_rows, min(5, nrow(last_rows)))
-        for row in eachrow(top5)
-            pct = total_abs > 0 ? 100 * row.abs_value / total_abs : 0.0
-            tid = String(row.tech)
-            display_name = get(name_by_tech, tid, tid)
-            push!(top_tech_by_cost, Dict{String,Any}("tech" => display_name, "value" => row.value, "pct" => pct))
+        if !isempty(energy_df)
+            if !isempty(sector_by_tech)
+                with_sector = copy(energy_df)
+                with_sector.sector = [get(sector_by_tech, String(t), "Unspecified") for t in with_sector.tech]
+                # Power NL / Power EU keep their individual technology (display
+                # name) so compare-spread.html's stacked mix can split them;
+                # other sectors collapse to one row (tech = "") as before.
+                with_sector.tech_name = [get(sector_by_tech, String(t), "") in ("Power NL", "Power EU") ?
+                                         get(name_by_tech, String(t), String(t)) : "" for t in with_sector.tech]
+                grouped2 = DataFrames.combine(DataFrames.groupby(with_sector, [:period, :sector, :tech_name]), :value => sum => :value)
+                sort!(grouped2, [:period, :sector, :tech_name])
+                DataFrames.rename!(grouped2, :tech_name => :tech)
+                tech_mix_by_period = _df_rows(grouped2, 5_000)
+            end
+
+            # Top 5 by installed stock at the LAST solved period only (not summed
+            # across periods) - stock is a snapshot, so summing it across periods
+            # would double-count a long-lived technology once per period it
+            # survives. Matches compare-spread.html's own fetchSimPeriodSummary
+            # convention for IESA-Sim's top-technologies table exactly, so both
+            # engines' tables are now built the same way, not just reported on
+            # the same axis. The percentage denominator is the energy-technology
+            # total, same as the Sim side.
+            last_period = maximum(energy_df.period)
+            last_rows = energy_df[energy_df.period .== last_period, :]
+            last_rows.abs_value = abs.(last_rows.value)
+            total_abs = sum(last_rows.abs_value)
+            sort!(last_rows, :abs_value; rev = true)
+            top5 = first(last_rows, min(5, nrow(last_rows)))
+            for row in eachrow(top5)
+                pct = total_abs > 0 ? 100 * row.abs_value / total_abs : 0.0
+                tid = String(row.tech)
+                display_name = get(name_by_tech, tid, tid)
+                push!(top_tech_by_cost, Dict{String,Any}("tech" => display_name, "value" => row.value, "pct" => pct))
+            end
         end
+    end
+
+    # Primary energy supply (PJ) per energy label - the Opt counterpart of
+    # IESA-Sim's results.primary / graph_primaryEnergy.py (category "Primary"
+    # technologies' use, rolled up by their energy label: Coal, Oil, Natural
+    # Gas, Nuclear, Biomass, Wind, Solar ...). "Exported ..." Primary
+    # technologies are exports, not supply, so they count negative (Sim books
+    # its Exports category the same way); the non-energy "Material" label is
+    # left out as Sim's own graph does.
+    primary_by_period = Vector{Dict{String,Any}}()
+    try
+        use_df = _read_result_df(con, out_dir, "tech_use")
+        meta2 = _read_result_df(con, out_dir, "tech_meta")
+        if !isempty(use_df) && !isempty(meta2) && all(c in names(meta2) for c in ["tech", "category", "label"]) &&
+           all(c in names(use_df) for c in ["tech", "period", "value"])
+            label_of = Dict{String,String}()
+            sign_of = Dict{String,Float64}()
+            for r in _df_rows(meta2, 5_000)
+                string(get(r, "category", "")) == "Primary" || continue
+                tid = String(get(r, "tech", ""))
+                lbl = string(get(r, "label", ""))
+                (isempty(lbl) || lbl == "Material") && continue
+                label_of[tid] = lbl
+                sign_of[tid] = startswith(strip(string(get(r, "name", ""))), "Exported") ? -1.0 : 1.0
+            end
+            acc = Dict{Tuple{Int,String},Float64}()
+            for r in _df_rows(use_df, 200_000)
+                tid = String(get(r, "tech", ""))
+                haskey(label_of, tid) || continue
+                per = _to_int_safe(get(r, "period", nothing))
+                per === nothing && continue
+                v = get(r, "value", nothing)
+                (v === nothing || v === missing) && continue
+                key = (per, label_of[tid])
+                acc[key] = get(acc, key, 0.0) + sign_of[tid] * Float64(v)
+            end
+            for ((per, lbl), v) in sort(collect(acc))
+                push!(primary_by_period, Dict{String,Any}("period" => per, "label" => lbl, "value" => v))
+            end
+        end
+    catch
+        # Best-effort like emissions below - a run without tech_use/tech_meta
+        # labels just reports no primary-energy mix.
     end
 
     emissions_by_period = Vector{Dict{String,Any}}()
@@ -4643,6 +4718,7 @@ function _period_summary_payload(out_dir::AbstractString)
         "costByPeriod" => cost_by_period,
         "techMixByPeriod" => tech_mix_by_period,
         "emissionsByPeriod" => emissions_by_period,
+        "primaryByPeriod" => primary_by_period,
         "topTech" => top_tech_by_cost,
     )
     end
