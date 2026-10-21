@@ -3128,6 +3128,12 @@ function _normalize_run_config(raw_config)
         # complete fix for every marginal model, but strictly an improvement,
         # so it defaults on rather than requiring users to know to enable it.
         "barHomogeneous" => _as_bool(_config_get(raw_config, "barHomogeneous", true), true),
+        # false = renewable/hourly availability uses the cluster MEAN profile,
+        # so annual output of a VRE technology is exactly stock x cap2act (the
+        # same capacity factor IESA-Sim uses). true (default, unchanged) = the
+        # MEB auto-blend CapBound, a deliberately conservative envelope that
+        # realises only ~81-88% of cap2act for wind/solar/hydro.
+        "capacityProfileAutoMode" => _as_bool(_config_get(raw_config, "capacityProfileAutoMode", true), true),
         "hourlyReports" => _as_bool(_config_get(raw_config, "hourlyReports", true), true),
         "showViolations" => _as_bool(_config_get(raw_config, "showViolations", false), false),
         "constraintGroup" => String(_config_get(raw_config, "constraintGroup", "Base + Bunkers + Scope3")),
@@ -3287,7 +3293,7 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         md.params.ts_extremePeriods = config["extremePeriods"]
         md.params.ts_extremeDays_count = max(0, config["extremeDays"])
         md.params.ts_boundaryRamping = config["boundaryRamping"]
-        md.params.ts_capacityProfile_autoMode = true
+        md.params.ts_capacityProfile_autoMode = get(config, "capacityProfileAutoMode", true)
         md.params.ts_capacityProfile_autoFloor = 0.23
         md.params.ts_capacityProfile_autoCap = 1.00
         md.params.ts_capacityProfile_autoFloor_effective = 0.23
