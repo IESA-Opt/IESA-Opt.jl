@@ -4693,19 +4693,29 @@ function _period_summary_payload(out_dir::AbstractString)
 
     emissions_by_period = Vector{Dict{String,Any}}()
     try
-        # Excludes international bunker fuel (aviation/shipping, tech
-        # TAI01_01/TNB01_xx) from the TOTAL shown against compare-spread.html's
-        # "Real (historical)" CBS/RIVM reference line - UNFCCC/CBS convention
-        # excludes bunker fuels from a country's own territorial GHG total
-        # (reported as a separate memo item instead), so including it here
-        # inflated Opt's 2022 total to ~196 Mt against a real ~158 Mt figure.
-        # Confirmed live: excluding just this one activity brings the 2022
-        # total to ~157.5 Mt, matching CBS almost exactly. The dedicated
-        # /api/outputs/emissions breakdown endpoint (this same function,
-        # called without this keyword) still reports bunker as its own line -
-        # this exclusion is scoped to the single comparison-chart total only.
+        # Excludes two activities from the TOTAL shown against
+        # compare-spread.html's "Real (historical)" CBS reference line, both
+        # outside the national GHG total CBS publishes (IPCC method):
+        # - international bunker fuel (aviation/shipping, tech
+        #   TAI01_01/TNB01_xx): reported by CBS as a separate memo item;
+        #   including it inflated Opt's 2022 total to ~196 Mt.
+        # - 'CO2 Air Feedstock end of lifetime': carbon embedded in
+        #   petrochemical products, booked at production (EnergyBalance
+        #   'Feedstock Carbon' = emission factor x feedstock use, "carbon
+        #   conservative"). A Scope 3 / lifecycle item: CBS counts product
+        #   carbon only when it is destroyed in NL (waste incineration, ~3 Mt
+        #   CO2), versus ~25 Mt booked here in 2022, so including it put the
+        #   total ~25 Mt above the like-for-like CBS figure. (The bunker-only
+        #   exclusion that landed on ~157.5 Mt vs CBS 158.4 was a coincidence
+        #   of this term being in the total.) Opt's emTargetFS cap on this
+        #   activity is a policy constraint and is NOT affected.
+        # The dedicated /api/outputs/emissions breakdown endpoint (this same
+        # function, called without this keyword) still reports both as their
+        # own lines - these exclusions are scoped to the comparison-chart
+        # total only.
         payload = _emissions_payload(out_dir, "sector", con;
-                                      exclude_activities = Set(["CO2 Air Int. Transport"]))
+                                      exclude_activities = Set(["CO2 Air Int. Transport",
+                                                                "CO2 Air Feedstock end of lifetime"]))
         totals = Dict{Int,Float64}()
         for r in get(payload, "rows", Any[])
             per = _to_int_safe(get(r, "period", nothing))
