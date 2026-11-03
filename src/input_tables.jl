@@ -154,7 +154,7 @@ function write_input_tables_duckdb!(md::ModelData, db_path::AbstractString)
             :scenario_description, :base_year, :XC_TransmissionLoss_global, :baseload_treshold,
             :shedding_inLoad, :social_discount_rate, :ActiveConstraintSet,
             :IEM_sector, :namePer_node, :IEM_node, :is_renewable,
-            :emissionTargetAir, :emissionTargetAll, :emissionTargetBunker, :emissionTargetFS,
+            :emissionTargetAir, :emissionFloorAir, :emissionTargetAll, :emissionTargetBunker, :emissionTargetFS,
             :CO2_cumulative_budget, :cumulative_CO2storage,
             :act_units, :actChange_maxOrig, :dispatchType_act, :activityType_act, :nodePer_act,
             :emissionTarget_bin, :labelPer_act, :activities_netVolumesOrig,

@@ -340,6 +340,7 @@ Base.@kwdef mutable struct ModelParams
     retrofit_relations::Dict{Tuple{Symbol,Symbol},Bool}       = Dict()
     cumulative_CO2storage::Dict{Symbol,Float64}               = Dict()  # per node
     emissionTargetAir::Dict{Tuple{Symbol,Int},Float64}        = Dict()
+    emissionFloorAir::Dict{Tuple{Symbol,Int},Float64}         = Dict()  # optional lower bound on the same quantity (node_emission_targets.target_air_min), historical periods
     emissionTargetAll::Dict{Tuple{Symbol,Int},Float64}        = Dict()
     emissionTargetBunker::Dict{Tuple{Symbol,Int},Float64}     = Dict()
     emissionTargetFS::Dict{Tuple{Symbol,Int},Float64}         = Dict()

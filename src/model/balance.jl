@@ -507,6 +507,11 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
         end
 
         targets[(:emTargetAir, n, ps)] = @constraint(m, expr <= cap, base_name = "emTargetAir[$(n),$(ps)]")
+        # Optional floor on the same quantity (historical periods only): the cap above can only push emissions DOWN,
+        # and a cost-minimising model sits well below the observed level in years that are already history.
+        floor_air = get(p.emissionFloorAir, (n, ps), nothing)
+        floor_air === nothing || (targets[(:emTargetAirFloor, n, ps)] =
+            @constraint(m, expr >= floor_air, base_name = "emTargetAirFloor[$(n),$(ps)]"))
     end
 
     # ─── balance_activities_EmissionTargetBunker (IESA-Opt 1.0 line ~2534) ───

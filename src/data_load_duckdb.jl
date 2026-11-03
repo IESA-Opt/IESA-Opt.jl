@@ -476,6 +476,15 @@ function _load_node_emission_targets!(p::ModelParams, con, tables::Set{String})
         ismissing(row.target_bunker) || (p.emissionTargetBunker[(n, per)] = Float64(row.target_bunker))
         ismissing(row.target_feedstock) || (p.emissionTargetFS[(n, per)] = Float64(row.target_feedstock))
     end
+    # Optional lower bound on the air-emission quantity (see model/balance.jl, emTargetAirFloor): only present in merged
+    # databases that pin a historical level, so the column is probed rather than assumed.
+    probe = _duckdb_query_df(con, "SELECT * FROM node_emission_targets LIMIT 0")
+    if "target_air_min" in names(probe)
+        dfm = _duckdb_query_df(con, "SELECT node, period, target_air_min FROM node_emission_targets")
+        for row in eachrow(dfm)
+            ismissing(row.target_air_min) || (p.emissionFloorAir[(Symbol(row.node), Int(row.period))] = Float64(row.target_air_min))
+        end
+    end
     return nothing
 end
 
@@ -528,7 +537,7 @@ const _DUCKDB_CORE_PARAMS = Set{Symbol}([
     :scenario_description, :base_year, :XC_TransmissionLoss_global, :baseload_treshold,
     :shedding_inLoad, :social_discount_rate, :ActiveConstraintSet,
     :IEM_sector, :namePer_node, :IEM_node, :is_renewable,
-    :emissionTargetAir, :emissionTargetAll, :emissionTargetBunker, :emissionTargetFS,
+    :emissionTargetAir, :emissionFloorAir, :emissionTargetAll, :emissionTargetBunker, :emissionTargetFS,
     :CO2_cumulative_budget, :cumulative_CO2storage,
     :act_units, :actChange_maxOrig, :dispatchType_act, :activityType_act, :nodePer_act,
     :emissionTarget_bin, :labelPer_act, :activities_netVolumesOrig,
