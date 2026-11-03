@@ -196,6 +196,17 @@ function _read_node_parameters_sheet!(s::ModelSets, p::ModelParams, xf)
     period_hdr_AF = _read_row_ints(sh, 3, col_fs, col_fs_end)
     _read_table_sym_int_to_float!(p.emissionTargetFS, sh, nodes_col, period_hdr_AF, col_fs, 5, last_row;
                                   keep_zeros=true)
+
+    # Optional floor on the air-emission quantity (model/balance.jl, emTargetAirFloor): a block of 7 period columns
+    # headed 'Emission floor [MtonCO2eq/yr]' in row 2. Workbooks without it simply have no floor.
+    # Whitespace around the header is ignored (a cell typed or pasted in Excel often carries a stray space, and an exact
+    # match would then silently drop the whole block).
+    floor_idx = _col_by_header_or_nothing(String.(strip.(hdr_group)), C.emission_floor_air)
+    if floor_idx !== nothing
+        col_fl = _col_letter(floor_idx)
+        period_hdr_fl = _read_row_ints(sh, 3, col_fl, _col_letter(floor_idx + 6))
+        _read_table_sym_int_to_float!(p.emissionFloorAir, sh, nodes_col, period_hdr_fl, col_fl, 5, last_row)
+    end
     return nothing
 end
 

@@ -55,6 +55,7 @@ module NodeParameters
     const emission_target_all        = "Emission target including feedstock & bunkers (Scope3) [MtonCO2eq/yr]"
     const emission_target_bunker     = "Bunker Emissions"
     const emission_target_feedstock  = "FeedStock Emissions"
+    const emission_floor_air         = "Emission floor [MtonCO2eq/yr]"   # optional block, same 7 period columns as the air target
 end
 
 module Activities

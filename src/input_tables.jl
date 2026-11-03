@@ -713,6 +713,7 @@ function _node_emission_targets_df(s::ModelSets, p::ModelParams)
         :target_all => p.emissionTargetAll,
         :target_bunker => p.emissionTargetBunker,
         :target_feedstock => p.emissionTargetFS,
+        :target_air_min => p.emissionFloorAir,
     ])
 end
 
