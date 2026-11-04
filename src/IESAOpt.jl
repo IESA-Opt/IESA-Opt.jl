@@ -114,6 +114,7 @@ include("workflows/mga/hybrid_oracle.jl")
 # populated by a UI toggle. With an empty set the core model is unchanged.
 # See src/extensions/README.md for how to add or remove extensions cleanly.
 # ---------------------------------------------------------------------------
+include("extensions/land_use.jl")
 include("extensions/multi_region.jl")
 include("extensions/extensions.jl")
 

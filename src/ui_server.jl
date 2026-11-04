@@ -2339,6 +2339,26 @@ end
 
 _short_error(err) = first(split(sprint(showerror, err), '\n'))
 
+# Area occupied per industrial cluster in the solved stock (AIMMS
+# `p_clusterSpace_used`). Reported whenever the workbook has land-use data and
+# the solve produced values, so runs with the limit on and off can be compared.
+function _report_land_use!(job_id::AbstractString, model::JuMP.Model, vars, md::ModelData)
+    rows = try
+        JuMP.has_values(model) ? land_use_report(vars, md) : NamedTuple[]
+    catch err
+        _job_update!(job_id; stage = "solve", message = "Could not compute cluster land use: $(_short_error(err))")
+        return
+    end
+    isempty(rows) && return
+    limit = :land_use in md.params.extensions ? "ON" : "OFF"
+    lines = String["Cluster land use (limit $(limit); the limit applies to $(_LU_PERIOD) only):"]
+    for r in rows
+        share = r.available > 0 ? " ($(round(100 * r.used / r.available; digits = 1))%)" : ""
+        push!(lines, "  • $(r.cluster) $(r.period): $(round(r.used; digits = 1)) of $(round(r.available; digits = 1)) ha$(share)")
+    end
+    _job_update!(job_id; stage = "solve", message = join(lines, "\n"))
+end
+
 # Report constraints whose elastic slack is non-zero after a "Show
 # violations" run.  Emits a single multi-line job log message so users
 # can see the worst offenders in the Progress tab.
@@ -2491,6 +2511,7 @@ function _normalize_run_config(raw_config)
         "hourlyReports" => _as_bool(_config_get(raw_config, "hourlyReports", true), true),
         "showViolations" => _as_bool(_config_get(raw_config, "showViolations", false), false),
         "multiRegion" => _as_bool(_config_get(raw_config, "multiRegion", false), false),
+        "landUse" => _as_bool(_config_get(raw_config, "landUse", false), false),
         "constraintGroup" => String(_config_get(raw_config, "constraintGroup", "Base + Bunkers + Scope3")),
         "outputMode" => output_mode,
         "outputName" => out_name,
@@ -2658,6 +2679,10 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
             push!(md.params.extensions, :multi_region)
             _job_update!(job_id; stage = "reading", message = "MultiRegion extension is ENABLED for this run")
         end
+        if get(config, "landUse", false) === true
+            push!(md.params.extensions, :land_use)
+            _job_update!(job_id; stage = "reading", message = "Cluster land-use limit is ENABLED for this run")
+        end
         _job_update!(job_id; stage = "reading", message = "Selected solve periods: $(join(string.(selected_periods), ", "))")
 
         _job_update!(job_id; stage = "preparing", message = "Deriving sets and parameters for periods $(selected_periods)")
@@ -2667,6 +2692,9 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         end
         stage_times["derive_sec"] = derive_seconds
         _job_update!(job_id; stage = "preparing", message = "Derived sets and parameters in $(derive_seconds) seconds")
+        if :land_use in md.params.extensions
+            _job_update!(job_id; stage = "preparing", message = land_use_plan(md))
+        end
 
         if mode == :ts
             _check_cancel(job_id) && throw(UICancelled("Run was stopped before clustering."))
@@ -2756,6 +2784,7 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         elseif term == "INFEASIBLE"
             _report_iis!(job_id, model, effective_solver)
         end
+        _report_land_use!(job_id, model, vars, md)
 
         out_dir = config["outputDir"]
         mkpath(out_dir)
@@ -3292,6 +3321,9 @@ function _write_ui_run_metadata(out_dir::AbstractString, config::Dict{String,Any
         push!(settings, ("solve_method", String(config["solveMethod"])))
         push!(settings, ("n_repDays", string(rr.n_repDays)))
         push!(settings, ("hoursPer_day", string(rr.hoursPer_day)))
+        # Optional model extensions
+        push!(settings, ("multiRegion", string(get(config, "multiRegion", false) === true)))
+        push!(settings, ("landUse", string(get(config, "landUse", false) === true)))
         # Sizing
         push!(settings, ("n_rows", string(rr.n_rows)))
         push!(settings, ("n_cols", string(rr.n_cols)))

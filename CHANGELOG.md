@@ -22,3 +22,12 @@ All notable changes to IESA-Opt.jl are recorded here. The format follows
   investment decisions (`techStock` + `cap_investments`), and the campaign
   result aggregates them into `investmentSpread` so the same data is available
   via `/api/mga/result/{id}` for external post-processing.
+- Opt-in *Cluster land use* extension (`:land_use`, UI toggle under
+  *Reporting and advanced settings*, off by default) porting the AIMMS
+  constraint `c_ClusterSpace_Limit`: in 2050, the stock of each industrial
+  cluster's `CLn_` technologies weighted by Technologies column DS
+  "Space (Ha)" may not exceed the Parameters row `CLn_AvailableArea`. The run
+  log reports the land used per cluster after every solve (AIMMS
+  `p_clusterSpace_used`), and `solver_settings` records the extension toggles.
+  The DuckDB input-cache format version is bumped so cached workbooks are
+  re-read with the new land-use inputs.

@@ -22,6 +22,8 @@ build_*_lp!(m, md)                       (src/solve.jl)
    ├── add_*_constraints!  (core)
    ├── add_objective!
    └── apply_extensions!(m, vars, md; mode = :fh|:ts|:annual)   ← single hook
+            ├── if :land_use in md.params.extensions
+            │       apply_land_use!(m, vars, md; mode)
             └── if :multi_region in md.params.extensions
                     apply_multi_region!(m, vars, md; mode)
 ```
@@ -33,7 +35,15 @@ Activating no extensions (`md.params.extensions == Set()`) makes
 
 | Symbol           | File                                       | Purpose                                                   | UI toggle    |
 |------------------|--------------------------------------------|-----------------------------------------------------------|--------------|
+| `:land_use`      | [`land_use.jl`](land_use.jl)               | 2050 land-use limit per industrial cluster (AIMMS `c_ClusterSpace_Limit`). | `Cluster land use` |
 | `:multi_region`  | [`multi_region.jl`](multi_region.jl)       | Regional caps on stock / use ("Komar" Section in AIMMS).  | `MultiRegion` |
+
+`:land_use` inputs are read from the workbook by the core reader
+([`data_reading.jl`](../data_reading.jl)) into `md.params.techSpace`
+(Technologies column DS, "Space (Ha)" [Hectare/UoC]) and
+`md.params.clusterAvailableArea` (Parameters rows labelled `CLn_AvailableArea`
+[Hectare]). Workbooks without these inputs add no constraint even when the
+toggle is on.
 
 ## Adding a new extension
 
@@ -62,13 +72,16 @@ Activating no extensions (`md.params.extensions == Set()`) makes
 Mechanical, no surgery on core model files:
 
 1. Delete the `src/extensions/` directory.
-2. Remove the two `include(...)` lines for the extensions in
+2. Remove the `include("extensions/...")` lines in
    [`src/IESAOpt.jl`](../IESAOpt.jl).
-3. Remove the `extensions::Set{Symbol}` field on `ModelParams` in
-   [`src/types.jl`](../types.jl).
+3. Remove the `extensions::Set{Symbol}` field and the extension data fields
+   below it (`techSpace`, `clusterAvailableArea`) on `ModelParams` in
+   [`src/types.jl`](../types.jl), plus the land-use reader lines in
+   [`src/data_reading.jl`](../data_reading.jl).
 4. Remove the three `apply_extensions!(...)` calls in
    [`src/solve.jl`](../solve.jl).
 5. Remove any UI elements (HTML toggle + `app.js` payload field +
-   `ui_server.jl` parse logic).
+   `ui_server.jl` parse logic, including the `land_use_plan` /
+   `_report_land_use!` run-log calls).
 
 That's it — no model/* file is touched.

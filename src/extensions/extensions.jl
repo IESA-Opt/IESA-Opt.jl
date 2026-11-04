@@ -9,8 +9,10 @@
 # IESA-Opt core. Removing the entire category is mechanical:
 #
 #   1. Delete the `src/extensions/` directory.
-#   2. Remove the two `include(...)` lines for the extensions in `IESAOpt.jl`.
-#   3. Remove the `extensions::Set{Symbol}` field on `ModelParams` (types.jl).
+#   2. Remove the `include("extensions/...")` lines in `IESAOpt.jl`.
+#   3. Remove the `extensions::Set{Symbol}` field on `ModelParams` (types.jl)
+#      and the extension data fields below it (`techSpace`, ...) together
+#      with their reader lines in `data_reading.jl`.
 #   4. Remove the three `apply_extensions!(...)` calls in `solve.jl`.
 #   5. Remove any UI toggles that populate `md.params.extensions`.
 #
@@ -37,6 +39,9 @@ function apply_extensions!(m::JuMP.Model, vars, md::ModelData; mode::Symbol = :f
     n_added = 0
 
     # ---- Registered extensions -----------------------------------------------
+    if :land_use in md.params.extensions
+        n_added += apply_land_use!(m, vars, md; mode = mode)
+    end
     if :multi_region in md.params.extensions
         n_added += apply_multi_region!(m, vars, md; mode = mode)
     end

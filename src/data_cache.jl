@@ -23,7 +23,7 @@ using Base64
 using DuckDB
 import DBInterface
 
-const _IESA_CACHE_FORMAT_VERSION = 10
+const _IESA_CACHE_FORMAT_VERSION = 11
 const _IESA_INPUT_DUCKDB_SCHEMA_VERSION = 2
 
 """

@@ -516,6 +516,11 @@ Base.@kwdef mutable struct ModelParams
     # See src/extensions/README.md for the architecture and removal steps.
     # =========================================================================
     extensions::Set{Symbol}                                   = Set{Symbol}()
+
+    # Cluster land-use limit (`:land_use`, AIMMS `c_ClusterSpace_Limit`).
+    # Always read when present in the workbook; only constrains when enabled.
+    techSpace::Dict{Symbol,Float64}                           = Dict()  # AIMMS p_techSpace: Technologies!DS "Space (Ha)" [Hectare/UoC]
+    clusterAvailableArea::Dict{Symbol,Float64}                = Dict()  # AIMMS p_clusterAvailableArea: Parameters "CLn_AvailableArea" rows [Hectare]
 end
 
 # ----------------------------------------------------------------------------

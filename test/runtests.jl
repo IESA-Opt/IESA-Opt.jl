@@ -16,6 +16,7 @@ end
 end
 
 @testset "Project-specific extensions" begin
+    include("test_land_use.jl")
     include("test_multi_region.jl")
 end
 
