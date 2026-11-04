@@ -31,3 +31,13 @@ All notable changes to IESA-Opt.jl are recorded here. The format follows
   `p_clusterSpace_used`), and `solver_settings` records the extension toggles.
   The DuckDB input-cache format version is bumped so cached workbooks are
   re-read with the new land-use inputs.
+
+### Fixed
+
+- Time slicing with *Force extreme periods* no longer fails with "reducing
+  over an empty collection" on regional workbooks: the extreme-day criteria now
+  recognise per-region wind/sun profiles (`CLn_Wind Onshore NL`, `CLn_Sun NL`,
+  `Wind Offshore NSn`). Results for the national workbook are unchanged.
+- Clustering approaches other than `kmeans_avg` now run a seeded k-means
+  (`clustering_seed`), so identical settings always give identical
+  representative days.

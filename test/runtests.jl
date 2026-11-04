@@ -15,6 +15,10 @@ end
     include("test_data_writing.jl")
 end
 
+@testset "Phase 5: representative-day clustering" begin
+    include("test_clustering.jl")
+end
+
 @testset "Project-specific extensions" begin
     include("test_land_use.jl")
     include("test_multi_region.jl")

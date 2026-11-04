@@ -236,8 +236,9 @@ function _run_clustering(p::ModelParams,
     end
     # Normalize columns for shape-based clustering
     Xc = approach == :kmeans_shape ? _normalize_columns(X) : copy(X)
-    # Use deterministic seed via repeatable init
-    res = kmeans(Xc, n_clusters; maxiter = 200, display = :none)
+    # Seeded so the same settings always give the same rep days
+    res = kmeans(Xc, n_clusters; maxiter = 200, display = :none,
+                 rng = MersenneTwister(p.clustering_seed))
     return res.assignments
 end
 
@@ -701,9 +702,8 @@ function _apply_extreme_periods!(md::ModelData,
         "EU Load", "Standard Load", "Built Environment", "Electric Vehicles",
         "Electric LDV", "Electric HDV",
     ])
-    res_names = Set(["Wind Onshore NL", "Wind Offshore NL", "Sun NL"])
     yp_demand_list = [yp for yp in yps if String(yp) in demand_names]
-    yp_res_list = [yp for yp in yps if String(yp) in res_names]
+    yp_res_list = [yp for yp in yps if _is_res_profile(yp)]
     isempty(yp_demand_list) && isempty(yp_res_list) && return
 
     @info "_apply_extreme_periods!: profile detection" demand_n = length(yp_demand_list) res_n = length(yp_res_list)
@@ -715,8 +715,8 @@ function _apply_extreme_periods!(md::ModelData,
     for d in 1:n_days
         for hh in 1:hours_per_day
             h_orig = (d - 1) * hours_per_day + hh
-            demand = sum(get(p.hourly_profilesReadOrig, (h_orig, yp), 0.0) for yp in yp_demand_list)
-            res = sum(get(p.hourly_profilesReadOrig, (h_orig, yp), 0.0) for yp in yp_res_list)
+            demand = sum((get(p.hourly_profilesReadOrig, (h_orig, yp), 0.0) for yp in yp_demand_list); init = 0.0)
+            res = sum((get(p.hourly_profilesReadOrig, (h_orig, yp), 0.0) for yp in yp_res_list); init = 0.0)
             netload = demand - res
             hour_peak_netload[d] = max(hour_peak_netload[d], netload)
             hour_min_netload[d] = min(hour_min_netload[d], netload)
@@ -842,6 +842,11 @@ function _apply_extreme_periods!(md::ModelData,
     end
     return nothing
 end
+
+# RES availability profiles for the extreme-day criteria: the national
+# "Wind Onshore NL" / "Wind Offshore NL" / "Sun NL" and their regional variants
+# ("CL1_Wind Onshore NL", "CL1_Sun NL", "Wind Offshore NS1", ...).
+_is_res_profile(yp::Symbol) = occursin(r"^(CL\d+_)?(Wind Onshore|Wind Offshore|Sun)\b", String(yp))
 
 function _arg_extreme_day(values::Vector{Float64}, claimed_day::Set{Int}; rev::Bool)
     best_day = 0
