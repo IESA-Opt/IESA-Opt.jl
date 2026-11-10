@@ -2,8 +2,8 @@
 # extensions.jl — opt-in extension dispatcher
 #
 # Project-specific add-on constraints live in src/extensions/*.jl. They are
-# disabled by default; activate by adding the extension's name (Symbol) to
-# `md.params.extensions::Set{Symbol}`, typically wired through a UI toggle.
+# enabled by default for AIMMS-compatible runs and can be disabled through
+# `md.params.extensions::Set{Symbol}` or the corresponding UI toggles.
 #
 # This file is part of the **Extensions** category — it is *not* part of the
 # IESA-Opt core. Removing the entire category is mechanical:

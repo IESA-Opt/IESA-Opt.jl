@@ -9,14 +9,13 @@
 #
 # Plus calendar-day anchor constraints (Phase 4 cross-period storage linking):
 #   - seasonalDaily_dQ_TS:   calLevel(d) = (1-loss)^24 * calLevel(d-1)
-#                                          + Σ_rd dayMix_weight(d,rd) * (dayEnd(rd) - dayStart(rd))
+#                           + Σ_rd dayMix_weight(d,rd) * (dayEnd(rd) - (1-loss)^24 * dayStart(rd))
 #   - anchor_dQStart_TS:     dayStart(rd)*dayWeight(rd) = Σ_d dayMix_weight(d,rd) * calLevel(d-1)
 #   - cycle:                 calLevel(1)  = (1-loss)^24 * calLevel(end) + ...
 #
 # Entry point: `add_ts_constraints!(m, vars, md)`
 #
-# IESA-Opt 1.0 source: lines 3215-3692 (TS hourly/daily/CHP), 4551-4644 (storage),
-#               4804-5095 (DR/BE/storage/reservoir/anchor).
+# Representative-day storage adapts the supplied AIMMS chronological balance.
 # =============================================================================
 
 # Same FP-noise threshold as hourly.jl
@@ -600,7 +599,7 @@ function _add_gasbuffer_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
 end
 
 # ============================================================================
-# Section 4 — Storage state recursion (TS, cyclic intra-rep-day)
+# Section 4 — Storage state recursion (TS, calendar-linked representative days)
 # ============================================================================
 
 function _add_storage_state_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
@@ -610,36 +609,36 @@ function _add_storage_state_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     ts   = vars.techStock
     tu   = vars.tech_use
     dq_S = vars.deltaQ_S_TS
+    dq_start = vars.deltaQ_dayStart_TS
+    dq_end = vars.deltaQ_dayEnd_TS
     dqUP = vars.deltaQ_UP_TS
     dqDW = vars.deltaQ_DW_TS
     hpd_c = p.hoursPer_day_cluster
     isempty(s.hours_cluster) && return
 
-    # IESA-Opt 1.0 deltaQ_S_TS Variable-Definition (line 4559):
-    #   if intradaySlot(hc) = first(hours_inDay_cluster):
-    #     deltaQ_S_TS(hc) = (1-lch) * deltaQ_UP_TS(hc) + deltaQ_DW_TS(hc)
-    #   else:
-    #     deltaQ_S_TS(hc) = (1-sl) * deltaQ_S_TS(hc-1)
-    #                     + (1-lch) * deltaQ_UP_TS(hc) + deltaQ_DW_TS(hc)
     for tfwb in s.tech_fWithBattery, ps in pss
         sl  = get(p.flex_standing_loss_effective, tfwb, 0.0)
         lch = get(p.flex_loss_charge, tfwb, 0.0)
         chg_factor = 1.0 - lch
         for hc in s.hours_cluster
-            sw    = get(p.slice_width_hours, hc, 24.0 / hpd_c)
+            sw    = 24.0 / hpd_c
             decay = (1.0 - sl)^sw
             slot  = get(p.intradaySlot_of_clusterHour, hc, 1)
             rd    = get(p.repDay_of_clusterHour, hc, 1)
             expr = AffExpr(0.0)
             add_to_expression!(expr, 1.0, dq_S[hc, tfwb, ps])
             if slot == 1
-                # IESA-Opt 1.0 prunes inactive deltaQ_dayStart_TS from the generated LP.
+                add_to_expression!(expr, -decay, dq_start[rd, tfwb, ps])
             else
                 add_to_expression!(expr, -decay, dq_S[hc - 1, tfwb, ps])
             end
             dqUP !== nothing && add_to_expression!(expr, -chg_factor, dqUP[hc, tfwb, ps])
             dqDW !== nothing && add_to_expression!(expr, -1.0, dqDW[hc, tfwb, ps])
             @constraint(m, expr == 0.0, base_name = "deltaQ_S_TS_definition[$hc,$tfwb,$ps]")
+        end
+        for rd in s.repDays
+            @constraint(m, dq_end[rd, tfwb, ps] == dq_S[rd * hpd_c, tfwb, ps],
+                        base_name = "deltaQ_dayEnd_TS_definition[$rd,$tfwb,$ps]")
         end
     end
 
@@ -649,10 +648,13 @@ function _add_storage_state_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
         fS = get(p.flex_storage, tfb, 0.0)
         fC = get(p.flex_capacity, (tfb, ps), 0.0)
         (fS > 0.0 && fC > 0.0) || continue
-        rhs = -1.0 * fS * fC  # multiplied by techStock at LHS
         for hc in s.hours_cluster
             @constraint(m, dq_S[hc, tfb, ps] + fS * fC * ts[tfb, ps] >= 0.0,
                         base_name = "cumulativeS_dQtfb_TS[$hc,$tfb,$ps]")
+        end
+        for rd in s.repDays
+            @constraint(m, dq_start[rd, tfb, ps] + fS * fC * ts[tfb, ps] >= 0.0,
+                        base_name = "cumulativeS_dQtfb_dayStart_TS[$rd,$tfb,$ps]")
         end
     end
 
@@ -680,12 +682,16 @@ function _add_storage_state_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
             @constraint(m, expr >= 0.0, base_name = "cumulativeS_dQtfv_TS[$hc,$tfv,$ps]")
             # minSoC_dQtfv_TS:
             #   deltaQ_S_TS(hc,tfv) >= -(1-ev_min)*ts*fS*fC
-            @constraint(m, dq_S[hc, tfv, ps] + (1.0 - ev_min) * fS * fC * ts[tfv, ps] >= 0.0,
-                        base_name = "minSoC_dQtfv_TS[$hc,$tfv,$ps]")
+            if ev_min > 0.0
+                @constraint(m, dq_S[hc, tfv, ps] + (1.0 - ev_min) * fS * fC * ts[tfv, ps] >= 0.0,
+                            base_name = "minSoC_dQtfv_TS[$hc,$tfv,$ps]")
+            end
         end
         for rd in s.repDays
-            @constraint(m, (1.0 - ev_min) * fS * fC * ts[tfv, ps] >= 0.0,
-                        base_name = "minSoC_dQtfv_dayStart_TS[$rd,$tfv,$ps]")
+            if ev_min > 0.0
+                @constraint(m, dq_start[rd, tfv, ps] + (1.0 - ev_min) * fS * fC * ts[tfv, ps] >= 0.0,
+                            base_name = "minSoC_dQtfv_dayStart_TS[$rd,$tfv,$ps]")
+            end
         end
     end
 end
@@ -774,12 +780,15 @@ function _add_flex_bounds_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
         prof_t = get(p.profileType_tech, tfv, :Flat)
         fa     = get(p.flex_activity, tfv, Symbol(""))
         ab_fa  = fa == Symbol("") ? 0.0 : get(p.activity_balances, (tfv, fa, ps), 0.0)
+        driving_profile = get(p.profileType_EVuse, tfv, Symbol(""))
+        speed = get(p.avg_speed, tfv, 0.0)
         for hc in s.hours_cluster
             prof = get(p.hourly_profiles_cluster, (hc, prof_t), 0.0)
+            unavailable = speed > 0.0 ? get(p.hourly_profiles_cluster, (hc, driving_profile), 0.0) / speed * (24.0 / p.hoursPer_day_cluster) : 0.0
             expr = AffExpr(0.0)
             add_to_expression!(expr, 1.0, dqUP[hc, tfv, ps])
             add_to_expression!(expr, fC, ts[tfv, ps])
-            add_to_expression!(expr, prof * ab_fa, tu[tfv, ps])
+            add_to_expression!(expr, prof * ab_fa - fC * unavailable, tu[tfv, ps])
             @constraint(m, expr >= 0.0, base_name = "capacityUP_dQtfv_TS[$hc,$tfv,$ps]")
         end
     end
@@ -906,25 +915,24 @@ function _add_flex_closed_loop_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelDat
 
     # Helper: per-tech disc factor (1 - flex_loss_discharge_eff), guarded > 0.
     _disc(t) = (d = 1.0 - get(p.flex_loss_discharge_eff, t, 0.0); d <= 0.0 ? 1.0 : d)
-    _chg(t)  = 1.0 - get(p.flex_loss_charge, t, 0.0)
 
     # IESA-Opt 1.0 balanceD_deltaQd_TS (line 4704) for tech_flexD
     if dqdUP !== nothing && dqdDW !== nothing
         for tf_d in s.tech_flexD, ps in pss, rd in s.repDays
-            chg = _chg(tf_d); disc = _disc(tf_d)
+            disc = _disc(tf_d)
             @constraint(m,
-                chg * dqdUP[rd, tf_d, ps] + (1.0 / disc) * dqdDW[rd, tf_d, ps] == 0.0,
+                dqdUP[rd, tf_d, ps] + (1.0 / disc) * dqdDW[rd, tf_d, ps] == 0.0,
                 base_name = "balanceD_deltaQd_TS[$rd,$tf_d,$ps]")
         end
 
         # IESA-Opt 1.0 balanceR_deltaQd_TS (line 4708) for tech_flexR over r_dayWindow
         for tf_r in s.tech_flexR, ps in pss, r in s.r_dayWindow
-            chg = _chg(tf_r); disc = _disc(tf_r)
+            disc = _disc(tf_r)
             terms = AffExpr(0.0)
             for rd in s.repDays
                 w = get(p.repDayWeight_range, (rd, r), 0.0)
                 w == 0.0 && continue
-                add_to_expression!(terms, w * chg, dqdUP[rd, tf_r, ps])
+                add_to_expression!(terms, w, dqdUP[rd, tf_r, ps])
                 add_to_expression!(terms, w / disc, dqdDW[rd, tf_r, ps])
             end
             @constraint(m, terms == 0.0, base_name = "balanceR_deltaQd_TS[$r,$tf_r,$ps]")
@@ -932,12 +940,12 @@ function _add_flex_closed_loop_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelDat
 
         # IESA-Opt 1.0 balanceW_deltaQd_TS (line 4712) for tech_flexW over weeks
         for tf_w in s.tech_flexW, ps in pss, w in s.weeks
-            chg = _chg(tf_w); disc = _disc(tf_w)
+            disc = _disc(tf_w)
             terms = AffExpr(0.0)
             for rd in s.repDays
                 wt = get(p.repDayWeight_week, (rd, w), 0.0)
                 wt == 0.0 && continue
-                add_to_expression!(terms, wt * chg, dqdUP[rd, tf_w, ps])
+                add_to_expression!(terms, wt, dqdUP[rd, tf_w, ps])
                 add_to_expression!(terms, wt / disc, dqdDW[rd, tf_w, ps])
             end
             @constraint(m, terms == 0.0, base_name = "balanceW_deltaQd_TS[$w,$tf_w,$ps]")
@@ -945,12 +953,12 @@ function _add_flex_closed_loop_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelDat
 
         # IESA-Opt 1.0 balanceM_deltaQd_TS (line 4716) for tech_flexM over months
         for tf_m in s.tech_flexM, ps in pss, mo in s.months
-            chg = _chg(tf_m); disc = _disc(tf_m)
+            disc = _disc(tf_m)
             terms = AffExpr(0.0)
             for rd in s.repDays
                 wt = get(p.repDayWeight_month, (rd, mo), 0.0)
                 wt == 0.0 && continue
-                add_to_expression!(terms, wt * chg, dqdUP[rd, tf_m, ps])
+                add_to_expression!(terms, wt, dqdUP[rd, tf_m, ps])
                 add_to_expression!(terms, wt / disc, dqdDW[rd, tf_m, ps])
             end
             @constraint(m, terms == 0.0, base_name = "balanceM_deltaQd_TS[$mo,$tf_m,$ps]")
@@ -958,12 +966,12 @@ function _add_flex_closed_loop_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelDat
 
         # IESA-Opt 1.0 balanceS_deltaQd_TS (line 4720) for tech_flexS over seasons
         for tf_s in s.tech_flexS, ps in pss, sn in s.seasons
-            chg = _chg(tf_s); disc = _disc(tf_s)
+            disc = _disc(tf_s)
             terms = AffExpr(0.0)
             for rd in s.repDays
                 wt = get(p.repDayWeight_season, (rd, sn), 0.0)
                 wt == 0.0 && continue
-                add_to_expression!(terms, wt * chg, dqdUP[rd, tf_s, ps])
+                add_to_expression!(terms, wt, dqdUP[rd, tf_s, ps])
                 add_to_expression!(terms, wt / disc, dqdDW[rd, tf_s, ps])
             end
             @constraint(m, terms == 0.0, base_name = "balanceS_deltaQd_TS[$sn,$tf_s,$ps]")
@@ -971,12 +979,12 @@ function _add_flex_closed_loop_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelDat
 
         # IESA-Opt 1.0 balanceB_deltaQd_TS (line 4724) for tech_flexB over semesters
         for tf_b in s.tech_flexB, ps in pss, b in s.semesters
-            chg = _chg(tf_b); disc = _disc(tf_b)
+            disc = _disc(tf_b)
             terms = AffExpr(0.0)
             for rd in s.repDays
                 wt = get(p.repDayWeight_semester, (rd, b), 0.0)
                 wt == 0.0 && continue
-                add_to_expression!(terms, wt * chg, dqdUP[rd, tf_b, ps])
+                add_to_expression!(terms, wt, dqdUP[rd, tf_b, ps])
                 add_to_expression!(terms, wt / disc, dqdDW[rd, tf_b, ps])
             end
             @constraint(m, terms == 0.0, base_name = "balanceB_deltaQd_TS[$b,$tf_b,$ps]")
@@ -984,12 +992,12 @@ function _add_flex_closed_loop_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelDat
 
         # IESA-Opt 1.0 balanceY_deltaQd_TS (line 4728) for tech_flexY (sum over rd × dayWeight)
         for tf_y in s.tech_flexY, ps in pss
-            chg = _chg(tf_y); disc = _disc(tf_y)
+            disc = _disc(tf_y)
             terms = AffExpr(0.0)
             for rd in s.repDays
                 dwt = get(p.dayWeight, rd, 0.0)
                 dwt == 0.0 && continue
-                add_to_expression!(terms, dwt * chg, dqdUP[rd, tf_y, ps])
+                add_to_expression!(terms, dwt, dqdUP[rd, tf_y, ps])
                 add_to_expression!(terms, dwt / disc, dqdDW[rd, tf_y, ps])
             end
             @constraint(m, terms == 0.0, base_name = "balanceY_deltaQd_TS[$tf_y,$ps]")
@@ -998,13 +1006,13 @@ function _add_flex_closed_loop_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelDat
 
     # IESA-Opt 1.0 balanceQ_deltaQtfe_TS (line 4695) for tech_fBEshifting over qc
     for tfe in s.tech_fBEshifting, ps in pss, qc in s.q_hourWindow_cluster
-        chg = _chg(tfe); disc = _disc(tfe)
+        disc = _disc(tfe)
         terms = AffExpr(0.0)
         for hc in s.hours_cluster
             qchc = get(p.quarterPer_clusterHour, hc, 0)
             qchc == qc || continue
             w = get(p.clusterHourWeight, hc, 1.0)
-            add_to_expression!(terms, w * chg, dqUP[hc, tfe, ps])
+            add_to_expression!(terms, w, dqUP[hc, tfe, ps])
             add_to_expression!(terms, w / disc, dqDW[hc, tfe, ps])
         end
         @constraint(m, terms == 0.0, base_name = "balanceQ_deltaQtfe_TS[$qc,$tfe,$ps]")
@@ -1126,7 +1134,7 @@ function _add_shedding_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
             if is_shedH && is_balancer
                 expr = AffExpr(0.0)
                 add_to_expression!(expr, 1.0, dS[hc, tsh, ps])
-                coef = shedVol * prof
+                coef = shedVol != 0.0 ? prof : 0.0
                 coef == 0.0 || add_to_expression!(expr, coef, tu[tsh, ps])
                 @constraint(m, expr >= 0.0, base_name = "balanceH_deltaS_TS[$hc,$tsh,$ps]")
             end
@@ -1190,16 +1198,15 @@ function _add_backlog_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
 
     # Helpers
     _disc(t) = (d = 1.0 - get(p.flex_loss_discharge_eff, t, 0.0); d <= 0.0 ? 1.0 : d)
-    _chg(t)  = 1.0 - get(p.flex_loss_charge, t, 0.0)
 
     # ===== IESA-Opt 1.0 DR shifting (tech_fDRshifting / index tfs) =====
     # IESA-Opt 1.0 stateBalance_dQtfs_TS (line 4790): linear chain over hours_cluster, NOT
     # per-rep-day. Resets at hc=1 only. Closure constraints reset at horizon-day
     # boundaries within the cluster (mod val(rd), backlog_horizon == 0) and at last(repDays).
-    if vars.deltaQ_backlog_DR_TS !== nothing && !isempty(s.tech_fDRshifting)
+        if !isempty(s.tech_fDRshifting)
+            if vars.deltaQ_backlog_DR_TS !== nothing
         b = vars.deltaQ_backlog_DR_TS
         for tfs in s.tech_fDRshifting, ps in pss
-            chg  = _chg(tfs)
             disc = _disc(tfs)
             fS = get(p.flex_storage, tfs, 0.0)
             fC = get(p.flex_capacity, (tfs, ps), 0.0)
@@ -1213,7 +1220,7 @@ function _add_backlog_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                     add_to_expression!(expr, -(1.0 / disc), dqDW[hc, tfs, ps])
                 end
                 if dqUP !== nothing
-                    add_to_expression!(expr, -chg, dqUP[hc, tfs, ps])
+                    add_to_expression!(expr, -1.0, dqUP[hc, tfs, ps])
                 end
                 @constraint(m, expr == 0.0, base_name = "stateBalance_dQtfs_TS[$hc,$tfs,$ps]")
                 # IESA-Opt 1.0 stateCap_dQtfs_TS (line 4822): only when flex_storage > 0
@@ -1236,7 +1243,8 @@ function _add_backlog_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
             end
         end
 
-        # IESA-Opt 1.0 cumulativeUP_dQtfs_TS (line 4806) for tech_fDRshifting
+            end
+                # IESA-Opt 1.0 cumulativeUP_dQtfs_TS (line 4806) for tech_fDRshifting
         for tfs in s.tech_fDRshifting, ps in pss, rd in s.repDays
             tfs in s.tech_balancers || continue
             prof_t = get(p.profileType_tech, tfs, :Flat)
@@ -1276,12 +1284,12 @@ function _add_backlog_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     # ===== IESA-Opt 1.0 BE shifting (tech_fBEshifting / index tfe) =====
     # IESA-Opt 1.0 stateBalance_dQtfe_TS (line 4844): per-rep-day chain that resets at
     # the first slot of each rep-day to dQ_backlog_BE_dayStart_TS(rd).
-    if vars.deltaQ_backlog_BE_TS !== nothing && !isempty(s.tech_fBEshifting)
+        if !isempty(s.tech_fBEshifting)
+            if vars.deltaQ_backlog_BE_TS !== nothing
         b      = vars.deltaQ_backlog_BE_TS
         bStart = vars.deltaQ_backlog_BE_dayStart_TS
         bEnd   = vars.deltaQ_backlog_BE_dayEnd_TS
         for tfe in s.tech_fBEshifting, ps in pss
-            chg  = _chg(tfe)
             disc = _disc(tfe)
             fS = get(p.flex_storage, tfe, 0.0)
             fC = get(p.flex_capacity, (tfe, ps), 0.0)
@@ -1299,7 +1307,7 @@ function _add_backlog_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                     add_to_expression!(expr, -(1.0 / disc), dqDW[hc, tfe, ps])
                 end
                 if dqUP !== nothing
-                    add_to_expression!(expr, -chg, dqUP[hc, tfe, ps])
+                    add_to_expression!(expr, -1.0, dqUP[hc, tfe, ps])
                 end
                 @constraint(m, expr == 0.0, base_name = "stateBalance_dQtfe_TS[$hc,$tfe,$ps]")
                 # IESA-Opt 1.0 stateCap_dQtfe_TS (line 4862): cap on intra-day backlog
@@ -1335,7 +1343,8 @@ function _add_backlog_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
             end
         end
 
-        # IESA-Opt 1.0 cumulativeUP_dQtfe_TS (line 4791) for tech_fBEshifting over qc
+            end
+                # IESA-Opt 1.0 cumulativeUP_dQtfe_TS (line 4791) for tech_fBEshifting over qc
         for tfe in s.tech_fBEshifting, ps in pss, qc in s.q_hourWindow_cluster
             tfe in s.tech_balancers || continue
             rhs_const = get(p.cumulative_dQtfe_rhs_TS, (qc, tfe, ps), 0.0)
@@ -1411,7 +1420,7 @@ function _add_chp_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
             prof = get(p.hourly_profiles_cluster, (hc, prof_t), 0.0)
 
             # IESA-Opt 1.0 balanceH_deltaHchp_TS (line 3586) — only for tk_h
-            if is_h && abs(ab_prod) > _IJ_COEF_EPS_TS && eta > 0.0
+            if is_h && (ab_prod != 0.0 || eta != 0.0)
                 @constraint(m, ab_prod * duCHP[hc, tk, ps] - (eta / eps_) * dpCHP[hc, tk, ps] == 0.0,
                             base_name = "balanceH_deltaHchp_TS[$hc,$tk,$ps]")
             end
@@ -1522,16 +1531,7 @@ end
 # ============================================================================
 # Section 10 — Calendar-day storage anchor (Phase 4: cross-period linking)
 #
-# This is the key TS mechanism that propagates storage state across days
-# beyond the within-rep-day cyclic loop.  Each calendar day d gets an
-# "anchor" level `calLevel(d)` that is itself cyclic over 365 days.
-#
-# IESA-Opt 1.0 source (lines 5011-5089):
-#   seasonalDaily_dQ_TS:      calLevel(d) − (1−sl)^24·calLevel(d−1)
-#                             − Σ_rd dayMix_weight(d,rd) · (dayEnd(rd) − dayStart(rd)) = 0
-#   anchor_dQStart_TS:        dayStart(rd) · dayWeight(rd)
-#                             = Σ_d dayMix_weight(d,rd) · calLevel(d−1)
-#   Cycle: calLevel(1) refers to calLevel(365) via cyclic recursion.
+# Calendar levels carry the weighted representative-day changes, with cyclic year-end closure.
 # ============================================================================
 
 function _add_anchor_constraints_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
@@ -1556,6 +1556,15 @@ function _add_anchor_constraints_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelD
     # ---------- Storage (tech_fWithBattery) ----------
     if vars.deltaQ_calDayLevel_TS !== nothing
         calL   = vars.deltaQ_calDayLevel_TS
+        dq_start = vars.deltaQ_dayStart_TS
+        dq_end = vars.deltaQ_dayEnd_TS
+        dq_state = vars.deltaQ_S_TS
+        slots_per_day = p.hoursPer_day_cluster
+        storage_techs = Set(s.tech_fStorage)
+        ev_techs = Set(s.tech_fEV)
+        day_mixes = Dict(day => [(rd, get(p.dayMix_weight, (day, rd), 0.0))
+                     for rd in rds if get(p.dayMix_weight, (day, rd), 0.0) != 0.0]
+                 for day in days)
 
         for tfwb in s.tech_fWithBattery, ps in pss
             sl = get(p.flex_standing_loss_effective, tfwb, 0.0)
@@ -1569,12 +1578,47 @@ function _add_anchor_constraints_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelD
                 expr = AffExpr(0.0)
                 add_to_expression!(expr, 1.0, calL[d, tfwb, ps])
                 add_to_expression!(expr, -decay, calL[d_prev, tfwb, ps])
+                for (rd, weight) in day_mixes[d]
+                    add_to_expression!(expr, -weight, dq_end[rd, tfwb, ps])
+                    add_to_expression!(expr, weight * decay, dq_start[rd, tfwb, ps])
+                end
                 @constraint(m, expr == 0.0, base_name = "seasonalDaily_dQ_TS[$d,$tfwb,$ps]")
 
                 # IESA-Opt 1.0 capLevelLB_dQ_TS (line 5055): deltaQ_calDayLevel_TS >= -techStock*flex_storage*flex_capacity
                 if fS > 0.0 && fC > 0.0
                     @constraint(m, calL[d, tfwb, ps] + fS * fC * ts[tfwb, ps] >= 0.0,
                                 base_name = "capLevelLB_dQ_TS[$d,$tfwb,$ps]")
+                end
+                for slot in 1:slots_per_day
+                    slot_decay = (1.0 - sl)^(slot * 24.0 / slots_per_day)
+                    level = AffExpr(0.0)
+                    add_to_expression!(level, slot_decay, calL[d_prev, tfwb, ps])
+                    helper1 = 0.0
+                    helper2 = 0.0
+                    for (rd, weight) in day_mixes[d]
+                        hc = (rd - 1) * slots_per_day + slot
+                        add_to_expression!(level, weight, dq_state[hc, tfwb, ps])
+                        add_to_expression!(level, -weight * slot_decay, dq_start[rd, tfwb, ps])
+                        helper1 += weight * get(p.cumulativeS_dQtfv_helper1_TS, (tfwb, hc), 0.0)
+                        helper2 += weight * get(p.cumulativeS_dQtfv_helper2_TS, (tfwb, hc), 0.0)
+                    end
+                    @constraint(m, level <= 0.0, base_name = "calendarStateUB_dQ_TS[$d,$slot,$tfwb,$ps]")
+                    if fS > 0.0 && fC > 0.0
+                        if tfwb in storage_techs
+                            @constraint(m, level + fS * fC * ts[tfwb, ps] >= 0.0,
+                                        base_name = "calendarStateLB_dQ_TS[$d,$slot,$tfwb,$ps]")
+                        elseif tfwb in ev_techs
+                            activity = get(p.flex_activity, tfwb, Symbol(""))
+                            coefficient = get(p.activity_balances, (tfwb, activity, ps), 0.0)
+                            @constraint(m, level + fS * fC * ts[tfwb, ps] +
+                                        (coefficient * helper2 - fS * fC * helper1) * vars.tech_use[tfwb, ps] >= 0.0,
+                                        base_name = "calendarStateLB_dQtfv_TS[$d,$slot,$tfwb,$ps]")
+                            if p.ev_min_soc_fraction_default > 0.0
+                                @constraint(m, level + (1.0 - p.ev_min_soc_fraction_default) * fS * fC * ts[tfwb, ps] >= 0.0,
+                                            base_name = "calendarMinSoC_dQtfv_TS[$d,$slot,$tfwb,$ps]")
+                            end
+                        end
+                    end
                 end
             end
 
@@ -1583,6 +1627,7 @@ function _add_anchor_constraints_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelD
                 dw = get(p.dayWeight, rd, 0.0)
                 dw == 0.0 && continue
                 expr = AffExpr(0.0)
+                add_to_expression!(expr, dw, dq_start[rd, tfwb, ps])
                 for (i, d) in enumerate(days)
                     w = get(p.dayMix_weight, (d, rd), 0.0)
                     w == 0.0 && continue

@@ -218,13 +218,6 @@ _prev_period(pss::AbstractVector{Int}, ps::Int) = begin
     (i === nothing || i == 1) ? nothing : pss[i - 1]
 end
 
-"""
-    _is_first_period(pss::AbstractVector{Int}, ps::Int) -> Bool
-
-True iff `ps` is the first element of `periods_solve`.
-"""
-_is_first_period(pss::AbstractVector{Int}, ps::Int) = !isempty(pss) && ps == first(pss)
-
 
 # =============================================================================
 # Phase 3 — Hourly + Daily variable declarations (FH mode only; TS = Phase 5)
@@ -319,17 +312,6 @@ function add_hourly_variables!(model::JuMP.Model, vars::AnnualVars, md::ModelDat
         vars.deltaQ_S = deltaQ_S
     end
 
-    # IESA-Opt 1.0 deltaQ_backlog_DR(h, tfs, ps) — index tfs = tech_fDRshifting
-    if !isempty(s.tech_fDRshifting)
-        @variable(model, deltaQ_backlog_DR[h = s.hours, tfs = s.tech_fDRshifting, ps = pss] >= 0)
-        vars.deltaQ_backlog_DR = deltaQ_backlog_DR
-    end
-    # IESA-Opt 1.0 deltaQ_backlog_BE(h, tfe, ps) — index tfe = tech_fBEshifting
-    if !isempty(s.tech_fBEshifting)
-        @variable(model, deltaQ_backlog_BE[h = s.hours, tfe = s.tech_fBEshifting, ps = pss] >= 0)
-        vars.deltaQ_backlog_BE = deltaQ_backlog_BE
-    end
-
     # ------ Reservoir (h, tw, ps): deltaW_UP >= 0, deltaW_S free
     if !isempty(s.tech_reservoir)
         @variable(model, deltaW_UP[h = s.hours, tw = s.tech_reservoir, ps = pss] >= 0)
@@ -339,29 +321,6 @@ function add_hourly_variables!(model::JuMP.Model, vars::AnnualVars, md::ModelDat
     end
 
     return vars
-end
-
-
-# =============================================================================
-# Hour-index helpers (cyclic year-end wrap)
-# =============================================================================
-
-"""
-    _prev_hour(hours::AbstractVector{Int}, h::Int) -> Int
-
-Return the cyclic predecessor in `hours`: previous hour, wrapping `first → last`.
-"""
-function _prev_hour(hours::AbstractVector{Int}, h::Int)
-    h == first(hours) ? last(hours) : hours[findfirst(==(h), hours) - 1]
-end
-
-"""
-    _prev_day(days::AbstractVector{Int}, d::Int) -> Int
-
-Cyclic previous day; wraps `first → last`.
-"""
-function _prev_day(days::AbstractVector{Int}, d::Int)
-    d == first(days) ? last(days) : days[findfirst(==(d), days) - 1]
 end
 
 
@@ -433,26 +392,12 @@ function add_ts_variables!(model::JuMP.Model, vars::AnnualVars, md::ModelData)
     if !isempty(s.tech_fWithBattery)
         @variable(model, deltaQ_S_TS[hc = s.hours_cluster, tfwb = s.tech_fWithBattery, ps = pss] <= 0)
         vars.deltaQ_S_TS = deltaQ_S_TS
-        # IESA-Opt 1.0 deltaQ_calDayLevel_TS — Range: nonpositive (line 4646)
+        @variable(model, deltaQ_dayStart_TS[rd = s.repDays, tfwb = s.tech_fWithBattery, ps = pss] <= 0)
+        @variable(model, deltaQ_dayEnd_TS[rd = s.repDays, tfwb = s.tech_fWithBattery, ps = pss] <= 0)
+        vars.deltaQ_dayStart_TS = deltaQ_dayStart_TS
+        vars.deltaQ_dayEnd_TS = deltaQ_dayEnd_TS
         @variable(model, deltaQ_calDayLevel_TS[d = s.days, tfwb = s.tech_fWithBattery, ps = pss] <= 0)
         vars.deltaQ_calDayLevel_TS = deltaQ_calDayLevel_TS
-    end
-    # IESA-Opt 1.0 deltaQ_backlog_DR_TS(hc, tfs, ps) — index tfs = tech_fDRshifting
-    if !isempty(s.tech_fDRshifting)
-        @variable(model, deltaQ_backlog_DR_TS[hc = s.hours_cluster, tfs = s.tech_fDRshifting, ps = pss] >= 0)
-        vars.deltaQ_backlog_DR_TS = deltaQ_backlog_DR_TS
-    end
-    # IESA-Opt 1.0 deltaQ_backlog_BE_TS(hc, tfe, ps) — index tfe = tech_fBEshifting
-    if !isempty(s.tech_fBEshifting)
-        @variable(model, deltaQ_backlog_BE_TS[hc = s.hours_cluster, tfe = s.tech_fBEshifting, ps = pss] >= 0)
-        vars.deltaQ_backlog_BE_TS = deltaQ_backlog_BE_TS
-        # IESA-Opt 1.0 dayStart/dayEnd backlog anchors + calendar-day chain
-        @variable(model, deltaQ_backlog_BE_dayStart_TS[rd = s.repDays, tfe = s.tech_fBEshifting, ps = pss] >= 0)
-        @variable(model, deltaQ_backlog_BE_dayEnd_TS[rd = s.repDays, tfe = s.tech_fBEshifting, ps = pss] >= 0)
-        @variable(model, deltaQ_backlog_BE_calDayLevel_TS[d = s.days, tfe = s.tech_fBEshifting, ps = pss] >= 0)
-        vars.deltaQ_backlog_BE_dayStart_TS    = deltaQ_backlog_BE_dayStart_TS
-        vars.deltaQ_backlog_BE_dayEnd_TS      = deltaQ_backlog_BE_dayEnd_TS
-        vars.deltaQ_backlog_BE_calDayLevel_TS = deltaQ_backlog_BE_calDayLevel_TS
     end
     if !isempty(s.tech_reservoir)
         @variable(model, deltaW_UP_TS[hc = s.hours_cluster, tw = s.tech_reservoir, ps = pss] >= 0)

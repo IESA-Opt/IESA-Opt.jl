@@ -19,10 +19,13 @@ Base.@kwdef mutable struct MGAExactConfig
     period::Int = 2050
     representative_days::Int = 15
     hours_per_day::Int = 24
-    clustering::Symbol = :kmeans_avg
-    extreme_periods::Bool = true
+    clustering::Symbol = :k_medoids
+    clustering_distance::Symbol = _default_clustering_distance(clustering)
+    extreme_periods::Bool = false
     extreme_days::Int = 5
     boundary_ramping::Bool = true
+    constraint_group::String = "Base + Bunkers + FeedStocks"
+    extensions::Set{Symbol} = Set([:multi_region, :land_use])
 end
 
 const _MGA_HALTON_BASES = (2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59, 61)
@@ -68,6 +71,13 @@ function _mga_apply_highs_method!(attrs::Dict{String,Any}, method::AbstractStrin
         attrs["solver"] = "ipm"
         attrs["run_crossover"] = "off"
         attrs["simplex_iteration_limit"] = Int(typemax(Int32))
+    elseif m == "barrier_fallback"
+        attrs["solver"] = "ipm"
+        attrs["run_crossover"] = "off"
+        attrs["primal_feasibility_tolerance"] = 1e-5
+        attrs["dual_feasibility_tolerance"] = 1e-5
+        attrs["ipm_optimality_tolerance"] = 1e-4
+        attrs["simplex_iteration_limit"] = Int(typemax(Int32))
     elseif m == "barrier_crossover" || m == "ipm_crossover"
         attrs["solver"] = "ipm"
         attrs["run_crossover"] = "on"
@@ -99,6 +109,13 @@ function _mga_apply_gurobi_method!(attrs::Dict{String,Any}, method::AbstractStri
         attrs["Method"] = 2
         attrs["Crossover"] = 0
         attrs["BarHomogeneous"] = 1
+    elseif m == "barrier_fallback"
+        attrs["Method"] = 2
+        attrs["Crossover"] = 0
+        attrs["BarHomogeneous"] = 1
+        attrs["BarConvTol"] = 1e-5
+        attrs["FeasibilityTol"] = 1e-5
+        attrs["OptimalityTol"] = 1e-5
     elseif m == "barrier_crossover" || m == "ipm_crossover"
         attrs["Method"] = 2
         attrs["Crossover"] = -1
@@ -137,6 +154,9 @@ function _mga_optimizer(cfg::MGAExactConfig)
     if solver_id == "gurobi"
         attrs = default_gurobi_attributes(; threads = threads, rep_days = cfg.mode == :ts ? cfg.representative_days : nothing)
         _mga_apply_gurobi_method!(attrs, cfg.solve_method)
+        if cfg.mode == :fh && lowercase(String(cfg.solve_method)) == "barrier"
+            _apply_full_hour_gurobi_attributes!(attrs; hours_per_day = cfg.hours_per_day)
+        end
         return gurobi_optimizer(; attrs = attrs), attrs, "Gurobi", threads
     end
     attrs = default_highs_attributes(; threads = threads)
@@ -153,6 +173,7 @@ function _mga_prepare_md(md_source::ModelData, cfg::MGAExactConfig)
     md.params.n_repDays = max(1, cfg.representative_days)
     md.params.hoursPer_day_cluster = 24
     md.params.clustering_approach = cfg.clustering
+    md.params.clustering_distance = cfg.clustering_distance
     md.params.ts_extremePeriods = cfg.extreme_periods
     md.params.ts_extremeDays_count = max(0, cfg.extreme_days)
     md.params.ts_boundaryRamping = cfg.boundary_ramping
@@ -163,6 +184,8 @@ function _mga_prepare_md(md_source::ModelData, cfg::MGAExactConfig)
     md.params.ts_capacityProfile_envelopeMode = 0
     md.params.dayMix_softness = 0.0
     md.params.dayMix_weightType = :auto
+    md.params.constraint_group = _normalize_constraint_group(cfg.constraint_group)
+    md.params.extensions = copy(cfg.extensions)
     derive_sets!(md)
     compute_derived_params!(md)
     cfg.mode == :ts && build_temporal_clusters!(md)

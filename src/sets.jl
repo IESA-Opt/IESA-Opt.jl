@@ -23,8 +23,10 @@ const PROCESS_CHP_FLEXIBLE    = :var"CHP flexible"
 const PROCESS_SHEDDING        = :Shedding
 const PROCESS_RESERVOIR       = :var"Water Reservoir"
 const PROCESS_OPERATION       = :Operation
-const PROCESS_HOURLY_IMPORT   = :var"Hourly interconnected import"
 const PROCESS_GAS_BUFFER      = :var"Gas buffer"
+
+# AIMMS hoursPer_quarter = max(1, hoursPer_day/4); rational keeps 6 slots/day at exactly 1.5.
+_fh_hours_per_quarter(p) = max(1//1, max(1, p.hoursPer_day) // 4)
 
 const ACTIVITY_FIX_ENERGY      = :var"Fix Energy"
 const ACTIVITY_ENERGY          = :Energy
@@ -130,9 +132,9 @@ function _build_temporal_sets!(s::ModelSets, p::ModelParams)
         end
     end
 
-    # Quarter-hour windows: every `hoursPer_quarter_cluster` hours form one window
-    if p.hoursPer_quarter_cluster > 0 && !isempty(s.hours)
-        n_quarters_fh = max(div(length(s.hours), p.hoursPer_quarter_cluster), 1)
+    # Chronological BE windows follow AIMMS; representative days keep hoursPer_quarter_cluster.
+    if !isempty(s.hours)
+        n_quarters_fh = max(floor(Int, length(s.hours) // _fh_hours_per_quarter(p)), 1)
         if isempty(s.q_hourWindow) || length(s.q_hourWindow) != n_quarters_fh
             s.q_hourWindow = collect(1:n_quarters_fh)
         end
@@ -211,7 +213,7 @@ function _derive_tech_subsets!(s::ModelSets, p::ModelParams)
     # IESA-Opt 1.0 tech_fDRshifting / tech_fBEshifting (lines 3300/3303 region)
     s.tech_fDRshifting  = [t for t in s.tech_flexible if flex(t) == FLEX_DR_SHIFTING]
     s.tech_fBEshifting  = [t for t in s.tech_flexible if flex(t) == FLEX_BE_SHIFTING]
-    s.tech_fWithBattery = [t for t in s.tech_flexible if get(p.flex_storage, t, 0.0) > 0.0]
+    s.tech_fWithBattery = union(s.tech_fStorage, s.tech_fEV)
 
     # Flex range subsets
     s.tech_flexH  = [t for t in s.tech_flexible if flexr(t) == RANGE_1HOUR]

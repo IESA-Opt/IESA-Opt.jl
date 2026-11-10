@@ -1,4 +1,4 @@
-const state = { options: null, solvers: [], outputs: [], selectedOutputId: "", comparedOutputIds: [], currentJobId: null, pollTimer: null, resultsLoaded: false, statusTimer: null, statusPollIntervalMs: 1500, lastJobStatus: null, connectionLost: false, connRestoreTimer: null, connRestoreHide: null, latestResults: null, dispatchLegendOff: new Set(), customWorkbookPath: "", lastClickedOutputId: "", dispatchPayload: null, dispatchSelectedNode: "", dispatchSelectedPeriod: 0, dispatchFromHour: 1, dispatchToHour: 8760, dispatchLoading: false, flexPayload: null, flexSelectedTech: "", flexSelectedPeriod: 0, flexFromHour: 1, flexToHour: 168, flexLoading: false, regionalMapPayload: null, regionalMapGeometry: new Map(), regionalMapMetric: "use", regionalMapCommodity: "all", regionalMapPeriod: 0, regionalMapLoading: false, regionalMapAnimationPaused: false, resultsSubpage: "summary" };
+const state = { options: null, solvers: [], outputs: [], selectedOutputId: "", comparedOutputIds: [], currentJobId: null, pollTimer: null, resultsLoaded: false, statusTimer: null, statusPollIntervalMs: 1500, lastJobStatus: null, connectionLost: false, connRestoreTimer: null, connRestoreHide: null, latestResults: null, dispatchLegendOff: new Set(), customWorkbookPath: "", lastClickedOutputId: "", dispatchPayload: null, dispatchSelectedNode: "", dispatchSelectedPeriod: 0, dispatchFromHour: 1, dispatchToHour: 8760, dispatchLoading: false, flexPayload: null, flexSelectedTech: "", flexSelectedPeriod: 0, flexFromHour: 1, flexToHour: 168, flexLoading: false, regionalMapPayload: null, regionalMapGeometry: new Map(), regionalMapFile: "", regionalMapMetric: "use", regionalMapCommodity: "all", regionalMapPeriod: 0, regionalMapLoading: false, regionalMapAnimationPaused: false, resultsSubpage: "summary" };
 const DAYS_PER_YEAR = 365;
 const stages = [["reading","Read"],["preparing","Prepare"],["clustering","Cluster"],["generation","Generate"],["solve","Solve"],["writing","Write"]];
 const stageDescriptions = { idle:"Start a run to see each stage and solver output.", reading:"Julia is opening the workbook and loading the input tables into model data.", preparing:"Sets and derived parameters are being built for the selected solve years.", clustering:"Representative days and time-slice profiles are being prepared, unless full-hourly mode skipped this step.", generation:"JuMP variables, objective terms, and constraints are being generated before the solver starts.", solve:"The optimizer is running. Native solver messages and iteration lines appear in the log below when the solver writes them.", writing:"Solved values are being converted into DuckDB result tables, one output file at a time.", done:"The run finished and result tables are ready in the Results tab.", failed:"The run stopped during the last active stage. The log below contains the error details.", cancelled:"The run was stopped by the user. No results were saved." };
@@ -118,6 +118,13 @@ function safeRun(label, fn) {
 function solverMethodHelp(method) {
   const id = String(method && method.id || "").toLowerCase();
   const label = String(method && method.label || id || "Solve method");
+  if (id === "barrier_fallback") {
+    return {
+      title: label,
+      short: ["Barrier without crossover, looser tolerances (1e-5).", "Use when plain Barrier ends Sub-optimal."],
+      more: "Same as Barrier, but with homogeneous barrier and convergence, feasibility and optimality tolerances relaxed from 1e-6 to 1e-5, matching PyPSA-Eur's gurobi-fallback preset. It helps numerically difficult models (for example many nodes at full hourly resolution) finish instead of stalling. Constraints may be violated by up to about 1e-5, so very small flows and dual prices are less precise."
+    };
+  }
   if (id.includes("barrier") && id.includes("crossover")) {
     return {
       title: label,
@@ -897,6 +904,7 @@ function bindControls() {
   const mapMetric = $("regionalMapMetric"); if (mapMetric) mapMetric.addEventListener("change", () => { state.regionalMapMetric = mapMetric.value || "use"; refreshRegionalMap(); });
   const mapCommodity = $("regionalMapCommodity"); if (mapCommodity) mapCommodity.addEventListener("change", () => { state.regionalMapCommodity = mapCommodity.value || "all"; refreshRegionalMap(); });
   const mapPeriod = $("regionalMapPeriod"); if (mapPeriod) mapPeriod.addEventListener("change", () => { state.regionalMapPeriod = Number(mapPeriod.value) || 0; refreshRegionalMap(); });
+  const mapFile = $("regionalMapFile"); if (mapFile) mapFile.addEventListener("change", () => { state.regionalMapFile = mapFile.value || ""; refreshRegionalMap(); });
   const mapPlay = $("regionalMapPlay"); if (mapPlay) mapPlay.addEventListener("click", playRegionalMapAnimation);
   document.querySelectorAll(".results-subpage-button").forEach(btn => btn.addEventListener("click", () => switchResultsSubpage(btn.dataset.resultsSubpage || "summary")));
   const emGroup = $("emissionsGroupBy"); if (emGroup) emGroup.addEventListener("change", refreshEmissions);
@@ -926,6 +934,8 @@ function populateOptions() {
   const o = state.options, d = o.defaults;
   fillSelect("inputWorkbook", o.scenarios || [], d.inputWorkbook); fillSelect("clusteringApproach", o.clusteringApproaches || [], d.clusteringApproach); fillSelect("constraintGroup", o.constraintGroups || [], d.constraintGroup);
   renderPeriods(o.periods || [], d.periods || []); renderHours(o.hoursPerDayOptions || [], d.hoursPerDay); renderSolveMethods(o.solveMethods || [], d.solveMethod);
+  $("multiRegionToggle").checked = d.multiRegion !== false;
+  $("landUseToggle").checked = d.landUse !== false;
   $("representativeDays").value = d.representativeDays; $("representativeDaysNumber").value = d.representativeDays;
   const threads = String(Math.max(4, detectedCpuThreads(o))); $("threads").max = threads; $("threadsNumber").max = threads; updateTotalSlices();
   updateTimeSlicingControls();
@@ -972,12 +982,11 @@ function updateTotalSlices() {
 }
 function updateTimeSlicingControls() {
   const tsOn = $("timeSlicingToggle").checked;
-  // Time slicing OFF (full-hourly): only Hours-per-day matters; hide rep days, clustering and extreme days.
-  // Time slicing ON: rep days + clustering + extreme days drive the slicing; hide hours-per-day.
+  // Time slicing OFF (full-hourly): only Hours-per-day matters; hide rep days and clustering.
+  // Time slicing ON: rep days + clustering drive the slicing; hide hours-per-day.
   $("hoursPerDayField").classList.toggle("hidden", tsOn);
   $("representativeDaysField").classList.toggle("hidden", !tsOn);
   $("clusteringApproachField").classList.toggle("hidden", !tsOn);
-  $("extremeDaysField").classList.toggle("hidden", !tsOn);
 }
 function updateSolverDetails() { const solver = state.solvers.find(x => x.id === $("solver").value); if(!solver) return; const detail = solver.message || ""; $("solverDetails").textContent = detail; $("solverDetails").classList.toggle("hidden", !detail); $("selectedSolverLabel").textContent = solver.label; $("selectedSolverVersion").textContent = solver.version || "Not reported"; setRunHint(`Ready to run with ${solverLabel(solver)}.`); }
 function currentWorkbook() { return state.customWorkbookPath || $("inputWorkbook").value; }
@@ -1070,7 +1079,7 @@ function resetRunButton() {
   setRunButtonMode("run");
   $("stopRunButtonProgress").classList.add("hidden");
 }
-function collectRunConfig() { return { inputWorkbook: currentWorkbook(), periods:[...document.querySelectorAll("#periods input:checked")].map(i=>Number(i.value)), mode:$("timeSlicingToggle").checked ? "timeslice" : "full_hourly", hoursPerDay:currentHoursPerDay(), representativeDays:Number($("representativeDays").value), solver:$("solver").value, solveMethod:document.querySelector("input[name='solveMethod']:checked").value, threads:Number($("threads").value), clusteringApproach:$("clusteringApproach").value, extremePeriods:$("extremePeriods").checked, extremeDays:Number($("extremeDays").value), boundaryRamping:$("boundaryRamping").checked, hourlyReports:$("hourlyReports").checked, showViolations:$("showViolations").checked, multiRegion:$("multiRegionToggle").checked, landUse:$("landUseToggle").checked, outputMode:$("outputMode").value, outputName:$("outputName").value, constraintGroup:$("constraintGroup").value }; }
+function collectRunConfig() { return { inputWorkbook: currentWorkbook(), periods:[...document.querySelectorAll("#periods input:checked")].map(i=>Number(i.value)), mode:$("timeSlicingToggle").checked ? "timeslice" : "full_hourly", hoursPerDay:currentHoursPerDay(), representativeDays:Number($("representativeDays").value), solver:$("solver").value, solveMethod:document.querySelector("input[name='solveMethod']:checked").value, threads:Number($("threads").value), clusteringApproach:$("clusteringApproach").value, boundaryRamping:$("boundaryRamping").checked, hourlyReports:$("hourlyReports").checked, showViolations:$("showViolations").checked, multiRegion:$("multiRegionToggle").checked, landUse:$("landUseToggle").checked, outputMode:$("outputMode").value, outputName:$("outputName").value, constraintGroup:$("constraintGroup").value }; }
 function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer=setInterval(pollJob,800); pollJob(); }
 async function pollJob() {
   if(!state.currentJobId) return;
@@ -1612,6 +1621,15 @@ function populateRegionalMapControls(payload) {
     if (want && periods.map(String).includes(want)) period.value = want;
     state.regionalMapPeriod = Number(period.value) || 0;
   }
+  const mapFile = $("regionalMapFile");
+  if (mapFile) {
+    const assets = payload.assets || {};
+    const opts = assets.options || [];
+    const placeholder = assets.file ? "" : `<option value="">${escapeHtml(opts.length ? "Select a map…" : "No map GeoPackage")}</option>`;
+    mapFile.innerHTML = placeholder + opts.map(o => `<option value="${escapeHtml(o.file)}" title="${escapeHtml(o.label || o.file)}">${escapeHtml(`${o.nodes} nodes · ${o.file}`)}</option>`).join("");
+    mapFile.value = assets.file || "";
+    mapFile.disabled = !opts.length;
+  }
   regionalToggleAnimationButton(payload);
 }
 async function refreshRegionalMap() {
@@ -1628,6 +1646,7 @@ async function refreshRegionalMap() {
       metric: $("regionalMapMetric")?.value || state.regionalMapMetric || "use",
       commodity: $("regionalMapCommodity")?.value || state.regionalMapCommodity || "all",
       period: Number($("regionalMapPeriod")?.value || state.regionalMapPeriod || 0) || undefined,
+      mapFile: state.regionalMapFile || "",
     };
     const payload = await fetchJson("/api/outputs/regionalMap", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
     state.regionalMapPayload = payload;
@@ -1644,18 +1663,21 @@ async function refreshRegionalMap() {
 }
 async function regionalMapAsset(url) {
   if (!url) return null;
-  const assetUrl = `${url}${url.includes("?") ? "&" : "?"}v=map-auto-nodes-units-20260619`;
-  if (state.regionalMapGeometry.has(assetUrl)) return state.regionalMapGeometry.get(assetUrl);
-  const payload = await fetchJson(assetUrl);
-  state.regionalMapGeometry.set(assetUrl, payload);
+  if (state.regionalMapGeometry.has(url)) return state.regionalMapGeometry.get(url);
+  const payload = await fetchJson(url);
+  state.regionalMapGeometry.set(url, payload);
   return payload;
 }
-function regionalCentroids(geojson) {
+const REGIONAL_GAS_COMMODITIES = new Set(["natural_gas", "hydrogen", "ccus"]);
+function regionalLinkNetwork(link) {
+  return REGIONAL_GAS_COMMODITIES.has(String(link?.commodity || "")) ? "gas" : "power";
+}
+function regionalCentroids(geojson, network = "power") {
   const out = new Map();
   (geojson?.features || []).forEach(feature => {
     const id = Number(feature?.properties?.cluster_id);
     const coords = feature?.geometry?.coordinates || [];
-    if (Number.isFinite(id) && coords.length >= 2) out.set(`CL${id}`, { lon:Number(coords[0]), lat:Number(coords[1]), label:regionalClusterLabel(`CL${id}`), kind:"cluster" });
+    if (Number.isFinite(id) && coords.length >= 2) out.set(`CL${id}`, { lon:Number(coords[0]), lat:Number(coords[1]), label:regionalClusterLabel(`CL${id}`), kind:"cluster", network });
   });
   return out;
 }
@@ -1700,30 +1722,48 @@ function regionalExternalPoints(geojson) {
   });
   return out;
 }
-function regionalEndpointPoints(centroids, hubs) {
-  const points = new Map(centroids || []);
-  for (const [id, point] of regionalExternalPoints(hubs)) points.set(id, point);
-  return points;
+function regionalMapNetworks(geometry, hubs, commodity = "all") {
+  const external = regionalExternalPoints(hubs);
+  const hasGasLayer = !!geometry?.gasCentroids?.features?.length;
+  const power = regionalCentroids(geometry?.powerCentroids, "power");
+  const gas = regionalCentroids(hasGasLayer ? geometry.gasCentroids : geometry?.powerCentroids, "gas");
+  const key = String(commodity || "all");
+  const showPower = key === "all" || !REGIONAL_GAS_COMMODITIES.has(key);
+  const showGas = hasGasLayer && (key === "all" || REGIONAL_GAS_COMMODITIES.has(key));
+  const markers = [];
+  if (showPower) power.forEach((point, id) => markers.push([id, { ...point, showLabel: true }]));
+  if (showGas) gas.forEach((point, id) => markers.push([id, { ...point, showLabel: !showPower }]));
+  external.forEach((point, id) => markers.push([id, { ...point, showLabel: true }]));
+  return { power: new Map([...power, ...external]), gas: new Map([...gas, ...external]), markers, hasGasLayer };
 }
 function regionalClusterColor(id) {
   const colors = ["#d58b55", "#d9b75c", "#9bc58c", "#6eb4b8", "#6da5c8", "#d67770", "#8fc2a1", "#cfa35d"];
   return colors[Math.abs(Number(id) || 0) % colors.length];
 }
-function regionalNodeMarkerHtml(id, point) {
-  const label = escapeHtml(point.label || id);
-  const nodeClass = point.kind === "cluster" ? "regional-node-cluster" : (point.kind === "offshore" ? "regional-node-offshore" : "regional-node-country");
-  return `<span class="regional-node-marker ${nodeClass}"><span class="regional-node-dot"></span><span class="regional-node-text">${label}</span></span>`;
+function regionalNodeKindClass(point) {
+  if (point.kind === "cluster") return point.network === "gas" ? "regional-node-gas" : "regional-node-power";
+  return point.kind === "offshore" ? "regional-node-offshore" : "regional-node-country";
 }
-function regionalMapLegendHtml(payload, links) {
-  const commodities = [...new Set((links || []).map(link => link.commodityLabel || link.commodity).filter(Boolean))].slice(0, 6);
-  const commodityRows = commodities.map(label => `<span class="regional-legend-row"><span class="regional-legend-line" style="background:${regionalCommodityColor(label)}"></span>${escapeHtml(label)}</span>`).join("");
+function regionalNodeTitle(id, point) {
+  const base = point.label || point.name || id;
+  if (point.kind !== "cluster") return base;
+  return `${base} · ${point.network === "gas" ? "gas node (natural gas, hydrogen, CCS)" : "power node (electricity)"}`;
+}
+function regionalNodeMarkerHtml(id, point) {
+  const label = point.showLabel === false ? "" : `<span class="regional-node-text">${escapeHtml(point.label || id)}</span>`;
+  return `<span class="regional-node-marker ${regionalNodeKindClass(point)}"><span class="regional-node-dot"></span>${label}</span>`;
+}
+function regionalMapLegendHtml(payload, links, networks) {
+  const commodities = [...new Map((links || []).filter(link => link.commodity || link.commodityLabel).map(link => [link.commodity || link.commodityLabel, link.commodityLabel || link.commodity])).entries()].slice(0, 6);
+  const commodityRows = commodities.map(([id, label]) => `<span class="regional-legend-row"><span class="regional-legend-line" style="background:${regionalCommodityColor(id)}"></span>${escapeHtml(label)}</span>`).join("");
   const flowLabel = payload?.metric === "stock" ? "Capacity links" : "Net flow links";
   const pulseRow = payload?.metric === "use" ? `<span class="regional-legend-row"><span class="regional-legend-pulse"></span>Moving flow pulse</span>` : "";
   return `<div class="regional-map-legend" aria-label="Regional map legend">
     <strong>Map legend</strong>
     <span class="regional-legend-row"><span class="regional-legend-area"></span>Dutch municipality cluster</span>
     <span class="regional-legend-row"><span class="regional-legend-selected"></span>Selected municipality</span>
-    <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-cluster"></span>Dutch cluster node</span>
+    <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-power"></span>Power node (electricity)</span>
+    ${networks?.hasGasLayer ? `<span class="regional-legend-row"><span class="regional-legend-dot regional-legend-gas"></span>Gas node (natural gas, H₂, CCS)</span>` : ""}
     <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-offshore"></span>North Sea hub</span>
     <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-country"></span>Neighbouring country node</span>
     <span class="regional-legend-row"><span class="regional-legend-flow"></span>${escapeHtml(flowLabel)}</span>
@@ -1731,10 +1771,10 @@ function regionalMapLegendHtml(payload, links) {
     ${commodityRows ? `<div class="regional-legend-group"><em>Commodities</em>${commodityRows}</div>` : ""}
   </div>`;
 }
-function regionalRenderMapLegend(chart, payload, links) {
+function regionalRenderMapLegend(chart, payload, links, networks) {
   chart?.querySelector(".regional-map-legend")?.remove();
   if (!chart) return;
-  chart.insertAdjacentHTML("beforeend", regionalMapLegendHtml(payload, links));
+  chart.insertAdjacentHTML("beforeend", regionalMapLegendHtml(payload, links, networks));
 }
 function regionalUnitLabel(item) {
   const unit = item?.unit || {};
@@ -1772,9 +1812,14 @@ function regionalSetPulsePlayState(chart) {
 function regionalPulseWidth(width) {
   return Math.max(1.6, Math.min(6.2, Number(width || 0) * 0.72));
 }
-function regionalPreparedLinks(payload, centroidByCluster) {
+function regionalPreparedLinks(payload, networks) {
   return (payload.links || [])
-    .filter(link => centroidByCluster.has(regionalEndpointId(link.source)) && centroidByCluster.has(regionalEndpointId(link.target)))
+    .map(link => {
+      const network = regionalLinkNetwork(link), points = networks[network];
+      const src = points?.get(regionalEndpointId(link.source)), dst = points?.get(regionalEndpointId(link.target));
+      return src && dst ? { ...link, network, _src: src, _dst: dst } : null;
+    })
+    .filter(Boolean)
     .slice(0, 80);
 }
 function regionalTeardownMap(chart) {
@@ -1830,19 +1875,18 @@ async function renderRegionalMap(payload) {
   }
   const assets = payload.assets || {};
   if (!assets.available) {
-    setEmptyChart("regionalMapChart", "Map geometry assets are unavailable.", "map-chart");
-    if (status) status.textContent = "Missing geometry";
+    regionalTeardownMap(chart);
+    setEmptyChart("regionalMapChart", assets.message || "Map geometry is unavailable.", "map-chart");
+    if (table) table.innerHTML = "";
+    if (status) status.textContent = "Missing map";
     return;
   }
-  const [clusters, centroids, hubs] = await Promise.all([
-    regionalMapAsset(assets.clusters),
-    regionalMapAsset(assets.centroids),
-    assets.northSeaHubs ? regionalMapAsset(assets.northSeaHubs) : Promise.resolve(null),
-  ]);
-  const centroidByCluster = regionalEndpointPoints(regionalCentroids(centroids), hubs);
-  state.regionalMapCentroids = centroidByCluster;
-  const links = regionalPreparedLinks(payload, centroidByCluster);
-  if (!links.length && centroidByCluster.size === 0) {
+  const geometry = await regionalMapAsset(assets.geometry);
+  const hubs = geometry?.hubs?.features?.length ? geometry.hubs : (assets.northSeaHubs ? await regionalMapAsset(assets.northSeaHubs) : null);
+  const clusters = geometry?.clusters;
+  const networks = regionalMapNetworks(geometry, hubs, payload.commodity);
+  const links = regionalPreparedLinks(payload, networks);
+  if (!links.length && !networks.markers.length) {
     setEmptyChart("regionalMapChart", "No regional nodes match the selected filters.", "map-chart");
     if (table) table.innerHTML = "";
     if (status) status.textContent = "0 links";
@@ -1850,20 +1894,20 @@ async function renderRegionalMap(payload) {
   }
 
   regionalTeardownMap(chart);
-  if (window.L) renderRegionalMapLeaflet(chart, clusters, centroidByCluster, links, payload);
-  else renderRegionalMapSvg(chart, clusters, centroidByCluster, links, payload);
-  regionalRenderMapLegend(chart, payload, links);
+  if (window.L) renderRegionalMapLeaflet(chart, clusters, networks, links, payload);
+  else renderRegionalMapSvg(chart, clusters, networks, links, payload);
+  regionalRenderMapLegend(chart, payload, links, networks);
   const unit = regionalUnitLabel(payload);
   if (table) {
-    if (links.length) renderTable("regionalMapTable", links.map(link => ({ source:link.sourceLabel, target:link.targetLabel, commodity:link.commodityLabel, value:link.value, unit:regionalUnitLabel(link) || unit, metric:link.metric, forwardValue:link.forwardValue, reverseValue:link.reverseValue })), 200, { valueShading: true });
+    if (links.length) renderTable("regionalMapTable", links.map(link => ({ source:link.sourceLabel, target:link.targetLabel, commodity:link.commodityLabel, network:link.network, value:link.value, unit:regionalUnitLabel(link) || unit, metric:link.metric, forwardValue:link.forwardValue, reverseValue:link.reverseValue })), 200, { valueShading: true });
     else table.innerHTML = `<div class="empty-state">No regional trade links are readable yet.</div>`;
   }
   if (status) status.textContent = links.length
     ? `${links.length} link(s) · ${payload.metric === "stock" ? "capacity" : "net flow"}${unit ? ` · ${unit}` : ""}`
-    : `${centroidByCluster.size} node(s) · waiting for readable result tables`;
+    : `${networks.markers.length} node(s) · waiting for readable result tables`;
   regionalToggleAnimationButton(payload);
 }
-function renderRegionalMapLeaflet(chart, clusters, centroidByCluster, links, payload) {
+function renderRegionalMapLeaflet(chart, clusters, networks, links, payload) {
   chart.className = `map-chart ${payload.metric === "use" && !state.regionalMapAnimationPaused ? "" : "regional-flow-paused"}`;
   chart.innerHTML = `<div class="regional-leaflet-map" aria-label="Regional trade flow map"></div>`;
   const mapEl = chart.querySelector(".regional-leaflet-map");
@@ -1900,7 +1944,7 @@ function renderRegionalMapLeaflet(chart, clusters, centroidByCluster, links, pay
     }
   }).addTo(map);
   const bounds = clusterLayer.getBounds();
-  [...centroidByCluster.values()].forEach(point => bounds.extend([point.lat, point.lon]));
+  networks.markers.forEach(([, point]) => bounds.extend([point.lat, point.lon]));
   if (bounds.isValid()) map.fitBounds(bounds.pad(0.06));
   const maxValue = Math.max(1e-9, ...links.map(link => Math.abs(Number(link.value || 0))));
   const unit = regionalUnitLabel(payload);
@@ -1933,7 +1977,7 @@ function renderRegionalMapLeaflet(chart, clusters, centroidByCluster, links, pay
   map.on("click", clearSelectedFlow);
   clusterLayer.on("click", clearSelectedFlow);
   links.forEach(link => {
-    const src = centroidByCluster.get(regionalEndpointId(link.source)), dst = centroidByCluster.get(regionalEndpointId(link.target));
+    const src = link._src, dst = link._dst;
     const color = regionalCommodityColor(link.commodity);
     const width = regionalLineWidth(link, maxValue);
     const opacity = payload.metric === "stock" ? 0.62 : 0.9;
@@ -1953,9 +1997,9 @@ function renderRegionalMapLeaflet(chart, clusters, centroidByCluster, links, pay
     });
     line.on("click", event => selectFlow(line, pulse, width, opacity, event));
   });
-  [...centroidByCluster.entries()].forEach(([id, point]) => {
+  networks.markers.forEach(([id, point]) => {
     L.marker([point.lat, point.lon], { interactive: true, keyboard: false, icon: L.divIcon({ className: `regional-node-icon ${point.kind === "cluster" ? "regional-cluster-label" : "regional-external-label"}`, html: regionalNodeMarkerHtml(id, point), iconSize: [1, 1], iconAnchor: [0, 0] }) })
-      .bindTooltip(escapeHtml(point.label || point.name || id), { sticky: true, direction: "top" })
+      .bindTooltip(escapeHtml(regionalNodeTitle(id, point)), { sticky: true, direction: "top" })
       .addTo(map);
   });
   requestAnimationFrame(() => regionalLeafletArrowDefs(chart, arrowColors));
@@ -1994,16 +2038,16 @@ function regionalSvgPath(geometry, project) {
   if (geometry.type === "MultiPolygon") return (geometry.coordinates || []).flatMap(poly => poly.map(ringPath)).join("");
   return "";
 }
-function renderRegionalMapSvg(chart, clusters, centroidByCluster, links, payload) {
+function renderRegionalMapSvg(chart, clusters, networks, links, payload) {
   chart.className = `map-chart ${payload.metric === "use" && !state.regionalMapAnimationPaused ? "" : "regional-flow-paused"}`;
   const width = 980, height = 720, features = clusters?.features || [];
-  const bounds = regionalExpandBoundsWithPoints(regionalGeometryBounds(features), centroidByCluster.values()), project = regionalSvgProject(bounds, width, height);
+  const bounds = regionalExpandBoundsWithPoints(regionalGeometryBounds(features), networks.markers.map(([, point]) => point)), project = regionalSvgProject(bounds, width, height);
   const maxValue = Math.max(1e-9, ...links.map(link => Math.abs(Number(link.value || 0))));
   const unit = regionalUnitLabel(payload);
   const arrowDefs = [...new Set(links.map(link => regionalCommodityColor(link.commodity)))].map(color => `<marker id="regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")}" viewBox="0 -5 10 10" refX="10" refY="0" markerWidth="12" markerHeight="12" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,-5L10,0L0,5Z" fill="${color}"></path></marker>`).join("");
   const clusterPaths = features.map(feature => `<path class="regional-cluster-path" data-cluster-id="${escapeHtml(feature?.properties?.cluster_id || "")}" data-name="${escapeHtml(feature?.properties?.statnaam || "Municipality")}" data-cluster-label="${escapeHtml(regionalClusterLabel(`CL${feature?.properties?.cluster_id || ""}`))}" d="${regionalSvgPath(feature.geometry, project)}" fill="${regionalClusterColor(feature?.properties?.cluster_id)}" fill-opacity="0.72" stroke="#fff" stroke-opacity="0.85" stroke-width="0.6"></path>`).join("");
   const flowPaths = links.map((link, index) => {
-    const src = centroidByCluster.get(regionalEndpointId(link.source)), dst = centroidByCluster.get(regionalEndpointId(link.target));
+    const src = link._src, dst = link._dst;
     const [x1, y1] = project([src.lon, src.lat]), [x2, y2] = project([dst.lon, dst.lat]);
     const color = regionalCommodityColor(link.commodity), width = regionalLineWidth(link, maxValue), animated = payload.metric === "use" ? "animated" : "";
     const arrow = payload.metric === "use" ? ` marker-end="url(#regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")})"` : "";
@@ -2016,10 +2060,14 @@ function renderRegionalMapSvg(chart, clusters, centroidByCluster, links, payload
     const pulse = `<path class="regional-flow-pulse animated" data-flow-id="${flowIndex}" d="${path}" pathLength="100" stroke="${color}" stroke-width="${regionalPulseWidth(width).toFixed(1)}" stroke-opacity="0.98" stroke-dasharray="18 82" stroke-dashoffset="100" fill="none" style="stroke-dasharray:18 82;stroke-dashoffset:100;animation:regional-flow-travel ${duration} linear infinite;animation-delay:${delay};animation-play-state:${playState};--regional-flow-delay:${delay};--regional-flow-duration:${duration}"></path>`;
     return base + pulse;
   }).join("");
-  const labels = [...centroidByCluster.entries()].map(([id, point]) => {
+  const labels = networks.markers.map(([id, point]) => {
     const [x, y] = project([point.lon, point.lat]);
-    const cls = point.kind === "cluster" ? "regional-svg-node-cluster" : (point.kind === "offshore" ? "regional-svg-node-offshore" : "regional-svg-node-country");
-    return `<g class="regional-svg-node ${cls}"><title>${escapeHtml(point.label || point.name || id)}</title><circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.3"></circle><text x="${(x + 7).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="start" dominant-baseline="central">${escapeHtml(point.label || id)}</text></g>`;
+    const cls = point.kind === "cluster" ? (point.network === "gas" ? "regional-svg-node-gas" : "regional-svg-node-power") : (point.kind === "offshore" ? "regional-svg-node-offshore" : "regional-svg-node-country");
+    const text = point.showLabel === false ? "" : `<text x="${(x + 7).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="start" dominant-baseline="central">${escapeHtml(point.label || id)}</text>`;
+    const shape = point.network === "gas" && point.kind === "cluster"
+      ? `<rect x="${(x - 3.6).toFixed(1)}" y="${(y - 3.6).toFixed(1)}" width="7.2" height="7.2" rx="1.2"></rect>`
+      : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.3"></circle>`;
+    return `<g class="regional-svg-node ${cls}"><title>${escapeHtml(regionalNodeTitle(id, point))}</title>${shape}${text}</g>`;
   }).join("");
   chart.innerHTML = `<svg class="regional-svg-map" viewBox="0 0 ${width} ${height}" role="img" aria-label="Regional trade flow map"><defs>${arrowDefs}</defs>${clusterPaths}${flowPaths}${labels}</svg>`;
   const clearSelectedFlow = () => {

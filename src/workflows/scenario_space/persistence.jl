@@ -224,33 +224,6 @@ function _target_to_dict(t::LeafTarget)
         "label"   => t.label)
 end
 
-function _dict_to_spec(d::AbstractDict)
-    targets = LeafTarget[]
-    for td in get(d, "targets", [])
-        push!(targets, _dict_to_target(Dict(string(k) => v for (k, v) in td)))
-    end
-    return ScenarioSpec(
-        name       = String(d["name"]),
-        method     = Symbol(d["method"]),
-        n_variants = Int(d["n_variants"]),
-        seed       = Int(d["seed"]),
-        targets    = targets)
-end
-
-function _dict_to_target(d::AbstractDict)
-    raw_indices = d["indices"]
-    parsed = Tuple(_parse_index(x) for x in raw_indices)
-    step = haskey(d, "step") ? d["step"] : nothing
-    return LeafTarget(
-        Symbol(d["field"]),
-        parsed;
-        type  = Symbol(d["type"]),
-        min   = Float64(d["min"]),
-        max   = Float64(d["max"]),
-        step  = step === nothing ? nothing : Float64(step),
-        label = String(get(d, "label", "")))
-end
-
 # JSON has no Symbol type, so we encode Symbol indices as strings starting
 # with ":" — round-trip preserves the type. Plain integer/float strings are
 # parsed back to their numeric types so that e.g. `(:NL, 2050)` round-trips

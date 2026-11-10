@@ -438,27 +438,6 @@ end
 # Annual writers
 # ============================================================================
 
-# Iterate values of a DenseAxisArray defensively (handles missing fields)
-function _collect_axis_array(arr, axes_names::Tuple, period_filter = nothing)
-    rows = Tuple[]
-    if arr === nothing
-        return rows
-    end
-    for idx in Iterators.product(JuMP.axes(arr)...)
-        if period_filter !== nothing
-            ps_idx = findfirst(==(:period), axes_names)
-            ps_idx !== nothing && !(idx[ps_idx] in period_filter) && continue
-        end
-        try
-            v = value(arr[idx...])
-            push!(rows, (idx..., v))
-        catch
-            # variable might not exist for this combination
-        end
-    end
-    return rows
-end
-
 function write_tech_use_parquet(vars::AnnualVars, md::ModelData, path::AbstractString)
     techs = md.sets.tech_balancers
     periods = md.sets.periods_solve
@@ -1078,7 +1057,7 @@ function write_flexibility_profile_parquet(vars::AnnualVars, md::ModelData,
                                             mode::Symbol = :fh,
                                             activity_prices_hourly::Union{Nothing,AbstractVector} = nothing)
     s = md.sets
-    p = md.parameters
+    p = md.params
 
     flex_techs = s.tech_flexible
     isempty(flex_techs) && return _write_table(_empty_flex_profile_df(), path)

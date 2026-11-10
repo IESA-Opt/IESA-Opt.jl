@@ -31,7 +31,6 @@ From the repository root:
 
 ```powershell
 julia --project=. scripts/load_only.jl Input/default_data.xlsx
-julia --project=. test/runtests.jl
 ```
 
 For a private workbook, replace the path in the load-only command and inspect the printed summary before solving.

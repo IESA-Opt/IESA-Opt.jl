@@ -7,7 +7,7 @@
 # national cap stored on a designated "carrier" instance.
 #
 # Activation: `:multi_region in md.params.extensions`. The UI exposes a
-# `MultiRegion` toggle (default OFF). When OFF, NONE of these constraints
+# `MultiRegion` toggle (default ON). When OFF, NONE of these constraints
 # are added — the core model is untouched.
 #
 # Conventions in the multi-region workbook (e.g. 10Nodes_*.xlsx):
@@ -21,7 +21,7 @@
 #     the total by the carrier's cap.
 #
 # Active constraint families:
-#   Stock-cap, exact repeated regional cap:
+#   Stock-cap, first nonzero carrier:
 #     • Comulative_Interconnection_Exports         (PEU01_03)
 #     • Comulative_Interconnection_Imports         (PNL04_01)
 #     • Comulative_HVNS                            (PNL04_02)
@@ -32,12 +32,11 @@
 #     • Imported_NG                                (Gas01_03)
 #     • Ammonia_wCCUS                              (Amm01_02)
 #     • Ammonia_eSMR                               (Amm01_08)
-#   Stock-cap, exact repeated regional cap over s_TechGroups candidates:
+#   Stock-cap, first matching carrier over s_TechGroups only:
 #     • c_TechStock_Limit                          (s_TechGroups)
-#   Use-cap, exact repeated regional cap:
-#     • all regional `CL{n}_{TechFamily}` families with an exact repeated
-#       positive techUse_max in the workbook; PEU01_03 and PNL04_01 are kept
-#       as explicit AIMMS-compatible seed candidates.
+#   Use-cap, first nonzero carrier:
+#     • Power_to_EU                               (PEU01_03)
+#     • Power_from_EU                             (PNL04_01)
 #   Stock-cap, special:
 #     • Comulative_Nuclear   (LHS: tech_name contains "Nuclear" but not
 #                             "Borssele"; RHS: techStock_max of FIRST
@@ -92,9 +91,7 @@ const _MR_EXTRA_FIRST_STOCK = String[
     "Emi01_03","Emi01_02","PNL04_02","PNL04_01","PEU01_03",
 ]
 
-# AIMMS seed candidates for use caps (Power_to_EU = PEU01_03,
-# Power_from_EU = PNL04_01). A seed still needs repeated regional members with
-# the exact same positive cap; it is not a bypass around the data rule.
+# AIMMS national use-cap families.
 const _MR_FIRST_USE = String["PEU01_03", "PNL04_01"]
 
 # Comulative_Nuclear: LHS = tech_name(t) contains "Nuclear" AND not "Borssele".
@@ -120,55 +117,32 @@ const _MR_GEO_FAMILY = String["LTN01_05", "Agr05_03", "LTI01_04"]
 
 @inline _mr_id_contains(t::Symbol, sub::AbstractString) = occursin(sub, String(t))
 
-function _mr_regional_family(t::Symbol)
-    m = match(r"^CL\d+_(.+)$", String(t))
-    return m === nothing ? nothing : String(m.captures[1])
-end
-
 function _mr_members_with_substring(techs::Vector{Symbol}, sub::AbstractString)
     return [t for t in techs if _mr_id_contains(t, sub)]
 end
 
-function _mr_exact_cap_groups(sets::ModelSets,
-                              cap_dict::Dict{Tuple{Symbol,Int},Float64},
-                              periods::Vector{Int};
-                              balancers_only::Bool = false,
-                              seed_families::Vector{String} = String[])
-    allowed = balancers_only ? Set(sets.tech_balancers) : Set(sets.technologies)
-    members_by_family = Dict{String, Vector{Symbol}}()
-    candidate_families = Set(seed_families)
-
-    for t in sets.technologies
-        t in allowed || continue
-        family = _mr_regional_family(t)
-        family === nothing && continue
-        push!(get!(members_by_family, family, Symbol[]), t)
-        push!(candidate_families, family)
-    end
-
+function _mr_cap_groups(techs::Vector{Symbol},
+                        cap_dict::Dict{Tuple{Symbol,Int},Float64},
+                        periods::Vector{Int}, families::Vector{String};
+                        first_nonzero::Bool = false)
     groups = NamedTuple{(:family, :ps, :members, :cap), Tuple{String, Int, Vector{Symbol}, Float64}}[]
-    for family in sort!(collect(candidate_families))
-        members = get(members_by_family, family, Symbol[])
-        length(members) > 1 || continue
+    for family in families
+        members = _mr_members_with_substring(techs, family)
+        isempty(members) && continue
         for ps in periods
-            cap = get(cap_dict, (first(members), ps), 0.0)
-            cap > 0 || continue
-            all(get(cap_dict, (t, ps), 0.0) == cap for t in members) || continue
+            carrier = first_nonzero ? _mr_first_carrier(members, family, cap_dict, ps) : first(members)
+            cap = carrier === nothing ? 0.0 : get(cap_dict, (carrier, ps), 0.0)
             push!(groups, (family = family, ps = ps, members = members, cap = cap))
         end
     end
     return groups
 end
 
-# AIMMS `First({ t | techStock_max(t, p) and FindString(...) > 0 })` —
-# returns the first tech in iteration order whose name contains `sub` AND
-# has a populated, positive entry in `cap_dict[(t, ps)]`. Returns `nothing`
-# if no such carrier exists (constraint is then skipped, matching AIMMS
-# semantics where `techStock_max(<empty>, p)` evaluates to 0 → degenerate).
+# AIMMS's numeric filter selects nonzero values; an empty carrier evaluates to zero.
 function _mr_first_carrier(techs::Vector{Symbol}, sub::AbstractString,
                             cap_dict::Dict{Tuple{Symbol,Int},Float64}, ps::Int)
     @inbounds for t in techs
-        if _mr_id_contains(t, sub) && haskey(cap_dict, (t, ps)) && cap_dict[(t, ps)] > 0
+        if _mr_id_contains(t, sub) && get(cap_dict, (t, ps), 0.0) != 0.0
             return t
         end
     end
@@ -181,67 +155,11 @@ end
 """
     apply_multi_region_data_convention!(md::ModelData) -> Nothing
 
-Apply the AIMMS Komar (multi-region) sentinel convention to `techStock_min`
-and `techStock_max`. No-op when `:multi_region ∉ md.params.extensions`.
-
-In Komar AIMMS the relevant constraints are:
-
-    Constraint maxStock_constraints {
-        IndexDomain: (t,ps);
-        Definition: (techStock_max(t,ps) <> -1) * (techStock(t,ps) - techStock_max(t,ps)) <= 0;
-    }
-    Constraint minStock_constraints {
-        IndexDomain: (t,ps);
-        Definition: (techStock_min(t,ps) <> -1) * (techStock(t,ps) - techStock_min(t,ps)) >= 0;
-    }
-
-so blank cells (default to 0 in AIMMS) impose `≤ 0` / `≥ 0`, and `-1`
-disables the constraint. Julia's core convention treats blank as
-"no constraint" and explicit 0 as "enforce 0", which matches the *new*
-AIMMS semantics but **not** the Komar reference workbook.
-
-When the multi-region extension is on, we coerce the dicts to the Komar
-convention by:
-
-  1. Removing entries equal to `-1.0` (sentinel for "no constraint").
-  2. Filling missing `(t, ps)` cells with `0.0` over `s.technologies × s.periods_solve`.
-
-`techUse_min` / `techUse_max` are intentionally untouched: their AIMMS
-constraints (`min_techUse_constraint`, `max_techUse_constraint`) use the
-`<>0` rule in both Komar and the current model, so blank/0 already mean
-"no constraint" in both.
-
-The function is idempotent.
+Compatibility entry point. Stock-bound generation now interprets missing values
+as zero only while MultiRegion is enabled, and skips explicit `-1` sentinels.
+Raw dictionaries remain unchanged so switching the extension off is reversible.
 """
 function apply_multi_region_data_convention!(md::ModelData)
-    :multi_region in md.params.extensions || return nothing
-    s = md.sets
-    p = md.params
-    isempty(s.technologies) && return nothing
-    periods = isempty(s.periods_solve) ? collect(s.periods) : s.periods_solve
-    isempty(periods) && return nothing
-
-    for (dict, name) in ((p.techStock_max, "techStock_max"),
-                         (p.techStock_min, "techStock_min"))
-        # Step 1: drop -1 sentinels.
-        n_dropped = 0
-        for (k, v) in collect(dict)
-            if v == -1.0
-                delete!(dict, k)
-                n_dropped += 1
-            end
-        end
-        # Step 2: fill missing (t, ps) with 0.0 over the active grid.
-        n_filled = 0
-        for t in s.technologies, ps in periods
-            key = (t, ps)
-            if !haskey(dict, key)
-                dict[key] = 0.0
-                n_filled += 1
-            end
-        end
-        @info "Komar convention applied" parameter = name dropped_sentinels = n_dropped filled_zeros = n_filled total = length(dict)
-    end
     return nothing
 end
 
@@ -276,19 +194,19 @@ function apply_multi_region!(m::JuMP.Model, vars, md::ModelData; mode::Symbol = 
 
     n_added = 0
 
-    # --- Stock caps with exact repeated regional caps -------------------------
-    for group in _mr_exact_cap_groups(sets, params.techStock_max, periods;
-                                      seed_families = vcat(_MR_S_TECH_GROUPS, _MR_EXTRA_FIRST_STOCK))
+    stock_groups = vcat(
+        _mr_cap_groups(techs, params.techStock_max, periods, _MR_S_TECH_GROUPS),
+        _mr_cap_groups(techs, params.techStock_max, periods, _MR_EXTRA_FIRST_STOCK; first_nonzero = true),
+    )
+    for group in stock_groups
         @constraint(m, sum(techStock[t, group.ps] for t in group.members) <= group.cap,
                     base_name = "mr_stockCap_$(group.family)_$(group.ps)")
         n_added += 1
     end
 
-    # --- Use caps with exact repeated regional caps ---------------------------
-    for group in _mr_exact_cap_groups(sets, params.techUse_max, periods;
-                                      balancers_only = true,
-                                      seed_families = _MR_FIRST_USE)
-        @constraint(m, sum(tech_use[t, group.ps] for t in group.members) <= group.cap,
+    balancers = Set(sets.tech_balancers)
+    for group in _mr_cap_groups(techs, params.techUse_max, periods, _MR_FIRST_USE; first_nonzero = true)
+        @constraint(m, sum(tech_use[t, group.ps] for t in group.members if t in balancers) <= group.cap,
                     base_name = "mr_useCap_$(group.family)_$(group.ps)")
         n_added += 1
     end
@@ -306,8 +224,7 @@ function apply_multi_region!(m::JuMP.Model, vars, md::ModelData; mode::Symbol = 
     if !isempty(nuclear_techs)
         for ps in periods
             carrier = _mr_first_carrier(techs, _MR_NUCLEAR_PIVOT, params.techStock_max, ps)
-            carrier === nothing && continue
-            cap = params.techStock_max[(carrier, ps)]
+            cap = carrier === nothing ? 0.0 : params.techStock_max[(carrier, ps)]
             @constraint(m, sum(techStock[t, ps] for t in nuclear_techs) <= cap,
                         base_name = "mr_nuclear_$(ps)")
             n_added += 1
@@ -328,9 +245,7 @@ function apply_multi_region!(m::JuMP.Model, vars, md::ModelData; mode::Symbol = 
             members = get(prefix_members, _mr_cluster_prefix(t), Symbol[])
             isempty(members) && continue
             for ps in periods
-                haskey(params.techStock_max, (t, ps)) || continue
-                cap = params.techStock_max[(t, ps)]
-                cap > 0 || continue
+                cap = get(params.techStock_max, (t, ps), 0.0)
                 @constraint(m, sum(techStock[it, ps] for it in members) <= cap,
                             base_name = "mr_geo_$(t)_$(ps)")
                 n_added += 1

@@ -76,8 +76,8 @@ function main()
 
     md.params.n_repDays = REP_DAYS
     md.params.hoursPer_day_cluster = 24
-    md.params.clustering_approach = :kmeans_avg
-    md.params.ts_extremePeriods = true
+    md.params.clustering_approach = :k_medoids
+    md.params.ts_extremePeriods = false
     md.params.ts_extremeDays_count = 5
     md.params.ts_capacityProfile_autoMode = true
     md.params.ts_capacityProfile_autoFloor = 0.23

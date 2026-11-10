@@ -111,7 +111,8 @@ tuned defaults used by single runs and the UI.
 """
 function _campaign_optimizer(solver::Symbol, threads::Int;
                              attrs_override::AbstractDict = Dict{String,Any}(),
-                             rep_days::Union{Nothing,Integer} = nothing)
+                             rep_days::Union{Nothing,Integer} = nothing,
+                             hours_per_day::Union{Nothing,Integer} = nothing)
     if solver === :highs
         attrs = copy(_DEFAULT_HIGHS_ATTRS_CAMPAIGN)
         # HiGHS uses "threads" if positive; ignored otherwise.
@@ -121,7 +122,7 @@ function _campaign_optimizer(solver::Symbol, threads::Int;
         end
         return highs_optimizer(; attrs = attrs)
     elseif solver === :gurobi
-        attrs = _campaign_gurobi_attributes(threads, rep_days, attrs_override)
+        attrs = _campaign_gurobi_attributes(threads, rep_days, attrs_override; hours_per_day)
         return gurobi_optimizer(; attrs = attrs)
     else
         throw(ArgumentError("Unknown solver `$solver`; expected :highs or :gurobi."))
@@ -130,13 +131,14 @@ end
 
 function _campaign_gurobi_attributes(threads::Int,
                                      rep_days::Union{Nothing,Integer},
-                                     attrs_override::AbstractDict = Dict{String,Any}())
+                                     attrs_override::AbstractDict = Dict{String,Any}();
+                                     hours_per_day::Union{Nothing,Integer} = nothing)
     attrs = default_gurobi_attributes(; threads = max(0, threads), rep_days = rep_days)
     attrs["OutputFlag"] = 0
     for (k, v) in attrs_override
         attrs[k] = v
     end
-    return attrs
+    return _apply_full_hour_gurobi_attributes!(attrs; hours_per_day, rep_days)
 end
 
 """
@@ -165,7 +167,8 @@ function _build_campaign_model(md::ModelData; solver::Symbol, threads::Int,
     rep_days = mode === :ts ? md.params.n_repDays : nothing
     m = Model(_campaign_optimizer(solver, threads;
         attrs_override = attrs_override,
-        rep_days = rep_days))
+        rep_days = rep_days,
+        hours_per_day = mode === :fh ? md.params.hoursPer_day : nothing))
     # Scenario-space MUST keep names so constraint_by_name works.
     apply_lp_generation_speedups!(m; keep_names = true)
     if mode === :ts

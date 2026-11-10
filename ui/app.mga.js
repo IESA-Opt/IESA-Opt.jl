@@ -157,7 +157,6 @@
     if ($("mgaHoursPerDayField")) $("mgaHoursPerDayField").classList.toggle("hidden", tsOn);
     if ($("mgaRepresentativeDaysField")) $("mgaRepresentativeDaysField").classList.toggle("hidden", !tsOn);
     if ($("mgaClusteringApproachField")) $("mgaClusteringApproachField").classList.toggle("hidden", !tsOn);
-    if ($("mgaExtremeDaysField")) $("mgaExtremeDaysField").classList.toggle("hidden", !tsOn);
   }
 
   function updateScenarioSummary() {
@@ -198,7 +197,7 @@
       wb.dataset.bound = "1";
       wb.addEventListener("change", updateScenarioSummary);
     }
-    ["mgaCostSlack", "mgaDirections", "mgaTolerance", "mgaOracleIterations", "mgaOracleBatch", "mgaExtremeDays", "mgaExtremePeriods", "mgaBoundaryRamping", "mgaConstraintGroup", "mgaClusteringApproach"].forEach((id) => {
+    ["mgaCostSlack", "mgaDirections", "mgaTolerance", "mgaOracleIterations", "mgaOracleBatch", "mgaBoundaryRamping", "mgaConstraintGroup", "mgaClusteringApproach"].forEach((id) => {
       const el = $(id);
       if (el && !el.dataset.bound) {
         el.dataset.bound = "1";
@@ -342,11 +341,9 @@
       periods: [...document.querySelectorAll("#mgaPeriods input:checked")].map((i) => Number(i.value)),
       representativeDays: Number(($("mgaRepresentativeDays") && $("mgaRepresentativeDays").value) || 15),
       hoursPerDay: currentHoursPerDay(),
-      clusteringApproach: ($("mgaClusteringApproach") && $("mgaClusteringApproach").value) || "kmeans_avg",
-      extremePeriods: !!($("mgaExtremePeriods") && $("mgaExtremePeriods").checked),
-      extremeDays: Number(($("mgaExtremeDays") && $("mgaExtremeDays").value) || 5),
+      clusteringApproach: ($("mgaClusteringApproach") && $("mgaClusteringApproach").value) || "k_medoids",
       boundaryRamping: !!($("mgaBoundaryRamping") && $("mgaBoundaryRamping").checked),
-      constraintGroup: ($("mgaConstraintGroup") && $("mgaConstraintGroup").value) || "Base + Bunkers + Scope3",
+      constraintGroup: ($("mgaConstraintGroup") && $("mgaConstraintGroup").value) || "Base + Bunkers + FeedStocks",
       solver: ($("mgaSolver") && $("mgaSolver").value) || "highs",
       solveMethod: currentSolveMethod(),
       costSlack: Number(($("mgaCostSlack") && $("mgaCostSlack").value) || 5),

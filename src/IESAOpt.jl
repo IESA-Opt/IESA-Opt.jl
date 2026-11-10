@@ -51,7 +51,7 @@ include("data_writing.jl")
 include("solver_settings.jl")
 
 # ---------------------------------------------------------------------------
-# Phase 2+: model assembly (skeleton includes; bodies land per phase)
+# Phase 2+: model assembly
 include("model/variables.jl")
 include("model/stock.jl")
 include("model/balance.jl")
@@ -64,17 +64,6 @@ include("model/ts.jl")
 include("model/infrastructure.jl")
 include("model/policy.jl")
 include("model/cyclic_closures.jl")
-# include("model/capacity.jl")
-# include("model/ramping.jl")
-# include("model/emissions.jl")
-# include("model/shedding.jl")
-# include("model/chp.jl")
-# include("model/storage.jl")
-# include("model/backlog.jl")
-# include("model/reservoir.jl")
-# include("model/gasbuffer.jl")
-# include("model/interconnect.jl")
-# include("model/ts_extras.jl")
 
 # ---------------------------------------------------------------------------
 # Phase 5+: clustering
@@ -85,8 +74,8 @@ include("clustering.jl")
 include("solve.jl")
 # Diagnostics for infeasible / near-infeasible runs (Show violations + IIS)
 include("violations.jl")
-# include("postprocess.jl")
 include("writers.jl")
+include("aimms_csv.jl")
 
 # ---------------------------------------------------------------------------
 # Workflow: Scenario Space exploration
@@ -119,7 +108,7 @@ include("extensions/multi_region.jl")
 include("extensions/extensions.jl")
 
 include("ui_server.jl")
-# include("sweeps.jl")
+include("ui_maps.jl")
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -152,9 +141,8 @@ export add_infrastructure_constraints!
 export add_policy_constraints!
 export add_cyclic_closures!
 # Phase 7: writers
-export write_parquet_results, write_duckdb_results
+export write_parquet_results, write_duckdb_results, write_aimms_csv_results
 export serve_ui!
-# Phase 7+: export sweep_ts_postfix
 
 # Scenario-space exploration (Phase 1)
 export ParameterRow, CampaignSpec, SampleMatrix
@@ -224,7 +212,7 @@ end
                         _md_copy.params.hoursPer_day = 24
                         _md_copy.params.n_repDays = 1
                         _md_copy.params.hoursPer_day_cluster = 24
-                        _md_copy.params.clustering_approach = :kmeans_avg
+                        _md_copy.params.clustering_approach = :k_medoids
                         _md_copy.params.ts_extremePeriods = false
                         _md_copy.params.ts_extremeDays_count = 0
                         _md_copy.params.ts_boundaryRamping = true
@@ -246,6 +234,22 @@ end
                 end
             catch err
                 @warn "IESA-Opt.jl precompile workload failed (package still loaded successfully)" err
+            end
+        end
+        # The HTTP connection task specialised on _ui_handler otherwise takes ~60 s to JIT on the first browser request.
+        if !_precompile_skip
+            _server = nothing
+            try
+                _server = HTTP.serve!(_ui_handler, "127.0.0.1", 0; verbose = false)
+                _base = "http://127.0.0.1:$(HTTP.port(_server))"
+                _close = ["Connection" => "close"]
+                HTTP.get(_base * "/api/status"; headers = _close, status_exception = false)
+                HTTP.get(_base * "/"; headers = _close, status_exception = false)
+                HTTP.post(_base * "/api/precompile-probe", _close, "{}"; status_exception = false)
+            catch err
+                @warn "IESA-Opt.jl UI server precompile workload failed (package still loaded successfully)" err
+            finally
+                _server === nothing || close(_server)
             end
         end
     end

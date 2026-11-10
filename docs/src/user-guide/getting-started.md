@@ -49,12 +49,6 @@ julia --project=. -e "using Gurobi; println(Gurobi.version())"
 
 ## 4. Run Basic Checks
 
-Run the test suite:
-
-```powershell
-julia --project=. test/runtests.jl
-```
-
 Load the default workbook and print a data summary:
 
 ```powershell

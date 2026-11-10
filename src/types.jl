@@ -201,6 +201,7 @@ Base.@kwdef mutable struct ModelParams
     shedding_inLoad::Float64 = 0.0
     social_discount_rate::Float64 = 0.04
     ActiveConstraintSet::String = ""
+    constraint_group::String = ""
 
     # Numeric stability
     numeric_epsilon::Float64 = 1e-9
@@ -209,9 +210,10 @@ Base.@kwdef mutable struct ModelParams
     solver_options::Dict{String,Any} = Dict{String,Any}()
 
     # Clustering control
-    clustering_approach::Symbol = :kmeans_avg
+    clustering_approach::Symbol = :k_medoids
+    clustering_distance::Symbol = :cosine
     clustering_seed::Int = 42
-    ts_extremePeriods::Bool = true
+    ts_extremePeriods::Bool = false
     ts_extremeDays_count::Int = 5
     ts_capacityProfile_autoMode::Bool = true
     ts_capacityProfile_autoFloor::Float64 = 0.23
@@ -228,7 +230,6 @@ Base.@kwdef mutable struct ModelParams
     ts_dayMix_PGD_maxIter::Int = 80
     ts_dayMix_PGD_lr::Float64 = 0.05
     ts_dayMix_PGD_tol::Float64 = 1e-6
-    ts_hullClustering_sinkhornFix::Bool = true
 
     # External clustering override (load mapDay_repDay from IESA-Opt 1.0-exported parquet
     # to bypass Julia's k-means and extreme-day promotion). Used by Julia↔IESA-Opt 1.0
@@ -380,9 +381,9 @@ Base.@kwdef mutable struct ModelParams
     cumulativeUP_DW_dQtfe_helper_TS::Dict{Tuple{Int,Symbol,Int},Float64}        = Dict()  # IESA-Opt 1.0 (hc,tfe,p) helper used by cumulativeUP/DW_dQtfe_TS
     cumulative_dQtfe_rhs_TS::Dict{Tuple{Int,Symbol,Int},Float64}                = Dict()  # IESA-Opt 1.0 (qc,tfe,p) RHS aggregated by quarter
     cumulativeS_dQtfv_helper1_TS::Dict{Tuple{Symbol,Int},Float64}               = Dict()  # IESA-Opt 1.0 (tfv,hc) profile-of-EVuse / avg_speed
-    cumulativeS_dQtfv_helper2_TS::Dict{Tuple{Symbol,Int},Float64}               = Dict()  # IESA-Opt 1.0 (tfv,hc) currently always 0
-    ev_min_soc_fraction_default::Float64                                        = 0.2     # IESA-Opt 1.0 line ~3978 default min SoC fraction
-    ev_v2g_power_fraction_default::Float64                                      = 0.8     # IESA-Opt 1.0 line ~3982 default V2G discharge fraction
+    cumulativeS_dQtfv_helper2_TS::Dict{Tuple{Symbol,Int},Float64}               = Dict()
+    ev_min_soc_fraction_default::Float64                                        = 0.0
+    ev_v2g_power_fraction_default::Float64                                      = 1.0
 
     # Shedding parameters
     shed_capacity::Dict{Tuple{Symbol,Int},Float64}            = Dict()
@@ -446,7 +447,7 @@ Base.@kwdef mutable struct ModelParams
     dS_hourly::Dict{Tuple{Symbol,Symbol},Float64}             = Dict()
     dW_hourly::Dict{Tuple{Symbol,Symbol},Float64}             = Dict()
     period_weight::Dict{Int,Float64}                          = Dict()
-    p_epsilon::Float64                                        = 0.0001
+    p_epsilon::Float64                                        = 0.0
 
     # ----------------------------------------------------- Policy / regulatory targets
     # Hard-coded values from IESA-Opt 1.0 lines 20913-21015. Period-indexed in PJ or fraction.
@@ -515,7 +516,7 @@ Base.@kwdef mutable struct ModelParams
     # Project-specific extensions (opt-in, NOT part of the core model)
     # See src/extensions/README.md for the architecture and removal steps.
     # =========================================================================
-    extensions::Set{Symbol}                                   = Set{Symbol}()
+    extensions::Set{Symbol}                                   = Set([:multi_region, :land_use])
 
     # Cluster land-use limit (`:land_use`, AIMMS `c_ClusterSpace_Limit`).
     # Always read when present in the workbook; only constrains when enabled.

@@ -22,6 +22,24 @@
 
 const _IJ_COEF_EPS_BAL = 1e-12
 
+const _AIMMS_CONSTRAINT_GROUPS = ("Base", "Base + Bunkers", "Base + FeedStocks", "Base + Bunkers + FeedStocks")
+
+function _normalize_constraint_group(group::AbstractString)
+    canonical = replace(strip(group), "Scope3" => "FeedStocks")
+    canonical in _AIMMS_CONSTRAINT_GROUPS || throw(ArgumentError("Unsupported AIMMS constraint group: $group. Use one of $(_AIMMS_CONSTRAINT_GROUPS)."))
+    return canonical
+end
+
+function _constraint_group(params::ModelParams)
+    isempty(params.constraint_group) || return _normalize_constraint_group(params.constraint_group)
+    selection = tryparse(Float64, params.ActiveConstraintSet)
+    selection === nothing && return last(_AIMMS_CONSTRAINT_GROUPS)
+    selection < 0 && return last(_AIMMS_CONSTRAINT_GROUPS)
+    group_index = floor(Int, selection)
+    return group_index == 0 ? "Base" : group_index == 1 ? "Base + FeedStocks" :
+           group_index == 2 ? "Base + Bunkers" : "Base + Bunkers + FeedStocks"
+end
+
 """
     add_balance_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData) -> Nothing
 """
@@ -140,11 +158,13 @@ function add_balance_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData
     for ((t, ps), v) in p.techUse_min
         ps in pss || continue
         t in s.tech_balancers || continue
+        v == 0.0 && continue
         @constraint(m, tu[t, ps] >= v, base_name = "minUse[$(t),$(ps)]")
     end
     for ((t, ps), v) in p.techUse_max
         ps in pss || continue
         t in s.tech_balancers || continue
+        v == 0.0 && continue
         @constraint(m, tu[t, ps] <= v, base_name = "maxUse[$(t),$(ps)]")
     end
 
@@ -482,7 +502,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
     # sum[(tb,atb), (nodePer_techBal(tb)=n) * tu(tb,ps) * activity_balances(tb,atb,ps)]
     #   where atb ∈ activities_target_Bunkers
     # <= emissionTarget_bunkers(n,ps)
-    for ps in pss
+    for ps in (_constraint_group(p) in ("Base + Bunkers", "Base + Bunkers + FeedStocks") ? pss : Int[])
         nodes = Set{Symbol}(n for ((n, p_cap), _) in p.emissionTargetBunker if p_cap == ps)
         for (n, techs_n) in techs_at_node
             any(tb -> any(atb -> get(p.activity_balances, (tb, atb, ps), 0.0) != 0.0,
@@ -506,7 +526,7 @@ function _add_emission_targets!(m::JuMP.Model, vars::AnnualVars, md::ModelData,
     # ─── balance_activities_EmissionTargetFS (feedstock, IESA-Opt 1.0 line ~2542) ───
     # sum[(tb,atf), tu * activity_balances(tb,atf,ps)] + CHP/shed deltas
     #   where atf ∈ activities_target_FeedStocks
-    for ps in pss
+    for ps in (_constraint_group(p) in ("Base + FeedStocks", "Base + Bunkers + FeedStocks") ? pss : Int[])
         nodes = Set{Symbol}(n for ((n, p_cap), _) in p.emissionTargetFS if p_cap == ps)
         for (n, techs_n) in techs_at_node
             any(tb -> any(atf -> get(p.activity_balances, (tb, atf, ps), 0.0) != 0.0,

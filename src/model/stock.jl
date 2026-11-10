@@ -171,14 +171,15 @@ function add_stock_constraints!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
     # -------------------------------------------------------------------------
     # minStock / maxStock (IESA-Opt 1.0 lines ~2845-2851): only where <>na
     # -------------------------------------------------------------------------
-    for ((t, ps), v) in p.techStock_min
-        ps in pss || continue
-        t in tech || continue
+    default_bound = :multi_region in p.extensions ? 0.0 : -1.0
+    for t in tech, ps in pss
+        v = get(p.techStock_min, (t, ps), default_bound)
+        v == -1.0 && continue
         @constraint(m, ts[t, ps] >= v, base_name = "minStock[$(t),$(ps)]")
     end
-    for ((t, ps), v) in p.techStock_max
-        ps in pss || continue
-        t in tech || continue
+    for t in tech, ps in pss
+        v = get(p.techStock_max, (t, ps), default_bound)
+        v == -1.0 && continue
         @constraint(m, ts[t, ps] <= v, base_name = "maxStock[$(t),$(ps)]")
     end
 

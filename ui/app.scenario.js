@@ -660,7 +660,6 @@
     if ($("scHoursPerDayField")) $("scHoursPerDayField").classList.toggle("hidden", tsOn);
     if ($("scRepresentativeDaysField")) $("scRepresentativeDaysField").classList.toggle("hidden", !tsOn);
     if ($("scClusteringApproachField")) $("scClusteringApproachField").classList.toggle("hidden", !tsOn);
-    if ($("scExtremeDaysField")) $("scExtremeDaysField").classList.toggle("hidden", !tsOn);
   }
 
   // ---------------------------------------------------------------------------
@@ -1017,6 +1016,11 @@
     spec.solver = ($("scSolver") || {}).value || "highs";
     spec.mode = computeMode();
     spec.periods = collectPeriods();
+    spec.representativeDays = Number(($("scRepresentativeDays") || {}).value) || 15;
+    spec.hoursPerDay = currentHoursPerDay();
+    spec.clusteringApproach = ($("scClusteringApproach") || {}).value || "k_medoids";
+    spec.constraintGroup = ($("scConstraintGroup") || {}).value || "Base + Bunkers + FeedStocks";
+    spec.boundaryRamping = !!($("scBoundaryRamping") && $("scBoundaryRamping").checked);
     return spec;
   }
 

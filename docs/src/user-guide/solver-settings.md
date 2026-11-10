@@ -103,6 +103,11 @@ that solver's own controls: Gurobi, HiGHS, CPLEX, and XPRESS each receive their
 own barrier, barrier+crossover, concurrent, primal-simplex, or dual-simplex
 attributes where the solver supports them.
 
+`barrier_fallback` (UI label "Barrier (fallback, 1e-5)") is barrier without
+crossover with homogeneous barrier and convergence, feasibility, and optimality
+tolerances relaxed to `1e-5`, following PyPSA-Eur's `gurobi-fallback` preset.
+Use it when plain Barrier ends Sub-optimal on numerically difficult models.
+
 ## Persistent Run Settings
 
 Run-specific choices such as workbook path, output folder, representative-day count, and thread count can be placed in a local wrapper script under `local/`. That folder is ignored by Git, so users can keep machine-specific settings without changing repository files.

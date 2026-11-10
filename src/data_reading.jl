@@ -417,11 +417,6 @@ end
 
 _int(x)::Int = (x === nothing || ismissing(x)) ? 0 : Int(round(Float64(x)))
 
-function _sym(x)::Symbol
-    s = strip(_str(x))
-    return Symbol(s)
-end
-
 # Per-sheet progress message; flushes stderr so it shows up immediately even
 # when stdout/stderr are piped through PowerShell (block-buffered).
 function _logsheet(name::AbstractString)
@@ -607,21 +602,6 @@ function _read_list_to_float!(d::Dict{Symbol,Float64}, sh, col_key::AbstractStri
         fval = _float(v)
         if !merge || !haskey(d, k)
             d[k] = fval
-        end
-    end
-end
-
-function _read_list_to_int!(d::Dict{Symbol,Int}, sh, col_key::AbstractString, col_val::AbstractString,
-                             r_start::Int, r_end::Int; merge::Bool=false)
-    ck, cv = _col_index(col_key), _col_index(col_val)
-    for r in r_start:r_end
-        ks = _str(sh[r, ck])
-        ks == "" && continue
-        v = sh[r, cv]
-        (v === nothing || ismissing(v)) && continue
-        k = Symbol(strip(ks))
-        if !merge || !haskey(d, k)
-            d[k] = _int(v)
         end
     end
 end

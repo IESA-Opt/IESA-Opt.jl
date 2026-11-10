@@ -467,4 +467,3 @@ front = pareto_front(result, :price_carbon, :objective; minimize = (false, true)
 - `src/workflows/scenario_space/orchestrator.jl` — high-level `run_scenario_space`.
 - `src/workflows/scenario_space/persistence.jl` — DuckDB save/load.
 - `src/workflows/scenario_space/analysis.jl` — `objective_table` / `sensitivity_scan` / `pareto_front`.
-- `test/test_scenario_clustering.jl` — Phase 3.5 partition + cache key tests.

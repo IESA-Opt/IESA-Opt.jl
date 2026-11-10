@@ -4,11 +4,10 @@ Contributions to IESA-Opt.jl are welcome when they improve the model, documentat
 
 ## Development Setup
 
-From the repository root, instantiate the Julia environment and run the tests:
+From the repository root, instantiate the Julia environment:
 
 ```powershell
 julia --project=. -e "using Pkg; Pkg.instantiate()"
-julia --project=. test/runtests.jl
 ```
 
 Use Julia 1.10 or newer. For production-scale solver changes, test with Gurobi when possible. HiGHS is suitable for smoke tests and development checks that do not require a commercial solver license.

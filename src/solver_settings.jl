@@ -11,7 +11,7 @@ hoursPer_day >= 12 branch (the TS sweep hot path).
 
 Default Gurobi attributes for the production TS solve path. Mirrors the
 IESA-Opt 1.0 Phase 7 settings: Barrier method, no crossover, BarHomogeneous=1
-for Optimal certification, all tolerances at 1e-7, all-cores threading. When
+for Optimal certification, all tolerances at 1e-6, all-cores threading. When
 `rep_days` is provided, representative-day tuning ranges add Gurobi presolve
 and scaling settings validated with `grbtune` on 2026-06-14.
 
@@ -72,8 +72,8 @@ function default_gurobi_attributes(; threads::Int = 0, rep_days::Union{Nothing,I
 
         # Numerics
         "NumericFocus"      => 0,        # Default (fastest)
-        "FeasibilityTol"    => 1e-7,
-        "OptimalityTol"     => 1e-7,
+        "FeasibilityTol"    => 1e-6,
+        "OptimalityTol"     => 1e-6,
         "BarConvTol"        => 1e-7,
 
         # Output
@@ -82,6 +82,20 @@ function default_gurobi_attributes(; threads::Int = 0, rep_days::Union{Nothing,I
     )
     if rep_days !== nothing
         merge!(attrs, gurobi_tuned_attributes_for_repdays(rep_days))
+    end
+    return attrs
+end
+
+"""
+ Keep selected chronological barrier models in primal form to avoid excessive
+factorization fill-in. Representative-day tuning and explicit overrides win.
+"""
+function _apply_full_hour_gurobi_attributes!(attrs::Dict{String,Any};
+                                            hours_per_day::Union{Nothing,Integer} = nothing,
+                                            rep_days::Union{Nothing,Integer} = nothing)
+    if rep_days === nothing && hours_per_day in (1, 2, 3, 6, 8, 12, 24) &&
+       get(attrs, "Method", 2) == 2 && get(attrs, "Crossover", 0) == 0
+        get!(attrs, "PreDual", 0)
     end
     return attrs
 end
