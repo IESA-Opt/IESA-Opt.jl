@@ -97,7 +97,22 @@ function _read_parameters_sheet!(s::ModelSets, p::ModelParams, xf)
     p.social_discount_rate       = _float(sh["B12"])
     p.base_year                  = _int(sh["B13"])
     p.ActiveConstraintSet        = _str(sh["B46"])
+    _read_cluster_available_area!(p.clusterAvailableArea, sh)
     return nothing
+end
+
+# Land-use extension: AIMMS reads `p_clusterAvailableArea('CL1'..'CL5')` from
+# Parameters!B49:B53. We locate those rows by their column-A label
+# (`CL1_AvailableArea`, ...) so workbooks without the rows yield no entries.
+function _read_cluster_available_area!(d::Dict{Symbol,Float64}, sh)
+    for r in 1:_last_row(sh, "A")
+        m = match(r"^(CL\d+)_AvailableArea$"i, strip(_str(sh[r, 1])))
+        m === nothing && continue
+        v = sh[r, 2]
+        (v === nothing || ismissing(v)) && continue
+        d[Symbol(uppercase(m.captures[1]))] = _float(v)
+    end
+    return d
 end
 
 function _read_types_sheet!(s::ModelSets, p::ModelParams, xf)
@@ -273,6 +288,9 @@ function _read_technologies_sheet!(s::ModelSets, p::ModelParams, xf)
 
     period_hdr_DD = _read_row_ints(sh, 5, "DD", "DJ")
     _read_table_sym_int_to_bool!(p.no_eco_decom, sh, s.tech_balancers, period_hdr_DD, "DD", 7, last_row)
+
+    # Land-use extension: "Space (Ha)" per unit of capacity [Hectare/UoC] (AIMMS p_techSpace)
+    _read_list_to_float!(p.techSpace, sh, "A", "DS", 7, last_row)
     return nothing
 end
 
@@ -398,11 +416,6 @@ function _float(x)::Float64
 end
 
 _int(x)::Int = (x === nothing || ismissing(x)) ? 0 : Int(round(Float64(x)))
-
-function _sym(x)::Symbol
-    s = strip(_str(x))
-    return Symbol(s)
-end
 
 # Per-sheet progress message; flushes stderr so it shows up immediately even
 # when stdout/stderr are piped through PowerShell (block-buffered).
@@ -589,21 +602,6 @@ function _read_list_to_float!(d::Dict{Symbol,Float64}, sh, col_key::AbstractStri
         fval = _float(v)
         if !merge || !haskey(d, k)
             d[k] = fval
-        end
-    end
-end
-
-function _read_list_to_int!(d::Dict{Symbol,Int}, sh, col_key::AbstractString, col_val::AbstractString,
-                             r_start::Int, r_end::Int; merge::Bool=false)
-    ck, cv = _col_index(col_key), _col_index(col_val)
-    for r in r_start:r_end
-        ks = _str(sh[r, ck])
-        ks == "" && continue
-        v = sh[r, cv]
-        (v === nothing || ismissing(v)) && continue
-        k = Symbol(strip(ks))
-        if !merge || !haskey(d, k)
-            d[k] = _int(v)
         end
     end
 end

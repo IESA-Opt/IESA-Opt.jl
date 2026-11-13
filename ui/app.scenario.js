@@ -626,6 +626,12 @@
     methods.forEach((m) => {
       const l = document.createElement("label");
       const safe = (m.label || "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+      const help = window.IESASolverMethodHelp ? window.IESASolverMethodHelp(m) : null;
+      if (help) {
+        l.dataset.helpTitle = help.title;
+        l.dataset.help = help.short.join("\n");
+        l.dataset.helpMore = help.more;
+      }
       l.innerHTML = `<input type="radio" name="scSolveMethod" value="${m.id}"><span>${safe}</span>`;
       l.querySelector("input").checked = m.id === selected;
       w.appendChild(l);
@@ -654,7 +660,6 @@
     if ($("scHoursPerDayField")) $("scHoursPerDayField").classList.toggle("hidden", tsOn);
     if ($("scRepresentativeDaysField")) $("scRepresentativeDaysField").classList.toggle("hidden", !tsOn);
     if ($("scClusteringApproachField")) $("scClusteringApproachField").classList.toggle("hidden", !tsOn);
-    if ($("scExtremeDaysField")) $("scExtremeDaysField").classList.toggle("hidden", !tsOn);
   }
 
   // ---------------------------------------------------------------------------
@@ -791,7 +796,9 @@
       const p = await r.json();
       renderPreview(p);
     } catch (e) {
-      $("scPreviewStatus").textContent = "Server unreachable: " + (e.message || e);
+      const status = $("scPreviewStatus");
+      status.textContent = "Server unreachable: " + (e.message || e);
+      if (window.IESAExplainStatus) window.IESAExplainStatus(status, status.textContent, "error");
     }
   }
 
@@ -804,7 +811,7 @@
       seed: Number($("scSeed").value) || 0,
       inputWorkbook: state.customWorkbookPath
         || (($("scInputWorkbook") || {}).value)
-        || "data/default_data.xlsx",
+        || "Input/default_data.xlsx",
       rows: state.rows.map((r) => ({
         parameter: r.parameter || "",
         subparameter: r.subparameter || "",
@@ -825,7 +832,12 @@
     if (payload.errors && payload.errors.length) {
       const ul = document.createElement("ul");
       ul.className = "sc-errors";
-      payload.errors.forEach((e) => { const li = document.createElement("li"); li.textContent = e; ul.appendChild(li); });
+      payload.errors.forEach((e) => {
+        const li = document.createElement("li");
+        li.textContent = e;
+        if (window.IESAExplainStatus) window.IESAExplainStatus(li, e, "error");
+        ul.appendChild(li);
+      });
       msgEl.appendChild(ul);
     }
     if (payload.warnings && payload.warnings.length) {
@@ -849,10 +861,15 @@
     const wrap = $("scPreviewWrap");
     wrap.innerHTML = "";
     if (!payload.ok) {
-      $("scPreviewStatus").textContent = (payload.errors || ["Preview failed."])[0];
+      const msg = (payload.errors || ["Preview failed."])[0];
+      const status = $("scPreviewStatus");
+      status.textContent = msg;
+      if (window.IESAExplainStatus) window.IESAExplainStatus(status, msg, "error");
       return;
     }
-    $("scPreviewStatus").textContent = "Showing " + payload.shown + " of " + payload.impliedSampleSize.toLocaleString() + " variants.";
+    const previewStatus = $("scPreviewStatus");
+    previewStatus.textContent = "Showing " + payload.shown + " of " + payload.impliedSampleSize.toLocaleString() + " variants.";
+    if (window.IESAExplainStatus) window.IESAExplainStatus(previewStatus, previewStatus.textContent, "");
     const tbl = document.createElement("table");
     const thead = document.createElement("thead");
     const trh = document.createElement("tr");
@@ -882,6 +899,7 @@
     el.classList.remove("sc-status-ok", "sc-status-error");
     if (kind === "ok") el.classList.add("sc-status-ok");
     else if (kind === "error") el.classList.add("sc-status-error");
+    if (window.IESAExplainStatus) window.IESAExplainStatus(el, text, kind);
   }
 
   // ===========================================================================
@@ -992,12 +1010,17 @@
     // Prefer a user-browsed file over the dropdown selection.
     spec.inputWorkbook = state.customWorkbookPath
       || (($("scInputWorkbook") || {}).value)
-      || "data/default_data.xlsx";
+      || "Input/default_data.xlsx";
     spec.n_workers = Number(($("scWorkers") || {}).value) || 1;
     spec.threads_per_worker = computeThreadsPerWorker();
     spec.solver = ($("scSolver") || {}).value || "highs";
     spec.mode = computeMode();
     spec.periods = collectPeriods();
+    spec.representativeDays = Number(($("scRepresentativeDays") || {}).value) || 15;
+    spec.hoursPerDay = currentHoursPerDay();
+    spec.clusteringApproach = ($("scClusteringApproach") || {}).value || "k_medoids";
+    spec.constraintGroup = ($("scConstraintGroup") || {}).value || "Base + Bunkers + FeedStocks";
+    spec.boundaryRamping = !!($("scBoundaryRamping") && $("scBoundaryRamping").checked);
     return spec;
   }
 
@@ -2014,9 +2037,11 @@
       if (ce && String(ce).trim()) {
         errPanel.classList.remove("hidden");
         errMsg.textContent = String(ce);
+        if (window.IESAExplainStatus) window.IESAExplainStatus(errMsg, ce, "error");
       } else {
         errPanel.classList.add("hidden");
         errMsg.textContent = "";
+        if (window.IESAExplainStatus) window.IESAExplainStatus(errMsg, "", "");
       }
     }
 
@@ -2055,6 +2080,7 @@
     const pre = document.createElement("pre");
     pre.className = "failure-msg";
     pre.textContent = f.error || "(no message)";
+    if (window.IESAExplainStatus) window.IESAExplainStatus(pre, pre.textContent, "error");
     pre.title = "Click to copy";
     pre.addEventListener("click", () => {
       try { navigator.clipboard.writeText(f.error || ""); } catch (_) {}
@@ -2155,6 +2181,7 @@
         const pre = document.createElement("pre");
         pre.className = "worker-error-msg";
         pre.textContent = w.last_error;
+        if (window.IESAExplainStatus) window.IESAExplainStatus(pre, w.last_error, "error");
         pre.title = "Click to copy";
         pre.addEventListener("click", () => {
           try { navigator.clipboard.writeText(w.last_error); } catch (_) {}

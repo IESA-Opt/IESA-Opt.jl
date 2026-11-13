@@ -11,7 +11,7 @@ hoursPer_day >= 12 branch (the TS sweep hot path).
 
 Default Gurobi attributes for the production TS solve path. Mirrors the
 IESA-Opt 1.0 Phase 7 settings: Barrier method, no crossover, BarHomogeneous=1
-for Optimal certification, all tolerances at 1e-7, all-cores threading. When
+for Optimal certification, all tolerances at 1e-6, all-cores threading. When
 `rep_days` is provided, representative-day tuning ranges add Gurobi presolve
 and scaling settings validated with `grbtune` on 2026-06-14.
 
@@ -72,8 +72,8 @@ function default_gurobi_attributes(; threads::Int = 0, rep_days::Union{Nothing,I
 
         # Numerics
         "NumericFocus"      => 0,        # Default (fastest)
-        "FeasibilityTol"    => 1e-7,
-        "OptimalityTol"     => 1e-7,
+        "FeasibilityTol"    => 1e-6,
+        "OptimalityTol"     => 1e-6,
         "BarConvTol"        => 1e-7,
 
         # Output
@@ -84,6 +84,45 @@ function default_gurobi_attributes(; threads::Int = 0, rep_days::Union{Nothing,I
         merge!(attrs, gurobi_tuned_attributes_for_repdays(rep_days))
     end
     return attrs
+end
+
+"""
+ Keep selected chronological barrier models in primal form to avoid excessive
+factorization fill-in. Representative-day tuning and explicit overrides win.
+"""
+function _apply_full_hour_gurobi_attributes!(attrs::Dict{String,Any};
+                                            hours_per_day::Union{Nothing,Integer} = nothing,
+                                            rep_days::Union{Nothing,Integer} = nothing)
+    if rep_days === nothing && hours_per_day in (1, 2, 3, 6, 8, 12, 24) &&
+       get(attrs, "Method", 2) == 2 && get(attrs, "Crossover", 0) == 0
+        get!(attrs, "PreDual", 0)
+    end
+    return attrs
+end
+
+"""
+    gurobi_suboptimal_fallback!(model, attrs; optimize_fn = optimize!) -> Bool
+
+Barrier without crossover can stop with Gurobi "Sub-optimal termination" (reported by JuMP as `LOCALLY_SOLVED`)
+on numerically difficult LPs, e.g. regional full-hourly models. In that case re-solve with the homogeneous
+Barrier algorithm (`BarHomogeneous=1`), and if that still ends sub-optimal, once more with crossover. Returns
+`true` when a fallback ran and records the step used as `SuboptimalFallback` in `attrs`. Normal Barrier runs
+are untouched.
+"""
+function gurobi_suboptimal_fallback!(model::JuMP.Model, attrs::AbstractDict; optimize_fn::Function = optimize!)
+    get(attrs, "Method", -1) == 2 && get(attrs, "Crossover", -1) == 0 || return false
+    termination_status(model) == MOI.LOCALLY_SOLVED || return false
+    occursin("gurobi", lowercase(solver_name(model))) || return false
+    if get(attrs, "BarHomogeneous", -1) != 1
+        set_optimizer_attribute(model, "BarHomogeneous", 1)
+        attrs["SuboptimalFallback"] = "BarHomogeneous=1"
+        optimize_fn(model)
+        termination_status(model) == MOI.LOCALLY_SOLVED || return true
+    end
+    set_optimizer_attribute(model, "Crossover", -1)
+    attrs["SuboptimalFallback"] = "BarHomogeneous=1+Crossover"
+    optimize_fn(model)
+    return true
 end
 
 """

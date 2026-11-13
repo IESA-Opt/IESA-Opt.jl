@@ -62,7 +62,11 @@ function _add_infraVol_H!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 push!(cons_techs, (tb, ab))
             end
         end
-        isempty(cons_techs) && continue
+        # AIMMS also limits the flexible-demand response when nothing consumes the activity
+        # (e.g. regional LT heat networks), so only skip rows without any LHS term.
+        flex_terms = dqUP === nothing ? Tuple{Symbol,Float64}[] :
+            [(tf, get(p.dQ_hourly, (tf, ah), 0.0)) for tf in s.tech_flexible if get(p.dQ_hourly, (tf, ah), 0.0) != 0.0]
+        isempty(cons_techs) && isempty(flex_terms) && continue
 
         # RHS techs: infraH techs whose infra_activity == ah; their cap = techStock × cap2act
         rhs_techs = Tuple{Symbol,Float64}[]
@@ -98,14 +102,10 @@ function _add_infraVol_H!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 end
             end
             # Flexible-demand response (over all tech_flexible) — independent of cons_techs
-            if dqUP !== nothing
-                for tf in s.tech_flexible
-                    dq = get(p.dQ_hourly, (tf, ah), 0.0)
-                    dq == 0.0 && continue
-                    add_to_expression!(expr, dq, dqUP[h, tf, ps])
-                    if !(tf in s.tech_fStorage) && dqDW !== nothing
-                        add_to_expression!(expr, dq, dqDW[h, tf, ps])
-                    end
+            for (tf, dq) in flex_terms
+                add_to_expression!(expr, dq, dqUP[h, tf, ps])
+                if !(tf in s.tech_fStorage) && dqDW !== nothing
+                    add_to_expression!(expr, dq, dqDW[h, tf, ps])
                 end
             end
             # RHS: Σ techStock × cap2act × (24/hpdEff)
@@ -145,7 +145,9 @@ function _add_infraVol_D!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 push!(cons_techs, (tb, ab))
             end
         end
-        isempty(cons_techs) && continue
+        buffer_terms = dbUP === nothing ? Tuple{Symbol,Float64}[] :
+            [(tg, get(p.dB_daily, (tg, ad), 0.0)) for tg in s.tech_gasBuffer if get(p.dB_daily, (tg, ad), 0.0) != 0.0]
+        isempty(cons_techs) && isempty(buffer_terms) && continue
 
         rhs_techs = Tuple{Symbol,Float64}[]
         for iti in s.tech_infraD
@@ -195,12 +197,8 @@ function _add_infraVol_D!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 end
             end
             # Gas-buffer daily contribution
-            if dbUP !== nothing
-                for tg in s.tech_gasBuffer
-                    db = get(p.dB_daily, (tg, ad), 0.0)
-                    db == 0.0 && continue
-                    add_to_expression!(expr, db, dbUP[d, tg, ps])
-                end
+            for (tg, db) in buffer_terms
+                add_to_expression!(expr, db, dbUP[d, tg, ps])
             end
             # RHS techs (daily)
             for (iti, c2a) in rhs_techs
@@ -240,7 +238,9 @@ function _add_infraVol_H_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 push!(cons_techs, (tb, ab))
             end
         end
-        isempty(cons_techs) && continue
+        flex_terms = dqUP === nothing ? Tuple{Symbol,Float64}[] :
+            [(tf, get(p.dQ_hourly, (tf, ah), 0.0)) for tf in s.tech_flexible if get(p.dQ_hourly, (tf, ah), 0.0) != 0.0]
+        isempty(cons_techs) && isempty(flex_terms) && continue
 
         rhs_techs = Tuple{Symbol,Float64}[]
         for iti in s.tech_infraH
@@ -269,14 +269,10 @@ function _add_infraVol_H_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                     add_to_expression!(expr, ab, dS[hc, tb, ps])
                 end
             end
-            if dqUP !== nothing
-                for tf in s.tech_flexible
-                    dq = get(p.dQ_hourly, (tf, ah), 0.0)
-                    dq == 0.0 && continue
-                    add_to_expression!(expr, dq, dqUP[hc, tf, ps])
-                    if !(tf in s.tech_fStorage) && dqDW !== nothing
-                        add_to_expression!(expr, dq, dqDW[hc, tf, ps])
-                    end
+            for (tf, dq) in flex_terms
+                add_to_expression!(expr, dq, dqUP[hc, tf, ps])
+                if !(tf in s.tech_fStorage) && dqDW !== nothing
+                    add_to_expression!(expr, dq, dqDW[hc, tf, ps])
                 end
             end
             for (iti, c2a) in rhs_techs
@@ -323,7 +319,9 @@ function _add_infraVol_D_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 push!(cons_techs, (tb, ab))
             end
         end
-        isempty(cons_techs) && continue
+        buffer_terms = dbUP === nothing ? Tuple{Symbol,Float64}[] :
+            [(tg, get(p.dB_daily, (tg, ad), 0.0)) for tg in s.tech_gasBuffer if get(p.dB_daily, (tg, ad), 0.0) != 0.0]
+        isempty(cons_techs) && isempty(buffer_terms) && continue
 
         rhs_techs = Tuple{Symbol,Float64}[]
         for iti in s.tech_infraD
@@ -362,12 +360,8 @@ function _add_infraVol_D_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                     end
                 end
             end
-            if dbUP !== nothing
-                for tg in s.tech_gasBuffer
-                    db = get(p.dB_daily, (tg, ad), 0.0)
-                    db == 0.0 && continue
-                    add_to_expression!(expr, db, dbUP[rd, tg, ps])
-                end
+            for (tg, db) in buffer_terms
+                add_to_expression!(expr, db, dbUP[rd, tg, ps])
             end
             for (iti, c2a) in rhs_techs
                 add_to_expression!(expr, c2a, ts[iti, ps])

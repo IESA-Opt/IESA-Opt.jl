@@ -59,6 +59,8 @@ function build_annual_lp!(m::JuMP.Model, md::ModelData)
     @info "build_annual_lp! - setting objective"
     flush(stderr)
     add_objective!(m, vars, md)
+    # ---- Extensions hook (opt-in; no-op when params.extensions is empty) ----
+    apply_extensions!(m, vars, md; mode = :annual)
     @info "build_annual_lp! - complete"
     flush(stderr)
     return vars
@@ -100,6 +102,8 @@ function build_fh_lp!(m::JuMP.Model, md::ModelData)
     @info "build_fh_lp! - setting objective (with hourly terms)"
     flush(stderr)
     add_objective!(m, vars, md)
+    # ---- Extensions hook (opt-in; no-op when params.extensions is empty) ----
+    apply_extensions!(m, vars, md; mode = :fh)
     @info "build_fh_lp! - complete"
     flush(stderr)
     return vars
@@ -146,6 +150,8 @@ function build_ts_lp!(m::JuMP.Model, md::ModelData)
     @info "build_ts_lp! - setting objective (with TS hourly terms)"
     flush(stderr)
     add_objective!(m, vars, md)
+    # ---- Extensions hook (opt-in; no-op when params.extensions is empty) ----
+    apply_extensions!(m, vars, md; mode = :ts)
     @info "build_ts_lp! - complete"
     flush(stderr)
     return vars
@@ -246,10 +252,7 @@ function extract_annual_results(m::JuMP.Model, vars::AnnualVars, md::ModelData)
         out[:decomStock]         = Dict((t, ps) => value(vars.decomStock[t, ps])
                                         for t in md.sets.technologies
                                         for ps in md.sets.periods_solve)
-        out[:retrofitting]       = Dict((it, jt, ps) => value(vars.retrofitting[it, jt, ps])
-                        for it in md.sets.technologies
-                        for jt in md.sets.technologies
-                        for ps in md.sets.periods_solve)
+        out[:retrofitting]       = Dict(k => value(v) for (k, v) in vars.retrofitting)
     end
     return out
 end

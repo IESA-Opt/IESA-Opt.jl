@@ -1,4 +1,4 @@
-const state = { options: null, solvers: [], outputs: [], selectedOutputId: "", comparedOutputIds: [], currentJobId: null, pollTimer: null, resultsLoaded: false, statusTimer: null, statusPollIntervalMs: 1500, lastJobStatus: null, connectionLost: false, connRestoreTimer: null, connRestoreHide: null, latestResults: null, dispatchLegendOff: new Set(), customWorkbookPath: "", lastClickedOutputId: "", dispatchPayload: null, dispatchSelectedNode: "", dispatchSelectedPeriod: 0, dispatchFromHour: 1, dispatchToHour: 8760, dispatchLoading: false, flexPayload: null, flexSelectedTech: "", flexSelectedPeriod: 0, flexFromHour: 1, flexToHour: 168, flexLoading: false };
+const state = { options: null, solvers: [], outputs: [], selectedOutputId: "", comparedOutputIds: [], currentJobId: null, pollTimer: null, resultsLoaded: false, statusTimer: null, statusPollIntervalMs: 1500, lastJobStatus: null, connectionLost: false, connRestoreTimer: null, connRestoreHide: null, latestResults: null, dispatchLegendOff: new Set(), customWorkbookPath: "", lastClickedOutputId: "", dispatchPayload: null, dispatchSelectedNode: "", dispatchSelectedPeriod: 0, dispatchFromHour: 1, dispatchToHour: 8760, dispatchLoading: false, flexPayload: null, flexSelectedTech: "", flexSelectedPeriod: 0, flexFromHour: 1, flexToHour: 168, flexLoading: false, regionalMapPayload: null, regionalMapGeometry: new Map(), regionalMapFile: "", regionalMapMetric: "use", regionalMapCommodity: "all", regionalMapPeriod: 0, regionalMapLoading: false, regionalMapAnimationPaused: false, resultsSubpage: "summary" };
 const DAYS_PER_YEAR = 365;
 const stages = [["reading","Read"],["preparing","Prepare"],["clustering","Cluster"],["generation","Generate"],["solve","Solve"],["writing","Write"]];
 const stageDescriptions = { idle:"Start a run to see each stage and solver output.", reading:"Julia is opening the workbook and loading the input tables into model data.", preparing:"Sets and derived parameters are being built for the selected solve years.", clustering:"Representative days and time-slice profiles are being prepared, unless full-hourly mode skipped this step.", generation:"JuMP variables, objective terms, and constraints are being generated before the solver starts.", solve:"The optimizer is running. Native solver messages and iteration lines appear in the log below when the solver writes them.", writing:"Solved values are being converted into DuckDB result tables, one output file at a time.", done:"The run finished and result tables are ready in the Results tab.", failed:"The run stopped during the last active stage. The log below contains the error details.", cancelled:"The run was stopped by the user. No results were saved." };
@@ -65,6 +65,7 @@ async function init() {
   safeRun("bindTabs", bindTabs);
   safeRun("bindSections", bindSections);
   safeRun("bindControls", bindControls);
+  safeRun("bindUiHelp", bindUiHelp);
   safeRun("bindAboutToc", bindAboutToc);
   safeRun("bindUiSearch", bindUiSearch);
   safeRun("renderJob(null)", () => renderJob(null));
@@ -106,8 +107,415 @@ function safeRun(label, fn) {
   catch (error) {
     console.error(`init: ${label} threw`, error);
     const status = document.getElementById("connectionStatus");
-    if (status) status.textContent = `UI init error in ${label}: ${error.message || error}`;
+    if (status) {
+      const message = `UI init error in ${label}: ${error.message || error}`;
+      status.textContent = message;
+      explainStatusMessage(status, message, "error");
+    }
   }
+}
+
+function solverMethodHelp(method) {
+  const id = String(method && method.id || "").toLowerCase();
+  const label = String(method && method.label || id || "Solve method");
+  if (id === "barrier_fallback") {
+    return {
+      title: label,
+      short: ["Barrier without crossover, looser tolerances (1e-5).", "Use when plain Barrier ends Sub-optimal."],
+      more: "Same as Barrier, but with homogeneous barrier and convergence, feasibility and optimality tolerances relaxed from 1e-6 to 1e-5, matching PyPSA-Eur's gurobi-fallback preset. It helps numerically difficult models (for example many nodes at full hourly resolution) finish instead of stalling. Constraints may be violated by up to about 1e-5, so very small flows and dual prices are less precise."
+    };
+  }
+  if (id.includes("barrier") && id.includes("crossover")) {
+    return {
+      title: label,
+      short: ["Uses barrier, then crossover.", "Good for large LPs and parallel CPUs."],
+      more: "Barrier is an interior-point method: it moves through the inside of the feasible region instead of walking from vertex to vertex. It usually scales well on large linear programs and can use multiple CPU threads during the factorization work. Crossover then converts the interior-point solution into a simplex-style basic solution, which can improve basis quality and some dual/reporting behaviour but adds extra solve time."
+    };
+  }
+  if (id.includes("barrier")) {
+    return {
+      title: label,
+      short: ["Uses the barrier interior-point method.", "Often strong for large LPs and parallel CPUs."],
+      more: "Barrier solves the LP from the interior of the feasible region, using linear algebra steps that can be parallelized across CPU threads. It is often a good choice for very large energy-system LPs because it can be faster than simplex on broad, sparse models. Without crossover, the solver usually stops at the interior-point solution, which can be faster but may not provide a simplex basis."
+    };
+  }
+  if (id.includes("concurrent")) {
+    return {
+      title: label,
+      short: ["Runs several solver strategies at once.", "Uses more CPU to find the fastest path."],
+      more: "Concurrent mode lets the solver try multiple algorithms in parallel, such as barrier and simplex variants, then keeps the result from the method that finishes first. It can be robust when you do not know which method fits a model best, but it may use more CPU threads and memory than a single fixed algorithm."
+    };
+  }
+  if (id.includes("dual") && id.includes("simplex")) {
+    return {
+      title: label,
+      short: ["Uses the dual simplex algorithm.", "Good when re-solving related LPs."],
+      more: "Dual simplex moves along the edges of the LP polytope while maintaining dual feasibility. It is often effective for warm starts, model variants, and cases where presolve or bound changes make the dual path attractive. It is usually less parallel than barrier but can be very reliable."
+    };
+  }
+  if (id.includes("primal") && id.includes("simplex")) {
+    return {
+      title: label,
+      short: ["Uses the primal simplex algorithm.", "Reliable edge-walking LP method."],
+      more: "Primal simplex walks from one basic feasible solution to another along the LP edges. It can be useful for some smaller or well-conditioned LPs and gives a natural simplex basis, but it usually does not exploit parallel CPU threads as strongly as barrier on very large models."
+    };
+  }
+  if (id.includes("simplex")) {
+    return {
+      title: label,
+      short: ["Uses a simplex-family method.", "Reliable, basis-oriented LP solving."],
+      more: "Simplex methods move between corner points of the feasible region and return a simplex basis. They are often reliable and useful for diagnostics or re-solves, but their core work is typically less parallel than barrier on large LPs."
+    };
+  }
+  if (id.includes("auto")) {
+    return {
+      title: label,
+      short: ["Lets the solver choose the algorithm.", "Good when no method is clearly best."],
+      more: "Auto mode leaves the algorithm choice to the solver. The backend may use presolve information, model structure, and solver defaults to pick barrier, simplex, concurrent, or another internal strategy. This is convenient, but fixed methods are better when you want repeatable benchmark comparisons."
+    };
+  }
+  return {
+    title: label,
+    short: [`Selects ${label}.`, "The selected method is passed to the solver."],
+    more: `This solve method is sent to the selected optimizer as an algorithm preference. Its exact behaviour depends on the solver backend and the options supported by this Julia environment.`
+  };
+}
+window.IESASolverMethodHelp = solverMethodHelp;
+
+function errorMessageHelp(message, kind = "") {
+  const text = String(message || "").trim();
+  const isError = kind === "error" || /\b(error|failed|failure|exception|traceback|not found|missing|unreachable|infeasible|unbounded|timeout|time limit|out of memory|denied|license|could not)\b/i.test(text);
+  if (!text || !isError) return null;
+  if (/workbook.*not found|not found.*workbook|input workbook not found|missing.*workbook/i.test(text)) {
+    return {
+      title: "Workbook not found",
+      short: ["Julia could not open the selected workbook.", "Check the path or choose a workbook from Input/."],
+      more: "The UI submits the workbook path to the local Julia server. For bundled examples, use a workbook listed from Input/. For a custom file, use Browse again and confirm the file still exists, has an Excel extension, and is readable by the Julia process. Reload the UI after adding a new workbook under Input/ so the dropdown is refreshed."
+    };
+  }
+  if (/server unreachable|failed to fetch|networkerror|connection lost|could not load local ui options/i.test(text)) {
+    return {
+      title: "Julia server unreachable",
+      short: ["The browser could not reach the local Julia server.", "Check the launcher terminal and port 8123."],
+      more: "This usually means the Julia UI process is still starting, crashed, or is not listening on the expected local port. Keep the launcher window open, check it for errors, and refresh once the status pill says Julia ready. If another process owns port 8123, restart the UI on a free port."
+    };
+  }
+  if (/infeasible/i.test(text)) {
+    return {
+      title: "Model infeasible",
+      short: ["The solver could not satisfy all constraints.", "Enable diagnostics or inspect recent input changes."],
+      more: "An infeasible run means some combination of workbook data, bounds, policy targets, stock limits, temporal settings, or enabled extensions leaves no valid solution. Re-run with Show violations enabled when available, compare against a known-good workbook, and narrow the change by relaxing the newest bounds or constraints first."
+    };
+  }
+  if (/unbounded/i.test(text)) {
+    return {
+      title: "Model unbounded",
+      short: ["The objective can improve without a finite limit.", "Look for missing bounds or free activities."],
+      more: "An unbounded LP often points to a missing capacity, stock, activity, import/export, or slack bound. Check technologies and activities introduced by the selected workbook or extension, especially any variable with negative cost or revenue-like objective terms."
+    };
+  }
+  if (/outofmemory|out of memory|memory|allocation/i.test(text)) {
+    return {
+      title: "Memory limit reached",
+      short: ["The run likely exceeded available RAM.", "Reduce threads, temporal detail, or campaign parallelism."],
+      more: "Large LP generation and barrier solves can consume a lot of memory, especially with many solver threads or parallel campaign workers. Try fewer representative days, a coarser hours-per-day setting, fewer workers, or a lower solver thread count before increasing model detail again."
+    };
+  }
+  if (/gurobi|license/i.test(text)) {
+    return {
+      title: "Solver or license issue",
+      short: ["The selected solver could not run as configured.", "Check solver availability and license setup."],
+      more: "For Gurobi, confirm the license is valid in this Julia environment and that Gurobi.jl can initialize. You can switch to HiGHS for a sanity check, or restart Julia after changing solver environment variables."
+    };
+  }
+  if (/timeout|time limit/i.test(text)) {
+    return {
+      title: "Time limit reached",
+      short: ["The solve or campaign exceeded its time limit.", "Use a smaller run or increase the limit."],
+      more: "This does not always mean the model is wrong. Try a coarser temporal setting, fewer representative days, lower campaign parallelism, or a different solver method. If the run is expected to be large, increase the configured time limit and monitor progress."
+    };
+  }
+  if (/permission|access.*denied|denied/i.test(text)) {
+    return {
+      title: "File access denied",
+      short: ["Julia could not read or write the requested file.", "Close locking programs and check permissions."],
+      more: "Excel, DuckDB, or Parquet files can be locked by another process. Close any open workbook or database viewer, check that the output folder is writable, and avoid writing into protected system folders."
+    };
+  }
+  return {
+    title: "Error message",
+    short: ["This message came from the local UI or Julia backend.", "Read the exact text before changing settings."],
+    more: "Use the message text to identify the failing stage or file. If it mentions a workbook, check the Input/ path or Browse selection. If it mentions solver status, inspect the Progress log and try diagnostics, a smaller temporal setting, or a known-good workbook to isolate the cause."
+  };
+}
+
+function explainStatusMessage(el, message, kind = "") {
+  if (!el) return;
+  const help = errorMessageHelp(message, kind);
+  if (help) {
+    el.dataset.helpTitle = help.title;
+    el.dataset.help = help.short.join("\n");
+    el.dataset.helpMore = help.more;
+  } else if (el.dataset.helpTitle || el.dataset.help || el.dataset.helpMore) {
+    el.dataset.helpTitle = "Status message";
+    el.dataset.help = "Shows the latest UI or backend status.\nNo action is needed unless it reports an error.";
+    el.dataset.helpMore = "Status text updates as the UI talks to the local Julia server. If a later message turns red or says failed, its help icon explains the likely cause and next checks.";
+  }
+  if (window.IESARefreshHelp) window.IESARefreshHelp(el.parentElement || el);
+}
+window.IESAErrorMessageHelp = errorMessageHelp;
+window.IESAExplainStatus = explainStatusMessage;
+
+function bindUiHelp() {
+  let activeAnchor = null;
+  let activeTarget = null;
+  let expandedHelp = false;
+  let hideTimer = null;
+  let installQueued = false;
+  const targetForAnchor = new WeakMap();
+  const anchorForTarget = new WeakMap();
+  const controlSelector = "button, select, input, textarea, summary, .section-button, .tab-button, [role='button']";
+  const candidateSelector = `[data-help], ${controlSelector}`;
+  const pop = document.createElement("div");
+  const toggle = $("uiHelpToggle");
+  pop.id = "uiHelpPopover";
+  pop.className = "ui-help-popover hidden";
+  pop.setAttribute("role", "dialog");
+  pop.setAttribute("aria-modal", "false");
+  pop.setAttribute("aria-label", "UI help");
+  document.body.appendChild(pop);
+
+  const clearHideTimer = () => {
+    if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; }
+  };
+  const cleanText = node => {
+    if (!node) return "";
+    const clone = node.cloneNode(true);
+    clone.querySelectorAll(".ui-help-anchor,input,select,textarea").forEach(el => el.remove());
+    return clone.textContent.replace(/\s+/g, " ").trim();
+  };
+  const directChild = (target, selector) => Array.from(target.children || []).find(child => child.matches(selector));
+  const isHelpTarget = node => !!(node && activeAnchor && (activeAnchor.contains(node) || pop.contains(node)));
+
+  const labelFor = target => {
+    if (!target) return "this control";
+    const aria = target.getAttribute && (target.getAttribute("data-help-title") || target.getAttribute("aria-label"));
+    if (aria) return aria.trim();
+    if (target.id) {
+      const explicit = document.querySelector(`label[for="${CSS.escape(target.id)}"]`);
+      if (explicit && cleanText(explicit)) return cleanText(explicit);
+    }
+    const label = target.closest && target.closest("label");
+    if (label) {
+      const span = directChild(label, "span");
+      const text = span ? cleanText(span) : cleanText(label);
+      if (text) return text;
+    }
+    const heading = target.querySelector && target.querySelector("h2, summary, .field > span, span");
+    if (heading && cleanText(heading)) return cleanText(heading);
+    if (cleanText(target)) return cleanText(target);
+    if (target.placeholder) return target.placeholder;
+    return "this control";
+  };
+  const fallbackHelp = target => {
+    const label = labelFor(target);
+    const tag = target.tagName ? target.tagName.toLowerCase() : "";
+    const type = (target.getAttribute && target.getAttribute("type") || "").toLowerCase();
+    if (target.classList && target.classList.contains("section-button")) return [`Opens the ${label} workspace.`, "The workspace tabs below switch to that workflow."];
+    if (target.classList && target.classList.contains("tab-button")) return [`Opens the ${label} tab.`, "The current workspace state stays on the page."];
+    if (tag === "button") return [`Runs the ${label} action.`, "The page updates the related view or asks Julia to do the work."];
+    if (tag === "select") return [`Changes ${label}.`, "The selected value is submitted with this workspace."];
+    if (type === "checkbox") return [`Turns ${label} on or off.`, "The choice is applied when the current action runs."];
+    if (type === "radio") return [`Selects ${label}.`, "Only one option in this group can be active."];
+    if (type === "range" || type === "number") return [`Sets ${label}.`, "Use it to tune the numeric value for this run."];
+    if (tag === "input" || tag === "textarea") return [`Edits ${label}.`, "The entered text is used by the current workflow."];
+    if (tag === "summary") return [`Opens or closes ${label}.`, "The settings inside remain part of the page state."];
+    return [`Controls ${label}.`, "The value is used by the active workflow or result view."];
+  };
+  const fallbackMore = target => {
+    const label = labelFor(target);
+    const tag = target.tagName ? target.tagName.toLowerCase() : "";
+    const type = (target.getAttribute && target.getAttribute("type") || "").toLowerCase();
+    if (tag === "button" || target.classList.contains("section-button") || target.classList.contains("tab-button")) return `This action changes the visible UI state or sends a request to the local Julia server, depending on the button. The label "${label}" names the action.`;
+    if (tag === "select") return `This menu changes the value for "${label}". The selected option is read by the UI JavaScript when you start a run, load results, or perform the current workspace action.`;
+    if (type === "checkbox" || type === "radio") return `This option controls "${label}". Its checked state is preserved on the page and is included in the relevant run, campaign, or view configuration.`;
+    return `This field controls "${label}" for the current workspace. It is kept local until you run, load, save, or refresh the related view.`;
+  };
+  const titleFor = target => {
+    if (!target) return "Help";
+    const direct = target.dataset.helpTitle;
+    return direct ? direct : labelFor(target);
+  };
+  const shortLines = target => {
+    const explicit = String(target.dataset.help || "").replace(/\\n/g, "\n").split("\n").map(s => s.trim()).filter(Boolean).slice(0, 2);
+    return explicit.length ? explicit : fallbackHelp(target);
+  };
+  const render = (target, showMore = expandedHelp) => {
+    expandedHelp = showMore;
+    const lines = shortLines(target);
+    const more = String(target.dataset.helpMore || "").trim() || fallbackMore(target);
+    pop.innerHTML = `<p class="ui-help-title">${escapeHtml(titleFor(target))}</p>`
+      + `<div class="ui-help-short">${lines.map(line => `<div>${escapeHtml(line)}</div>`).join("")}</div>`
+      + (showMore && more ? `<div class="ui-help-more">${escapeHtml(more)}</div>` : "")
+      + (more && !showMore ? `<button class="ui-help-readmore" type="button">Read more</button>` : "");
+    const readmore = pop.querySelector(".ui-help-readmore");
+    if (readmore) readmore.addEventListener("click", event => {
+      event.preventDefault();
+      event.stopPropagation();
+      clearHideTimer();
+      render(target, true);
+      position(activeAnchor);
+    });
+  };
+  const position = anchor => {
+    if (!anchor) return;
+    const rect = anchor.getBoundingClientRect();
+    pop.classList.remove("hidden");
+    const margin = 12;
+    const width = pop.offsetWidth || 360;
+    const height = pop.offsetHeight || 120;
+    let left = Math.min(window.innerWidth - width - margin, Math.max(margin, rect.left + rect.width / 2 - 32));
+    let top = rect.bottom + 10;
+    const above = top + height + margin > window.innerHeight;
+    if (above) top = Math.max(margin, rect.top - height - 10);
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+    pop.dataset.placement = above ? "top" : "bottom";
+    const arrow = Math.max(18, Math.min(width - 24, rect.left + rect.width / 2 - left - 6));
+    pop.style.setProperty("--ui-help-arrow", `${arrow}px`);
+  };
+  const hideNow = () => {
+    clearHideTimer();
+    pop.classList.add("hidden");
+    activeAnchor = null;
+    activeTarget = null;
+    expandedHelp = false;
+  };
+  const scheduleHide = (delay = expandedHelp ? 1000 : 180, keepExisting = false) => {
+    if (keepExisting && hideTimer) return;
+    clearHideTimer();
+    hideTimer = setTimeout(() => {
+      if (document.activeElement && pop.contains(document.activeElement)) return;
+      hideNow();
+    }, delay);
+  };
+  const show = anchor => {
+    if (!document.body.classList.contains("ui-help-enabled")) return;
+    const target = targetForAnchor.get(anchor);
+    if (!anchor || !target) return;
+    clearHideTimer();
+    if (anchor !== activeAnchor) expandedHelp = false;
+    activeAnchor = anchor;
+    activeTarget = target;
+    render(target, expandedHelp);
+    position(anchor);
+  };
+  const shouldAttachAnchor = target => {
+    if (!target || !target.matches || target === document.body) return false;
+    if (target.id === "uiHelpToggle" || target.closest("#uiHelpToggle")) return false;
+    if (target.closest("#uiSearchOverlay")) return false;
+    if (target.classList.contains("ui-help-anchor") || target.closest(".ui-help-anchor,#uiHelpPopover,.modebar")) return false;
+    if (/^(SCRIPT|STYLE|OPTION)$/i.test(target.tagName)) return false;
+    if (target.tagName === "INPUT" && ["hidden", "file"].includes((target.type || "").toLowerCase())) return false;
+    if (target.classList.contains("panel") && target.querySelector(":scope > details > summary[data-help]")) return false;
+    if (target.hasAttribute("data-help")) return true;
+    if (!target.matches(controlSelector)) return false;
+    const ancestorHelp = target.closest("[data-help]");
+    return !(ancestorHelp && ancestorHelp.matches("label,.toggle-field"));
+  };
+  const insertionHostFor = target => {
+    if (target.tagName === "LI") return { node: target, mode: "append" };
+    if (target.classList.contains("section-button") || target.classList.contains("tab-button") || target.tagName === "BUTTON") return { node: target, mode: "append" };
+    if (target.matches("h2,summary")) return { node: target, mode: "append" };
+    if (target.matches("label,.field,.toggle-field")) {
+      const span = directChild(target, "span");
+      if (span) return { node: span, mode: "append" };
+    }
+    if (target.id) {
+      const label = document.querySelector(`label[for="${CSS.escape(target.id)}"]`);
+      if (label) return { node: directChild(label, "span") || label, mode: "append" };
+    }
+    const label = target.closest("label");
+    if (label) return { node: directChild(label, "span") || label, mode: "append" };
+    const heading = target.querySelector && target.querySelector(":scope > .panel-title h2, :scope > h2, :scope > details > summary, :scope > span");
+    if (heading) return { node: heading, mode: "append" };
+    return target.parentElement ? { node: target, mode: "after" } : null;
+  };
+  const attachAnchor = target => {
+    if (!shouldAttachAnchor(target)) return;
+    const existing = anchorForTarget.get(target);
+    if (existing && existing.isConnected) return;
+    if (existing) anchorForTarget.delete(target);
+    const placement = insertionHostFor(target);
+    if (!placement || !placement.node || !placement.node.isConnected) return;
+    if (placement.node.querySelector(":scope > .ui-help-anchor")) return;
+    const anchor = document.createElement("span");
+    anchor.className = "ui-help-anchor";
+    anchor.textContent = "i";
+    anchor.setAttribute("role", "button");
+    anchor.setAttribute("tabindex", "0");
+    anchor.setAttribute("aria-label", `Explain ${titleFor(target)}`);
+    anchor.setAttribute("aria-haspopup", "dialog");
+    anchor.setAttribute("aria-controls", "uiHelpPopover");
+    targetForAnchor.set(anchor, target);
+    anchorForTarget.set(target, anchor);
+    anchor.addEventListener("mouseenter", () => show(anchor));
+    anchor.addEventListener("focus", () => show(anchor));
+    anchor.addEventListener("mouseleave", event => { if (!isHelpTarget(event.relatedTarget)) scheduleHide(); });
+    anchor.addEventListener("blur", event => { if (!isHelpTarget(event.relatedTarget)) scheduleHide(); });
+    anchor.addEventListener("pointerdown", event => { event.preventDefault(); event.stopPropagation(); });
+    anchor.addEventListener("click", event => { event.preventDefault(); event.stopPropagation(); show(anchor); });
+    anchor.addEventListener("keydown", event => {
+      if (event.key === "Enter" || event.key === " ") { event.preventDefault(); show(anchor); }
+      if (event.key === "Escape") hideNow();
+    });
+    placement.node.classList.add("ui-help-slot");
+    if (placement.mode === "after") placement.node.insertAdjacentElement("afterend", anchor);
+    else placement.node.appendChild(anchor);
+  };
+  const attachAnchors = (root = document) => {
+    const targets = [];
+    if (root.matches && root.matches(candidateSelector)) targets.push(root);
+    if (root.querySelectorAll) targets.push(...root.querySelectorAll(candidateSelector));
+    targets.forEach(attachAnchor);
+  };
+  const queueAttachAnchors = () => {
+    if (installQueued) return;
+    installQueued = true;
+    requestAnimationFrame(() => { installQueued = false; attachAnchors(document); });
+  };
+
+  const setHelpEnabled = enabled => {
+    document.body.classList.toggle("ui-help-enabled", enabled);
+    if (toggle) {
+      toggle.setAttribute("aria-pressed", String(enabled));
+      const stateLabel = toggle.querySelector(".topbar-help-state");
+      if (stateLabel) stateLabel.textContent = enabled ? "On" : "Off";
+      toggle.title = enabled ? "Hide contextual help icons" : "Show contextual help icons";
+    }
+    if (!enabled) hideNow();
+  };
+
+  attachAnchors(document);
+  window.IESARefreshHelp = attachAnchors;
+  if (toggle) toggle.addEventListener("click", () => setHelpEnabled(toggle.getAttribute("aria-pressed") !== "true"));
+  setHelpEnabled(false);
+  new MutationObserver(queueAttachAnchors).observe(document.body, { childList: true, subtree: true });
+  pop.addEventListener("mouseenter", clearHideTimer);
+  pop.addEventListener("mouseleave", () => scheduleHide());
+  document.addEventListener("mousemove", event => {
+    if (!activeAnchor || !expandedHelp) return;
+    if (isHelpTarget(event.target)) clearHideTimer();
+    else scheduleHide(1000, true);
+  });
+  document.addEventListener("pointerdown", event => {
+    if (!activeTarget || pop.classList.contains("hidden")) return;
+    if (isHelpTarget(event.target)) return;
+    hideNow();
+  }, true);
+  window.addEventListener("scroll", () => { if (activeAnchor && !pop.classList.contains("hidden")) position(activeAnchor); }, true);
+  window.addEventListener("resize", () => { if (activeAnchor && !pop.classList.contains("hidden")) position(activeAnchor); });
+  document.addEventListener("keydown", event => { if (event.key === "Escape") hideNow(); });
 }
 
 function startStatusPolling() {
@@ -178,6 +586,7 @@ function renderJuliaStatus(status) {
   else { el.classList.add("muted"); label = `Julia: ${status.state}`; }
   el.innerHTML = `<span class="status-dot"></span><span class="status-label">${escapeHtml(label)}</span>`;
   el.title = status && status.message ? status.message : "";
+  explainStatusMessage(el, status && status.message ? status.message : label, status && (status.state === "failed" || status.state === "missing") ? "error" : "");
 }
 
 async function fetchJson(url, options) { const r = await fetch(url, options); const p = await r.json(); if (!r.ok) throw new Error(p.error || r.statusText); return p; }
@@ -194,7 +603,11 @@ function bindSections() {
 }
 function switchSection(section) {
   document.querySelectorAll(".section-button").forEach(b => b.classList.toggle("active", b.dataset.section === section));
-  document.querySelectorAll(".tab-button").forEach(b => { b.hidden = b.dataset.section !== section; });
+  document.querySelectorAll(".tab-button").forEach(b => {
+    const hidden = b.dataset.section !== section;
+    b.hidden = hidden;
+    b.setAttribute("aria-hidden", String(hidden));
+  });
   // After filtering, ensure exactly one visible tab is active. If the previously-active tab
   // belongs to the new section, leave it; otherwise activate the first visible one.
   const visibleActive = document.querySelector(".tab-button.active:not([hidden])");
@@ -252,39 +665,96 @@ function bindUiSearch() {
   const results = $("uiSearchResults");
   if (!button || !overlay || !input || !results) return;
 
-  const sectionLabels = {};
-  document.querySelectorAll(".section-button").forEach(b => { sectionLabels[b.dataset.section] = (b.textContent || "").trim(); });
+  function readableText(el) {
+    if (!el) return "";
+    const clone = el.cloneNode(true);
+    clone.querySelectorAll(".ui-help-anchor").forEach(node => node.remove());
+    return (clone.textContent || "").replace(/\s+/g, " ").trim();
+  }
 
-  const index = [];
-  document.querySelectorAll(".section-button").forEach(b => {
-    index.push({ kind: "section", label: (b.textContent || "").trim(), hint: "Workspace", section: b.dataset.section });
-  });
-  document.querySelectorAll(".tab-button").forEach(b => {
-    const section = b.dataset.section;
-    const sectionLabel = sectionLabels[section] || section;
-    index.push({ kind: "tab", label: (b.textContent || "").trim(), hint: sectionLabel + " workspace", section, tab: b.dataset.tab });
-  });
-  const aboutPage = document.querySelector("#tab-about .about-page");
-  if (aboutPage) {
-    let currentH3 = null, currentH4 = null;
-    aboutPage.querySelectorAll("h3, h4, li").forEach(el => {
-      if (el.tagName === "H3") { currentH3 = el; currentH4 = null; index.push({ kind: "about-section", label: (el.textContent || "").trim(), hint: "About > Section", section: "about", tab: "about", anchor: el.id }); }
-      else if (el.tagName === "H4") { currentH4 = el; const ctx = currentH3 ? (currentH3.textContent || "").trim() : "About"; index.push({ kind: "about-subsection", label: (el.textContent || "").trim(), hint: "About > " + ctx, section: "about", tab: "about", anchor: el.id }); }
-      else if (el.tagName === "LI" && el.closest(".about-list")) {
-        const strong = el.querySelector("strong");
-        if (!strong) return;
-        const heading = currentH4 || currentH3;
-        const ctx = heading ? (heading.textContent || "").trim() : "About";
-        const detail = (el.textContent || "").trim().replace(/\s+/g, " ");
-        index.push({ kind: "about-item", label: (strong.textContent || "").trim(), hint: "About > " + ctx, section: "about", tab: "about", anchor: heading ? heading.id : "", detail });
-      }
+  const sectionLabels = {};
+  document.querySelectorAll(".section-button").forEach(b => { sectionLabels[b.dataset.section] = readableText(b); });
+
+  let index = [];
+
+  function controlLabel(el) {
+    const field = el.closest(".field");
+    const direct = field && field.querySelector(":scope > span");
+    if (direct && readableText(direct)) return readableText(direct);
+    const label = el.closest("label");
+    if (label) return readableText(label);
+    return el.id || "Control";
+  }
+
+  function controlLocation(el) {
+    const panel = el.closest(".tab-panel");
+    const tab = panel && panel.id ? panel.id.replace(/^tab-/, "") : "";
+    const tabButton = tab ? document.querySelector(`.tab-button[data-tab="${CSS.escape(tab)}"]`) : null;
+    const section = tabButton ? tabButton.dataset.section : "";
+    const tabLabel = tabButton ? readableText(tabButton) : "";
+    const sectionLabel = sectionLabels[section] || section || "UI";
+    return { section, tab, hint: tabLabel ? `${sectionLabel} > ${tabLabel}` : sectionLabel };
+  }
+
+  function addSelectOptionsToIndex() {
+    document.querySelectorAll("select[id]").forEach(select => {
+      const label = controlLabel(select);
+      const location = controlLocation(select);
+      const seen = new Set();
+      Array.from(select.options || []).forEach(option => {
+        const value = (option.value || "").trim();
+        const text = (option.textContent || "").trim();
+        const optionLabel = text || value;
+        const key = (value || optionLabel).toLowerCase();
+        if (!optionLabel || seen.has(key)) return;
+        seen.add(key);
+        index.push({
+          kind: "control",
+          label: `${label}: ${optionLabel}`,
+          hint: location.hint,
+          section: location.section,
+          tab: location.tab,
+          focusId: select.id,
+          detail: [label, optionLabel, value, text].filter(Boolean).join(" "),
+        });
+      });
     });
   }
 
+  function buildSearchIndex() {
+    index = [];
+    document.querySelectorAll(".section-button").forEach(b => {
+      index.push({ kind: "section", label: readableText(b), hint: "Workspace", section: b.dataset.section });
+    });
+    document.querySelectorAll(".tab-button").forEach(b => {
+      const section = b.dataset.section;
+      const sectionLabel = sectionLabels[section] || section;
+      index.push({ kind: "tab", label: readableText(b), hint: sectionLabel + " workspace", section, tab: b.dataset.tab });
+    });
+    addSelectOptionsToIndex();
+    const aboutPage = document.querySelector("#tab-about .about-page");
+    if (aboutPage) {
+      let currentH3 = null, currentH4 = null;
+      aboutPage.querySelectorAll("h3, h4, li").forEach(el => {
+        if (el.tagName === "H3") { currentH3 = el; currentH4 = null; index.push({ kind: "about-section", label: readableText(el), hint: "About > Section", section: "about", tab: "about", anchor: el.id }); }
+        else if (el.tagName === "H4") { currentH4 = el; const ctx = currentH3 ? readableText(currentH3) : "About"; index.push({ kind: "about-subsection", label: readableText(el), hint: "About > " + ctx, section: "about", tab: "about", anchor: el.id }); }
+        else if (el.tagName === "LI" && el.closest(".about-list")) {
+          const strong = el.querySelector("strong");
+          if (!strong) return;
+          const heading = currentH4 || currentH3;
+          const ctx = heading ? readableText(heading) : "About";
+          const detail = readableText(el);
+          index.push({ kind: "about-item", label: readableText(strong), hint: "About > " + ctx, section: "about", tab: "about", anchor: heading ? heading.id : "", detail });
+        }
+      });
+    }
+  }
+  buildSearchIndex();
+
   let activeIdx = 0, flatMatches = [];
 
-  const KIND_LABELS = { section: "Workspace", tab: "Tab", "about-section": "About", "about-subsection": "About", "about-item": "About" };
-  const KIND_CLASS = { section: "section", tab: "tab", "about-section": "about", "about-subsection": "about", "about-item": "about" };
+  const KIND_LABELS = { section: "Workspace", tab: "Tab", control: "Control", "about-section": "About", "about-subsection": "About", "about-item": "About" };
+  const KIND_CLASS = { section: "section", tab: "tab", control: "tab", "about-section": "about", "about-subsection": "about", "about-item": "about" };
 
   function highlight(text, q) {
     if (!q) return escapeHtml(text);
@@ -318,13 +788,14 @@ function bindUiSearch() {
       flatMatches = [];
       return;
     }
-    const groups = { workspaces: [], tabs: [], about: [] };
+    const groups = { workspaces: [], tabs: [], controls: [], about: [] };
     matches.forEach(m => {
       if (m.kind === "section") groups.workspaces.push(m);
       else if (m.kind === "tab") groups.tabs.push(m);
+      else if (m.kind === "control") groups.controls.push(m);
       else groups.about.push(m);
     });
-    const order = [["workspaces", "Workspaces"], ["tabs", "Tabs"], ["about", "About reference"]];
+    const order = [["workspaces", "Workspaces"], ["tabs", "Tabs"], ["controls", "Controls and choices"], ["about", "About reference"]];
     flatMatches = [];
     let html = "";
     order.forEach(([key, label]) => {
@@ -366,9 +837,18 @@ function bindUiSearch() {
         if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     }
+    if (entry.focusId) {
+      window.requestAnimationFrame(() => {
+        const el = document.getElementById(entry.focusId);
+        if (!el) return;
+        const field = el.closest(".field") || el;
+        field.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.focus({ preventScroll: true });
+      });
+    }
   }
-
   function open() {
+    buildSearchIndex();
     overlay.removeAttribute("hidden");
     input.value = "";
     renderResults("");
@@ -421,6 +901,12 @@ function bindControls() {
   const flexFrom = $("flexFrom"); if (flexFrom) flexFrom.addEventListener("change", () => { state.flexFromHour = clampHour(flexFrom.value, 1, state.flexToHour); flexFrom.value = state.flexFromHour; renderFlexibility(state.flexPayload); });
   const flexTo = $("flexTo"); if (flexTo) flexTo.addEventListener("change", () => { state.flexToHour = clampHour(flexTo.value, state.flexFromHour, 8760); flexTo.value = state.flexToHour; renderFlexibility(state.flexPayload); });
   const flexReset = $("flexReset"); if (flexReset) flexReset.addEventListener("click", () => { state.flexFromHour = 1; state.flexToHour = 168; const f=$("flexFrom"); if (f) f.value = 1; const t=$("flexTo"); if (t) t.value = 168; renderFlexibility(state.flexPayload); });
+  const mapMetric = $("regionalMapMetric"); if (mapMetric) mapMetric.addEventListener("change", () => { state.regionalMapMetric = mapMetric.value || "use"; refreshRegionalMap(); });
+  const mapCommodity = $("regionalMapCommodity"); if (mapCommodity) mapCommodity.addEventListener("change", () => { state.regionalMapCommodity = mapCommodity.value || "all"; refreshRegionalMap(); });
+  const mapPeriod = $("regionalMapPeriod"); if (mapPeriod) mapPeriod.addEventListener("change", () => { state.regionalMapPeriod = Number(mapPeriod.value) || 0; refreshRegionalMap(); });
+  const mapFile = $("regionalMapFile"); if (mapFile) mapFile.addEventListener("change", () => { state.regionalMapFile = mapFile.value || ""; refreshRegionalMap(); });
+  const mapPlay = $("regionalMapPlay"); if (mapPlay) mapPlay.addEventListener("click", playRegionalMapAnimation);
+  document.querySelectorAll(".results-subpage-button").forEach(btn => btn.addEventListener("click", () => switchResultsSubpage(btn.dataset.resultsSubpage || "summary")));
   const emGroup = $("emissionsGroupBy"); if (emGroup) emGroup.addEventListener("change", refreshEmissions);
   const emPeriod = $("emissionsPeriod"); if (emPeriod) emPeriod.addEventListener("change", refreshEmissions);
   const sdAct = $("supplyDemandActivity"); if (sdAct) sdAct.addEventListener("change", refreshSupplyDemand);
@@ -448,6 +934,8 @@ function populateOptions() {
   const o = state.options, d = o.defaults;
   fillSelect("inputWorkbook", o.scenarios || [], d.inputWorkbook); fillSelect("clusteringApproach", o.clusteringApproaches || [], d.clusteringApproach); fillSelect("constraintGroup", o.constraintGroups || [], d.constraintGroup);
   renderPeriods(o.periods || [], d.periods || []); renderHours(o.hoursPerDayOptions || [], d.hoursPerDay); renderSolveMethods(o.solveMethods || [], d.solveMethod);
+  $("multiRegionToggle").checked = d.multiRegion !== false;
+  $("landUseToggle").checked = d.landUse !== false;
   $("representativeDays").value = d.representativeDays; $("representativeDaysNumber").value = d.representativeDays;
   const threads = String(Math.max(4, detectedCpuThreads(o))); $("threads").max = threads; $("threadsNumber").max = threads; updateTotalSlices();
   updateTimeSlicingControls();
@@ -467,7 +955,20 @@ function renderHours(hours, selected) {
     w.appendChild(l);
   });
 }
-function renderSolveMethods(methods, selected) { const w=$("solveMethod"); w.innerHTML=""; methods.forEach(m=>{ const l=document.createElement("label"); l.innerHTML=`<input type="radio" name="solveMethod" value="${m.id}"><span>${escapeHtml(m.label)}</span>`; l.querySelector("input").checked=m.id===selected; w.appendChild(l); }); }
+function renderSolveMethods(methods, selected) {
+  const w = $("solveMethod");
+  w.innerHTML = "";
+  methods.forEach(m => {
+    const l = document.createElement("label");
+    const help = solverMethodHelp(m);
+    l.dataset.helpTitle = help.title;
+    l.dataset.help = help.short.join("\n");
+    l.dataset.helpMore = help.more;
+    l.innerHTML = `<input type="radio" name="solveMethod" value="${m.id}"><span>${escapeHtml(m.label)}</span>`;
+    l.querySelector("input").checked = m.id === selected;
+    w.appendChild(l);
+  });
+}
 function currentHoursPerDay() {
   const checked = document.querySelector("input[name='hoursPerDay']:checked");
   return checked ? Number(checked.value) : 24;
@@ -481,12 +982,11 @@ function updateTotalSlices() {
 }
 function updateTimeSlicingControls() {
   const tsOn = $("timeSlicingToggle").checked;
-  // Time slicing OFF (full-hourly): only Hours-per-day matters; hide rep days, clustering and extreme days.
-  // Time slicing ON: rep days + clustering + extreme days drive the slicing; hide hours-per-day.
+  // Time slicing OFF (full-hourly): only Hours-per-day matters; hide rep days and clustering.
+  // Time slicing ON: rep days + clustering drive the slicing; hide hours-per-day.
   $("hoursPerDayField").classList.toggle("hidden", tsOn);
   $("representativeDaysField").classList.toggle("hidden", !tsOn);
   $("clusteringApproachField").classList.toggle("hidden", !tsOn);
-  $("extremeDaysField").classList.toggle("hidden", !tsOn);
 }
 function updateSolverDetails() { const solver = state.solvers.find(x => x.id === $("solver").value); if(!solver) return; const detail = solver.message || ""; $("solverDetails").textContent = detail; $("solverDetails").classList.toggle("hidden", !detail); $("selectedSolverLabel").textContent = solver.label; $("selectedSolverVersion").textContent = solver.version || "Not reported"; setRunHint(`Ready to run with ${solverLabel(solver)}.`); }
 function currentWorkbook() { return state.customWorkbookPath || $("inputWorkbook").value; }
@@ -579,7 +1079,7 @@ function resetRunButton() {
   setRunButtonMode("run");
   $("stopRunButtonProgress").classList.add("hidden");
 }
-function collectRunConfig() { return { inputWorkbook: currentWorkbook(), periods:[...document.querySelectorAll("#periods input:checked")].map(i=>Number(i.value)), mode:$("timeSlicingToggle").checked ? "timeslice" : "full_hourly", hoursPerDay:currentHoursPerDay(), representativeDays:Number($("representativeDays").value), solver:$("solver").value, solveMethod:document.querySelector("input[name='solveMethod']:checked").value, threads:Number($("threads").value), clusteringApproach:$("clusteringApproach").value, extremePeriods:$("extremePeriods").checked, extremeDays:Number($("extremeDays").value), boundaryRamping:$("boundaryRamping").checked, hourlyReports:$("hourlyReports").checked, showViolations:$("showViolations").checked, outputMode:$("outputMode").value, outputName:$("outputName").value, constraintGroup:$("constraintGroup").value }; }
+function collectRunConfig() { return { inputWorkbook: currentWorkbook(), periods:[...document.querySelectorAll("#periods input:checked")].map(i=>Number(i.value)), mode:$("timeSlicingToggle").checked ? "timeslice" : "full_hourly", hoursPerDay:currentHoursPerDay(), representativeDays:Number($("representativeDays").value), solver:$("solver").value, solveMethod:document.querySelector("input[name='solveMethod']:checked").value, threads:Number($("threads").value), clusteringApproach:$("clusteringApproach").value, boundaryRamping:$("boundaryRamping").checked, hourlyReports:$("hourlyReports").checked, showViolations:$("showViolations").checked, multiRegion:$("multiRegionToggle").checked, landUse:$("landUseToggle").checked, outputMode:$("outputMode").value, outputName:$("outputName").value, constraintGroup:$("constraintGroup").value }; }
 function startPolling() { if (state.pollTimer) clearInterval(state.pollTimer); state.pollTimer=setInterval(pollJob,800); pollJob(); }
 async function pollJob() {
   if(!state.currentJobId) return;
@@ -606,7 +1106,7 @@ async function pollJob() {
       $("runTitle").textContent="Run stopped";
       setRunHint("The run was stopped before results were saved.", "warning");
     }
-  } catch(error) { $("jobStatus").textContent=error.message; }
+  } catch(error) { const el = $("jobStatus"); el.textContent=error.message; explainStatusMessage(el, error.message, "error"); }
 }
 function renderJob(job) {
   const status = job && job.status ? job.status : "Idle";
@@ -646,6 +1146,7 @@ function setRunHint(text, kind) {
   if (kind === "error") el.classList.add("error-text");
   else if (kind === "warning") el.classList.add("warning-text");
   else if (kind === "success") el.classList.add("success-text");
+  explainStatusMessage(el, text, kind);
 }
 function jobDescription(job) { if(!job||!job.status) return stageDescriptions.idle; if(job.status==="completed") return stageDescriptions.done; if(job.status==="failed") return stageDescriptions.failed; return stageDescriptions[job.stage] || "Julia is working on the current stage."; }
 function updateActivityLights(job) { const node=$("activityLights"), status=job&&job.status?job.status:"", current=job&&job.stage?job.stage:"", idx=stages.findIndex(([id])=>id===current), completed=status==="completed", failed=status==="failed"; node.classList.toggle("running", status==="queued"||status==="running"); node.classList.toggle("idle", !job||!status); node.innerHTML=stages.map(([id,label],i)=>{ let cls="future"; if(completed||i<idx) cls="done"; else if(failed&&id===current) cls="failed"; else if(i===idx&&(status==="queued"||status==="running")) cls="active"; return `<span class="${cls}" title="${escapeHtml(label)}"></span>`; }).join(""); }
@@ -749,8 +1250,7 @@ function autoCompareOrView() {
 }
 
 function selectedOutputIds() { return [...state.comparedOutputIds]; }
-function setOutputStatus(message) { $("outputStatus").textContent = message; }
-
+function setOutputStatus(message) { const el = $("outputStatus"); el.textContent = message; explainStatusMessage(el, message); }
 async function viewOutput(outputId) {
   state.selectedOutputId = outputId;
   setResultsLoadingState(`Loading ${outputId}…`);
@@ -820,9 +1320,10 @@ function renderComponentComparison(id, rows, runs) { const c=$(id); if(!c) retur
 function renderComparisonProfilePlaceholder() {
   const msg = "Open one output run to inspect dispatch and supply/demand.";
   ["powerCapacityChart","emissionsChart","supplyDemandChart","co2PriceChart"].forEach(id => setEmptyChart(id, msg));
+  setEmptyChart("regionalMapChart", msg, "map-chart");
   setEmptyChart("hourlyDispatchChart", msg, "profile-chart");
   setEmptyChart("flexChart", msg, "profile-chart");
-  ["powerCapacityTable","emissionsTable","supplyDemandTable","co2PriceTable","flexIndicatorsTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
+  ["powerCapacityTable","emissionsTable","supplyDemandTable","co2PriceTable","flexIndicatorsTable","regionalMapTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
   const legend = $("hourlyDispatchLegend"); if (legend) legend.textContent="";
   const flexLegend = $("flexLegend"); if (flexLegend) flexLegend.textContent="";
   const sdStatus = $("supplyDemandStatus"); if (sdStatus) sdStatus.textContent="";
@@ -875,30 +1376,33 @@ function renderResults(results) {
   // visible pause before each subsequent panel so the cascade reads as
   // top-to-bottom even when individual renders are fast.
   const stages = [
-    () => {
+    { page: "summary", run: () => {
       const costStacks = buildCostStacks(results.costByComponent || [], [], results.totalCosts || []);
       costStacks.length
         ? renderStackedBars("systemCostsChart", costStacks, "MEUR")
         : renderBars("systemCostsChart", results.totalCosts || [], r => `Period ${r.period}`, r => Number(r.value || 0), "MEUR");
       renderTable("systemCostsTable", results.totalCosts || []);
-    },
-    () => {
+    } },
+    { page: "summary", run: () => {
       renderStackedBars("timingChart", buildTimingStacks(results.timingSummary || []), "sec");
       renderTable("solverSettingsTable", results.solverSettings || [], 200);
-    },
-    () => { renderCO2Price(results.co2Price || []); },
-    () => { renderActivityPrices(results.activityPrices || []); },
-    () => { renderPowerCapacities(results.powerCapacities || { rows: [], periods: [] }); },
-    () => { renderHourlyDispatch(dispPayload); },
-    () => { renderFlexibility(flexPayload); },
-    () => { refreshEmissions(); },
-    () => { refreshSupplyDemand(); },
+    } },
+    { page: "map", run: () => { refreshRegionalMap(); } },
+    { page: "figures", run: () => { renderCO2Price(results.co2Price || []); } },
+    { page: "figures", run: () => { renderActivityPrices(results.activityPrices || []); } },
+    { page: "figures", run: () => { renderPowerCapacities(results.powerCapacities || { rows: [], periods: [] }); } },
+    { page: "figures", run: () => { renderHourlyDispatch(dispPayload); } },
+    { page: "figures", run: () => { renderFlexibility(flexPayload); } },
+    { page: "figures", run: () => { refreshEmissions(); } },
+    { page: "figures", run: () => { refreshSupplyDemand(); } },
   ];
 
   // Bump the render token so any stages still queued from a previous
   // selection short-circuit and never overwrite the current spinners.
   state.renderToken = (state.renderToken || 0) + 1;
   const myToken = state.renderToken;
+  state.resultStages = stages;
+  state.resultsRenderedPages = new Set();
   // Disconnect any IntersectionObserver from a previous render so it
   // cannot fire mid-cascade and force a panel to render out of order.
   if (state.lazyResultsObserver) { state.lazyResultsObserver.disconnect(); state.lazyResultsObserver = null; }
@@ -908,19 +1412,10 @@ function renderResults(results) {
   // call and the timer guarantee Plotly has finished its layout pass
   // before the next stage starts working.
   const cascadeMs = 250;
-  const runStage = (i) => {
-    if (myToken !== state.renderToken) return;
-    if (i >= stages.length) return;
-    try { stages[i](); } catch (err) { console.error(`Render stage ${i} failed`, err); }
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      if (myToken !== state.renderToken) return;
-      setTimeout(() => runStage(i + 1), cascadeMs);
-    }));
-  };
   // Render the first stage on the next animation frame so the
   // metric-grid + sidebar paint we already issued can hit the screen
   // before Plotly starts reflowing the layout.
-  requestAnimationFrame(() => runStage(0));
+  requestAnimationFrame(() => renderResultsSubpage(state.resultsSubpage || "summary", myToken, cascadeMs));
 }
 function setComparisonMode(active) {
   $("comparisonPanel").classList.toggle("hidden", !active);
@@ -929,8 +1424,49 @@ function setComparisonMode(active) {
   // meaningless because their data refers to one run; hide them so the
   // page only shows comparison content.
   document.querySelectorAll(".results-main .single-only").forEach(el => el.classList.toggle("hidden", active));
+  applyResultsSubpage();
 }
 function clearComparisonPanels() { setComparisonMode(false); $("compareStatus").textContent="Select outputs in the sidebar."; $("compareTable").innerHTML=""; $("compareCostTable").innerHTML=""; }
+function switchResultsSubpage(page) {
+  state.resultsSubpage = ["summary", "map", "figures"].includes(page) ? page : "summary";
+  applyResultsSubpage();
+  renderResultsSubpage(state.resultsSubpage);
+  if (state.resultsSubpage === "map") {
+    requestAnimationFrame(() => {
+      const map = $("regionalMapChart")?.__leafletMap;
+      if (map) map.invalidateSize();
+    });
+  }
+}
+function applyResultsSubpage() {
+  const page = state.resultsSubpage || "summary";
+  document.querySelectorAll(".results-subpage-button").forEach(btn => {
+    const active = (btn.dataset.resultsSubpage || "summary") === page;
+    btn.classList.toggle("active", active);
+    btn.setAttribute("aria-selected", String(active));
+  });
+  document.querySelectorAll(".results-main [data-results-page]").forEach(el => {
+    el.classList.toggle("results-page-hidden", (el.dataset.resultsPage || "summary") !== page);
+  });
+}
+function renderResultsSubpage(page, token = state.renderToken, cascadeMs = 250) {
+  if (!state.resultStages || !state.resultStages.length) return;
+  if (!state.resultsRenderedPages) state.resultsRenderedPages = new Set();
+  if (state.resultsRenderedPages.has(page)) return;
+  const stages = state.resultStages.filter(stage => stage.page === page);
+  if (!stages.length) return;
+  state.resultsRenderedPages.add(page);
+  const runStage = i => {
+    if (token !== state.renderToken) return;
+    if (i >= stages.length) return;
+    try { stages[i].run(); } catch (err) { console.error(`Render ${page} stage ${i} failed`, err); }
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (token !== state.renderToken) return;
+      setTimeout(() => runStage(i + 1), cascadeMs);
+    }));
+  };
+  runStage(0);
+}
 function setEmptyChart(id, message, className="bar-chart") { const c=$(id); if (!c) return; if (window.Plotly && c._fullLayout) Plotly.purge(c); c.className=`${className} empty-state`; c.textContent=message; }
 function setLoadingChart(id, message="Loading…", className="bar-chart") {
   const c = $(id); if (!c) return;
@@ -949,19 +1485,23 @@ function setResultsLoadingState(message="Loading results…") {
   setLoadingChart("systemCostsChart", message);
   setLoadingChart("co2PriceChart", message);
   setLoadingChart("powerCapacityChart", message);
+  setLoadingChart("regionalMapChart", message, "map-chart");
   setLoadingChart("hourlyDispatchChart", message, "profile-chart");
   setLoadingChart("flexChart", message, "profile-chart");
   setLoadingChart("emissionsChart", message);
   setLoadingChart("supplyDemandChart", message);
-  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => setLoadingTable(id));
+  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","regionalMapTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => setLoadingTable(id));
 }
 function setResultsErrorState(message) {
   const m = message || "Could not load results.";
-  $("resultsOutput").textContent = m;
+  const output = $("resultsOutput");
+  output.textContent = m;
+  explainStatusMessage(output, m, "error");
   ["timingChart","systemCostsChart","co2PriceChart","powerCapacityChart","emissionsChart","supplyDemandChart"].forEach(id => setEmptyChart(id, m));
+  setEmptyChart("regionalMapChart", m, "map-chart");
   setEmptyChart("hourlyDispatchChart", m, "profile-chart");
   setEmptyChart("flexChart", m, "profile-chart");
-  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
+  ["timingTable","solverSettingsTable","systemCostsTable","co2PriceTable","powerCapacityTable","regionalMapTable","emissionsTable","supplyDemandTable","activityPricesTable","flexIndicatorsTable"].forEach(id => { const c=$(id); if (c) c.innerHTML=""; });
 }
 function first(rows) { return rows && rows.length ? rows[0] : {}; }
 function renderMetrics(results) { const t=first(results.timingSummary), s=first(results.runStatistics), c=first(results.totalCosts); const solver = t.solver ? `${t.solver}${t.solverVersion ? ` (${t.solverVersion})` : ""}` : ""; const items=[["Objective",fmt(c.value||s.objective||t.objective)],["Status",s.termination_status||t.termination_status||""],["Solver",solver],["Total seconds",fmt(t.total_sec||s.total_seconds)],["Solve seconds",fmt(t.solve_sec||s.solve_seconds)],["Rows / columns",`${fmt(t.n_rows||s.n_rows)} / ${fmt(t.n_cols||s.n_cols)}`]]; $("metricGrid").innerHTML=items.map(([k,v])=>`<div class="metric"><span>${escapeHtml(k)}</span><strong>${escapeHtml(v)}</strong></div>`).join(""); }
@@ -1055,6 +1595,533 @@ function renderPowerCapacities(payload) {
   if (!stacks.length) { setEmptyChart("powerCapacityChart", "No power-system technologies found."); const t=$("powerCapacityTable"); if (t) t.innerHTML=""; return; }
   renderStackedBars("powerCapacityChart", stacks, "");
   renderTable("powerCapacityTable", rows, 200);
+}
+function regionalCommodityColor(commodity) {
+  const key = String(commodity || "all");
+  if (key === "electricity") return "#1d5f8f";
+  if (key === "natural_gas") return "#5a9f3f";
+  if (key === "hydrogen") return "#00a3c7";
+  if (key === "ccus") return "#ba3a2f";
+  return "#b77800";
+}
+function populateRegionalMapControls(payload) {
+  const metric = $("regionalMapMetric"), commodity = $("regionalMapCommodity"), period = $("regionalMapPeriod"), play = $("regionalMapPlay");
+  if (metric) { metric.value = payload.metric || state.regionalMapMetric || "use"; state.regionalMapMetric = metric.value; }
+  if (commodity) {
+    const opts = payload.commodityOptions || [{ id:"all", label:"All" }];
+    const want = state.regionalMapCommodity || payload.commodity || "all";
+    commodity.innerHTML = opts.map(o => `<option value="${escapeHtml(o.id)}">${escapeHtml(o.label || o.id)}</option>`).join("");
+    commodity.value = opts.some(o => o.id === want) ? want : (payload.commodity || "all");
+    state.regionalMapCommodity = commodity.value || "all";
+  }
+  if (period) {
+    const periods = (payload.periods || []).map(Number).filter(Number.isFinite);
+    period.innerHTML = periods.map(p => `<option value="${p}">${p}</option>`).join("");
+    const want = String(payload.selectedPeriod || state.regionalMapPeriod || periods[periods.length - 1] || "");
+    if (want && periods.map(String).includes(want)) period.value = want;
+    state.regionalMapPeriod = Number(period.value) || 0;
+  }
+  const mapFile = $("regionalMapFile");
+  if (mapFile) {
+    const assets = payload.assets || {};
+    const opts = assets.options || [];
+    const placeholder = assets.file ? "" : `<option value="">${escapeHtml(opts.length ? "Select a map…" : "No map GeoPackage")}</option>`;
+    mapFile.innerHTML = placeholder + opts.map(o => `<option value="${escapeHtml(o.file)}" title="${escapeHtml(o.label || o.file)}">${escapeHtml(`${o.nodes} nodes · ${o.file}`)}</option>`).join("");
+    mapFile.value = assets.file || "";
+    mapFile.disabled = !opts.length;
+  }
+  regionalToggleAnimationButton(payload);
+}
+async function refreshRegionalMap() {
+  const panel = $("regionalTradePanel");
+  if (!state.selectedOutputId || state.regionalMapLoading) return;
+  state.regionalMapLoading = true;
+  if (panel) panel.classList.remove("hidden");
+  setLoadingChart("regionalMapChart", "Loading regional trade map…", "map-chart");
+  setLoadingTable("regionalMapTable");
+  const status = $("regionalMapStatus"); if (status) status.textContent = "Loading…";
+  try {
+    const body = {
+      outputDir: state.selectedOutputId,
+      metric: $("regionalMapMetric")?.value || state.regionalMapMetric || "use",
+      commodity: $("regionalMapCommodity")?.value || state.regionalMapCommodity || "all",
+      period: Number($("regionalMapPeriod")?.value || state.regionalMapPeriod || 0) || undefined,
+      mapFile: state.regionalMapFile || "",
+    };
+    const payload = await fetchJson("/api/outputs/regionalMap", { method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(body) });
+    state.regionalMapPayload = payload;
+    state.regionalMapAnimationPaused = false;
+    populateRegionalMapControls(payload);
+    await renderRegionalMap(payload);
+  } catch (e) {
+    setEmptyChart("regionalMapChart", `Could not load regional map: ${e.message || e}`, "map-chart");
+    const table = $("regionalMapTable"); if (table) table.innerHTML = "";
+    if (status) status.textContent = "Error";
+  } finally {
+    state.regionalMapLoading = false;
+  }
+}
+async function regionalMapAsset(url) {
+  if (!url) return null;
+  if (state.regionalMapGeometry.has(url)) return state.regionalMapGeometry.get(url);
+  const payload = await fetchJson(url);
+  state.regionalMapGeometry.set(url, payload);
+  return payload;
+}
+const REGIONAL_GAS_COMMODITIES = new Set(["natural_gas", "hydrogen", "ccus"]);
+function regionalLinkNetwork(link) {
+  return REGIONAL_GAS_COMMODITIES.has(String(link?.commodity || "")) ? "gas" : "power";
+}
+function regionalCentroids(geojson, network = "power") {
+  const out = new Map();
+  (geojson?.features || []).forEach(feature => {
+    const id = Number(feature?.properties?.cluster_id);
+    const coords = feature?.geometry?.coordinates || [];
+    if (Number.isFinite(id) && coords.length >= 2) out.set(`CL${id}`, { lon:Number(coords[0]), lat:Number(coords[1]), label:regionalClusterLabel(`CL${id}`), kind:"cluster", network });
+  });
+  return out;
+}
+function regionalClusterLabel(id) {
+  const labels = {
+    CL1: "Noordzeekanaalgebied",
+    CL2: "Noord-Nederland",
+    CL3: "Chemelot",
+    CL4: "Zeeland/West Brabant",
+    CL5: "Rotterdam-Moerdijk",
+  };
+  return labels[String(id)] || String(id);
+}
+function regionalEndpointId(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return `CL${value}`;
+  const text = String(value ?? "").trim();
+  if (/^\d+$/.test(text)) return `CL${text}`;
+  const cl = text.match(/\bCL\s*(\d+)\b/i); if (cl) return `CL${cl[1]}`;
+  const ns = text.match(/\bNS\s*(\d+)\b/i); if (ns) return `NS${ns[1]}`;
+  const country = regionalCountryEndpointId(text); if (country) return country;
+  if (/\bEU\b/i.test(text)) return "DE";
+  return text;
+}
+function regionalCountryEndpointId(value) {
+  const text = String(value ?? "").trim();
+  if (/\b(?:DK|Denmark|Danish)\b/i.test(text)) return "DK";
+  if (/\b(?:UK|GB|United Kingdom|Great Britain|Britain)\b/i.test(text)) return "UK";
+  if (/\b(?:NO|Norway|Norwey|Norwegian)\b/i.test(text)) return "NO";
+  if (/\b(?:DE|Germany|German)\b/i.test(text)) return "DE";
+  if (/\b(?:BE|Belgium|Belgian)\b/i.test(text)) return "BE";
+  return "";
+}
+function regionalExternalPoints(geojson) {
+  const out = new Map();
+  (geojson?.features || []).forEach(feature => {
+    const coords = feature?.geometry?.coordinates || [];
+    if (coords.length < 2) return;
+    const rawId = String(feature?.properties?.id ?? "").trim();
+    const name = String(feature?.properties?.Name || feature?.properties?.name || rawId).trim();
+    const id = regionalCountryEndpointId(rawId) || regionalCountryEndpointId(name) || (/^NS\d+$/i.test(rawId) ? regionalEndpointId(rawId) : regionalEndpointId(name));
+    if (id) out.set(id, { lon:Number(coords[0]), lat:Number(coords[1]), label:id, name, kind:id.startsWith("NS") ? "offshore" : "external" });
+  });
+  return out;
+}
+function regionalMapNetworks(geometry, hubs, commodity = "all") {
+  const external = regionalExternalPoints(hubs);
+  const hasGasLayer = !!geometry?.gasCentroids?.features?.length;
+  const power = regionalCentroids(geometry?.powerCentroids, "power");
+  const gas = regionalCentroids(hasGasLayer ? geometry.gasCentroids : geometry?.powerCentroids, "gas");
+  const key = String(commodity || "all");
+  const showPower = key === "all" || !REGIONAL_GAS_COMMODITIES.has(key);
+  const showGas = hasGasLayer && (key === "all" || REGIONAL_GAS_COMMODITIES.has(key));
+  const markers = [];
+  if (showPower) power.forEach((point, id) => markers.push([id, { ...point, showLabel: true }]));
+  if (showGas) gas.forEach((point, id) => markers.push([id, { ...point, showLabel: !showPower }]));
+  external.forEach((point, id) => markers.push([id, { ...point, showLabel: true }]));
+  return { power: new Map([...power, ...external]), gas: new Map([...gas, ...external]), markers, hasGasLayer };
+}
+function regionalClusterColor(id) {
+  const colors = ["#d58b55", "#d9b75c", "#9bc58c", "#6eb4b8", "#6da5c8", "#d67770", "#8fc2a1", "#cfa35d"];
+  return colors[Math.abs(Number(id) || 0) % colors.length];
+}
+function regionalNodeKindClass(point) {
+  if (point.kind === "cluster") return point.network === "gas" ? "regional-node-gas" : "regional-node-power";
+  return point.kind === "offshore" ? "regional-node-offshore" : "regional-node-country";
+}
+function regionalNodeTitle(id, point) {
+  const base = point.label || point.name || id;
+  if (point.kind !== "cluster") return base;
+  return `${base} · ${point.network === "gas" ? "gas node (natural gas, hydrogen, CCS)" : "power node (electricity)"}`;
+}
+function regionalNodeMarkerHtml(id, point) {
+  const label = point.showLabel === false ? "" : `<span class="regional-node-text">${escapeHtml(point.label || id)}</span>`;
+  return `<span class="regional-node-marker ${regionalNodeKindClass(point)}"><span class="regional-node-dot"></span>${label}</span>`;
+}
+function regionalMapLegendHtml(payload, links, networks) {
+  const commodities = [...new Map((links || []).filter(link => link.commodity || link.commodityLabel).map(link => [link.commodity || link.commodityLabel, link.commodityLabel || link.commodity])).entries()].slice(0, 6);
+  const commodityRows = commodities.map(([id, label]) => `<span class="regional-legend-row"><span class="regional-legend-line" style="background:${regionalCommodityColor(id)}"></span>${escapeHtml(label)}</span>`).join("");
+  const flowLabel = payload?.metric === "stock" ? "Capacity links" : "Net flow links";
+  const pulseRow = payload?.metric === "use" ? `<span class="regional-legend-row"><span class="regional-legend-pulse"></span>Moving flow pulse</span>` : "";
+  return `<div class="regional-map-legend" aria-label="Regional map legend">
+    <strong>Map legend</strong>
+    <span class="regional-legend-row"><span class="regional-legend-area"></span>Dutch municipality cluster</span>
+    <span class="regional-legend-row"><span class="regional-legend-selected"></span>Selected municipality</span>
+    <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-power"></span>Power node (electricity)</span>
+    ${networks?.hasGasLayer ? `<span class="regional-legend-row"><span class="regional-legend-dot regional-legend-gas"></span>Gas node (natural gas, H₂, CCS)</span>` : ""}
+    <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-offshore"></span>North Sea hub</span>
+    <span class="regional-legend-row"><span class="regional-legend-dot regional-legend-country"></span>Neighbouring country node</span>
+    <span class="regional-legend-row"><span class="regional-legend-flow"></span>${escapeHtml(flowLabel)}</span>
+    ${pulseRow}
+    ${commodityRows ? `<div class="regional-legend-group"><em>Commodities</em>${commodityRows}</div>` : ""}
+  </div>`;
+}
+function regionalRenderMapLegend(chart, payload, links, networks) {
+  chart?.querySelector(".regional-map-legend")?.remove();
+  if (!chart) return;
+  chart.insertAdjacentHTML("beforeend", regionalMapLegendHtml(payload, links, networks));
+}
+function regionalUnitLabel(item) {
+  const unit = item?.unit || {};
+  const raw = String(unit.label || unit.unit || "").trim();
+  const cleaned = raw.replace(/\s*\((?:UoA|UoC)\)\s*$/i, "").trim();
+  return /^(?:UoA|UoC)$/i.test(cleaned) ? "" : cleaned;
+}
+function regionalFlowText(link, fallbackUnit = "") {
+  const unit = regionalUnitLabel(link) || fallbackUnit;
+  return `${escapeHtml(link.sourceLabel || regionalClusterLabel(regionalEndpointId(link.source)))} → ${escapeHtml(link.targetLabel || regionalClusterLabel(regionalEndpointId(link.target)))}<br>${escapeHtml(link.commodityLabel || link.commodity || "")}: ${fmt(link.value)}${unit ? ` ${escapeHtml(unit)}` : ""}`;
+}
+function regionalLineWidth(link, maxValue) {
+  const ratio = Math.min(1, Math.max(0, Math.abs(Number(link.value || 0)) / Math.max(1e-9, maxValue)));
+  return 1.6 + Math.pow(ratio, 0.55) * 11.4;
+}
+function regionalFlowPulseAttrs(path) {
+  if (!path) return;
+  path.setAttribute("pathLength", "100");
+  const delay = "0s", duration = "3.0s";
+  path.setAttribute("stroke-dasharray", "18 82");
+  path.setAttribute("stroke-dashoffset", "100");
+  path.style.strokeDasharray = "18 82";
+  path.style.strokeDashoffset = "100";
+  path.style.animation = `regional-flow-travel ${duration} linear infinite`;
+  path.style.animationDelay = delay;
+  path.style.animationPlayState = state.regionalMapAnimationPaused ? "paused" : "running";
+  path.style.setProperty("--regional-flow-delay", delay);
+  path.style.setProperty("--regional-flow-duration", duration);
+}
+function regionalSetPulsePlayState(chart) {
+  chart?.querySelectorAll(".regional-flow-pulse.animated").forEach(path => {
+    path.style.animationPlayState = state.regionalMapAnimationPaused ? "paused" : "running";
+  });
+}
+function regionalPulseWidth(width) {
+  return Math.max(1.6, Math.min(6.2, Number(width || 0) * 0.72));
+}
+function regionalPreparedLinks(payload, networks) {
+  return (payload.links || [])
+    .map(link => {
+      const network = regionalLinkNetwork(link), points = networks[network];
+      const src = points?.get(regionalEndpointId(link.source)), dst = points?.get(regionalEndpointId(link.target));
+      return src && dst ? { ...link, network, _src: src, _dst: dst } : null;
+    })
+    .filter(Boolean)
+    .slice(0, 80);
+}
+function regionalTeardownMap(chart) {
+  if (chart?.__leafletMap) {
+    chart.__leafletMap.remove();
+    chart.__leafletMap = null;
+  }
+  if (window.Plotly && chart?._fullLayout) Plotly.purge(chart);
+}
+function regionalToggleAnimationButton(payload) {
+  const play = $("regionalMapPlay");
+  if (!play) return;
+  const canAnimate = payload && payload.metric === "use" && (payload.links || []).length;
+  play.disabled = !canAnimate;
+  play.textContent = !canAnimate ? "Animate" : (state.regionalMapAnimationPaused ? "Play" : "Pause");
+}
+function regionalLeafletArrowDefs(chart, colors) {
+  const svg = chart.querySelector(".leaflet-overlay-pane svg");
+  if (!svg) return;
+  let defs = svg.querySelector("defs.regional-flow-defs");
+  if (!defs) {
+    defs = document.createElementNS("http://www.w3.org/2000/svg", "defs");
+    defs.classList.add("regional-flow-defs");
+    svg.insertBefore(defs, svg.firstChild);
+  }
+  colors.forEach(color => {
+    const id = `regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")}`;
+    if (defs.querySelector(`#${id}`)) return;
+    const marker = document.createElementNS("http://www.w3.org/2000/svg", "marker");
+    marker.setAttribute("id", id);
+    marker.setAttribute("viewBox", "0 -5 10 10");
+    marker.setAttribute("refX", "10");
+    marker.setAttribute("refY", "0");
+    marker.setAttribute("markerWidth", "12");
+    marker.setAttribute("markerHeight", "12");
+    marker.setAttribute("orient", "auto");
+    marker.setAttribute("markerUnits", "userSpaceOnUse");
+    const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    path.setAttribute("d", "M0,-5L10,0L0,5Z");
+    path.setAttribute("fill", color);
+    marker.appendChild(path);
+    defs.appendChild(marker);
+  });
+}
+async function renderRegionalMap(payload) {
+  const chart = $("regionalMapChart"), table = $("regionalMapTable"), status = $("regionalMapStatus");
+  if (!chart) return;
+  if (!payload) {
+    setEmptyChart("regionalMapChart", "No regional trade data available.", "map-chart");
+    if (table) table.innerHTML = "";
+    if (status) status.textContent = "";
+    return;
+  }
+  const assets = payload.assets || {};
+  if (!assets.available) {
+    regionalTeardownMap(chart);
+    setEmptyChart("regionalMapChart", assets.message || "Map geometry is unavailable.", "map-chart");
+    if (table) table.innerHTML = "";
+    if (status) status.textContent = "Missing map";
+    return;
+  }
+  const geometry = await regionalMapAsset(assets.geometry);
+  const hubs = geometry?.hubs?.features?.length ? geometry.hubs : (assets.northSeaHubs ? await regionalMapAsset(assets.northSeaHubs) : null);
+  const clusters = geometry?.clusters;
+  const networks = regionalMapNetworks(geometry, hubs, payload.commodity);
+  const links = regionalPreparedLinks(payload, networks);
+  if (!links.length && !networks.markers.length) {
+    setEmptyChart("regionalMapChart", "No regional nodes match the selected filters.", "map-chart");
+    if (table) table.innerHTML = "";
+    if (status) status.textContent = "0 links";
+    return;
+  }
+
+  regionalTeardownMap(chart);
+  if (window.L) renderRegionalMapLeaflet(chart, clusters, networks, links, payload);
+  else renderRegionalMapSvg(chart, clusters, networks, links, payload);
+  regionalRenderMapLegend(chart, payload, links, networks);
+  const unit = regionalUnitLabel(payload);
+  if (table) {
+    if (links.length) renderTable("regionalMapTable", links.map(link => ({ source:link.sourceLabel, target:link.targetLabel, commodity:link.commodityLabel, network:link.network, value:link.value, unit:regionalUnitLabel(link) || unit, metric:link.metric, forwardValue:link.forwardValue, reverseValue:link.reverseValue })), 200, { valueShading: true });
+    else table.innerHTML = `<div class="empty-state">No regional trade links are readable yet.</div>`;
+  }
+  if (status) status.textContent = links.length
+    ? `${links.length} link(s) · ${payload.metric === "stock" ? "capacity" : "net flow"}${unit ? ` · ${unit}` : ""}`
+    : `${networks.markers.length} node(s) · waiting for readable result tables`;
+  regionalToggleAnimationButton(payload);
+}
+function renderRegionalMapLeaflet(chart, clusters, networks, links, payload) {
+  chart.className = `map-chart ${payload.metric === "use" && !state.regionalMapAnimationPaused ? "" : "regional-flow-paused"}`;
+  chart.innerHTML = `<div class="regional-leaflet-map" aria-label="Regional trade flow map"></div>`;
+  const mapEl = chart.querySelector(".regional-leaflet-map");
+  const map = L.map(mapEl, { zoomControl: true, attributionControl: false, preferCanvas: false, scrollWheelZoom: true });
+  chart.__leafletMap = map;
+  const baseClusterStyle = feature => ({ color: "rgba(255,255,255,0.85)", weight: 0.6, fillColor: regionalClusterColor(feature?.properties?.cluster_id), fillOpacity: 0.72 });
+  const municipalityLabel = feature => `${escapeHtml(feature?.properties?.statnaam || "Municipality")}<br>Cluster ${escapeHtml(regionalClusterLabel(`CL${feature?.properties?.cluster_id || ""}`))}`;
+  let selectedClusterLayer = null;
+  const selectCluster = layer => {
+    if (selectedClusterLayer === layer) {
+      layer.setStyle(baseClusterStyle(layer.feature));
+      if (layer.bringToBack) layer.bringToBack();
+      layer.closePopup();
+      layer.unbindPopup();
+      selectedClusterLayer = null;
+      map.closePopup();
+      return;
+    }
+    if (selectedClusterLayer && selectedClusterLayer !== layer) {
+      selectedClusterLayer.setStyle(baseClusterStyle(selectedClusterLayer.feature));
+      if (selectedClusterLayer.bringToBack) selectedClusterLayer.bringToBack();
+      selectedClusterLayer.closePopup();
+      selectedClusterLayer.unbindPopup();
+    }
+    selectedClusterLayer = layer;
+    layer.setStyle({ color: "#123443", weight: 2.4, fillColor: regionalClusterColor(layer.feature?.properties?.cluster_id), fillOpacity: 0.9 });
+    layer.bringToFront();
+    layer.bindPopup(municipalityLabel(layer.feature), { closeButton: true, autoPan: false }).openPopup();
+  };
+  const clusterLayer = L.geoJSON(clusters, {
+    style: baseClusterStyle,
+    onEachFeature: (feature, layer) => {
+      layer.on("click", () => selectCluster(layer));
+    }
+  }).addTo(map);
+  const bounds = clusterLayer.getBounds();
+  networks.markers.forEach(([, point]) => bounds.extend([point.lat, point.lon]));
+  if (bounds.isValid()) map.fitBounds(bounds.pad(0.06));
+  const maxValue = Math.max(1e-9, ...links.map(link => Math.abs(Number(link.value || 0))));
+  const unit = regionalUnitLabel(payload);
+  const arrowColors = new Set();
+  let selectedFlow = null;
+  const clearSelectedFlow = () => {
+    if (!selectedFlow) return;
+    selectedFlow.line.setStyle({ weight: selectedFlow.width, opacity: selectedFlow.opacity });
+    selectedFlow.line._path?.classList.remove("selected");
+    if (selectedFlow.pulse) {
+      selectedFlow.pulse.setStyle({ weight: regionalPulseWidth(selectedFlow.width), opacity: 0.98 });
+      selectedFlow.pulse._path?.classList.remove("selected");
+    }
+    selectedFlow = null;
+  };
+  const selectFlow = (line, pulse, width, opacity, event) => {
+    if (event) L.DomEvent.stopPropagation(event);
+    if (selectedFlow?.line === line) return;
+    clearSelectedFlow();
+    selectedFlow = { line, pulse, width, opacity };
+    line.setStyle({ weight: Math.min(18, width + 4), opacity: 1 });
+    line._path?.classList.add("selected");
+    if (pulse) {
+      pulse.setStyle({ weight: regionalPulseWidth(width + 4), opacity: 1 });
+      pulse._path?.classList.add("selected");
+      pulse.bringToFront();
+    }
+    line.bringToFront();
+  };
+  map.on("click", clearSelectedFlow);
+  clusterLayer.on("click", clearSelectedFlow);
+  links.forEach(link => {
+    const src = link._src, dst = link._dst;
+    const color = regionalCommodityColor(link.commodity);
+    const width = regionalLineWidth(link, maxValue);
+    const opacity = payload.metric === "stock" ? 0.62 : 0.9;
+    const line = L.polyline([[src.lat, src.lon], [dst.lat, dst.lon]], {
+      color, weight: width, opacity,
+      className: `regional-flow-line regional-flow-base ${payload.metric === "use" ? "animated" : ""}`
+    }).addTo(map);
+    line.bindTooltip(regionalFlowText(link, unit), { sticky: true });
+    if (payload.metric === "use") arrowColors.add(color);
+    const pulse = payload.metric === "use" ? L.polyline([[src.lat, src.lon], [dst.lat, dst.lon]], {
+      color, weight: regionalPulseWidth(width), opacity: 0.98, interactive: false,
+      className: "regional-flow-pulse animated"
+    }).addTo(map) : null;
+    requestAnimationFrame(() => {
+      if (payload.metric === "use" && line._path) line._path.setAttribute("marker-end", `url(#regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")})`);
+      if (pulse?._path) regionalFlowPulseAttrs(pulse._path);
+    });
+    line.on("click", event => selectFlow(line, pulse, width, opacity, event));
+  });
+  networks.markers.forEach(([id, point]) => {
+    L.marker([point.lat, point.lon], { interactive: true, keyboard: false, icon: L.divIcon({ className: `regional-node-icon ${point.kind === "cluster" ? "regional-cluster-label" : "regional-external-label"}`, html: regionalNodeMarkerHtml(id, point), iconSize: [1, 1], iconAnchor: [0, 0] }) })
+      .bindTooltip(escapeHtml(regionalNodeTitle(id, point)), { sticky: true, direction: "top" })
+      .addTo(map);
+  });
+  requestAnimationFrame(() => regionalLeafletArrowDefs(chart, arrowColors));
+  setTimeout(() => map.invalidateSize(), 0);
+}
+function regionalGeometryBounds(features) {
+  const bounds = { minLon: Infinity, maxLon: -Infinity, minLat: Infinity, maxLat: -Infinity };
+  const visit = coords => {
+    if (!Array.isArray(coords)) return;
+    if (typeof coords[0] === "number" && typeof coords[1] === "number") {
+      bounds.minLon = Math.min(bounds.minLon, coords[0]); bounds.maxLon = Math.max(bounds.maxLon, coords[0]);
+      bounds.minLat = Math.min(bounds.minLat, coords[1]); bounds.maxLat = Math.max(bounds.maxLat, coords[1]);
+    } else coords.forEach(visit);
+  };
+  (features || []).forEach(feature => visit(feature?.geometry?.coordinates));
+  return bounds;
+}
+function regionalSvgProject(bounds, width, height) {
+  const pad = 30, lonSpan = Math.max(1e-9, bounds.maxLon - bounds.minLon), latSpan = Math.max(1e-9, bounds.maxLat - bounds.minLat);
+  return ([lon, lat]) => [pad + (lon - bounds.minLon) / lonSpan * (width - pad * 2), height - pad - (lat - bounds.minLat) / latSpan * (height - pad * 2)];
+}
+function regionalExpandBoundsWithPoints(bounds, points) {
+  for (const point of points || []) {
+    if (!Number.isFinite(point?.lon) || !Number.isFinite(point?.lat)) continue;
+    bounds.minLon = Math.min(bounds.minLon, point.lon);
+    bounds.maxLon = Math.max(bounds.maxLon, point.lon);
+    bounds.minLat = Math.min(bounds.minLat, point.lat);
+    bounds.maxLat = Math.max(bounds.maxLat, point.lat);
+  }
+  return bounds;
+}
+function regionalSvgPath(geometry, project) {
+  const ringPath = ring => ring.map((coord, i) => `${i ? "L" : "M"}${project(coord).map(v => v.toFixed(1)).join(",")}`).join("") + "Z";
+  if (!geometry) return "";
+  if (geometry.type === "Polygon") return (geometry.coordinates || []).map(ringPath).join("");
+  if (geometry.type === "MultiPolygon") return (geometry.coordinates || []).flatMap(poly => poly.map(ringPath)).join("");
+  return "";
+}
+function renderRegionalMapSvg(chart, clusters, networks, links, payload) {
+  chart.className = `map-chart ${payload.metric === "use" && !state.regionalMapAnimationPaused ? "" : "regional-flow-paused"}`;
+  const width = 980, height = 720, features = clusters?.features || [];
+  const bounds = regionalExpandBoundsWithPoints(regionalGeometryBounds(features), networks.markers.map(([, point]) => point)), project = regionalSvgProject(bounds, width, height);
+  const maxValue = Math.max(1e-9, ...links.map(link => Math.abs(Number(link.value || 0))));
+  const unit = regionalUnitLabel(payload);
+  const arrowDefs = [...new Set(links.map(link => regionalCommodityColor(link.commodity)))].map(color => `<marker id="regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")}" viewBox="0 -5 10 10" refX="10" refY="0" markerWidth="12" markerHeight="12" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,-5L10,0L0,5Z" fill="${color}"></path></marker>`).join("");
+  const clusterPaths = features.map(feature => `<path class="regional-cluster-path" data-cluster-id="${escapeHtml(feature?.properties?.cluster_id || "")}" data-name="${escapeHtml(feature?.properties?.statnaam || "Municipality")}" data-cluster-label="${escapeHtml(regionalClusterLabel(`CL${feature?.properties?.cluster_id || ""}`))}" d="${regionalSvgPath(feature.geometry, project)}" fill="${regionalClusterColor(feature?.properties?.cluster_id)}" fill-opacity="0.72" stroke="#fff" stroke-opacity="0.85" stroke-width="0.6"></path>`).join("");
+  const flowPaths = links.map((link, index) => {
+    const src = link._src, dst = link._dst;
+    const [x1, y1] = project([src.lon, src.lat]), [x2, y2] = project([dst.lon, dst.lat]);
+    const color = regionalCommodityColor(link.commodity), width = regionalLineWidth(link, maxValue), animated = payload.metric === "use" ? "animated" : "";
+    const arrow = payload.metric === "use" ? ` marker-end="url(#regional-arrow-${color.replace(/[^a-zA-Z0-9]/g, "")})"` : "";
+    const path = `M${x1.toFixed(1)},${y1.toFixed(1)}L${x2.toFixed(1)},${y2.toFixed(1)}`;
+    const flowIndex = `flow-${index}`;
+    const base = `<path class="regional-flow-line regional-flow-base ${animated}" data-flow-id="${flowIndex}" data-base-width="${width.toFixed(1)}" d="${path}" stroke="${color}" stroke-width="${width.toFixed(1)}" stroke-opacity="${payload.metric === "stock" ? "0.62" : "0.9"}" fill="none"${arrow}><title>${regionalFlowText(link, unit).replace(/<br>/g, " - ")}</title></path>`;
+    if (payload.metric !== "use") return base;
+    const delay = "0s", duration = "3.0s";
+    const playState = state.regionalMapAnimationPaused ? "paused" : "running";
+    const pulse = `<path class="regional-flow-pulse animated" data-flow-id="${flowIndex}" d="${path}" pathLength="100" stroke="${color}" stroke-width="${regionalPulseWidth(width).toFixed(1)}" stroke-opacity="0.98" stroke-dasharray="18 82" stroke-dashoffset="100" fill="none" style="stroke-dasharray:18 82;stroke-dashoffset:100;animation:regional-flow-travel ${duration} linear infinite;animation-delay:${delay};animation-play-state:${playState};--regional-flow-delay:${delay};--regional-flow-duration:${duration}"></path>`;
+    return base + pulse;
+  }).join("");
+  const labels = networks.markers.map(([id, point]) => {
+    const [x, y] = project([point.lon, point.lat]);
+    const cls = point.kind === "cluster" ? (point.network === "gas" ? "regional-svg-node-gas" : "regional-svg-node-power") : (point.kind === "offshore" ? "regional-svg-node-offshore" : "regional-svg-node-country");
+    const text = point.showLabel === false ? "" : `<text x="${(x + 7).toFixed(1)}" y="${y.toFixed(1)}" text-anchor="start" dominant-baseline="central">${escapeHtml(point.label || id)}</text>`;
+    const shape = point.network === "gas" && point.kind === "cluster"
+      ? `<rect x="${(x - 3.6).toFixed(1)}" y="${(y - 3.6).toFixed(1)}" width="7.2" height="7.2" rx="1.2"></rect>`
+      : `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="4.3"></circle>`;
+    return `<g class="regional-svg-node ${cls}"><title>${escapeHtml(regionalNodeTitle(id, point))}</title>${shape}${text}</g>`;
+  }).join("");
+  chart.innerHTML = `<svg class="regional-svg-map" viewBox="0 0 ${width} ${height}" role="img" aria-label="Regional trade flow map"><defs>${arrowDefs}</defs>${clusterPaths}${flowPaths}${labels}</svg>`;
+  const clearSelectedFlow = () => {
+    chart.querySelectorAll(".regional-flow-line.selected").forEach(path => {
+      path.classList.remove("selected");
+      const width = Number(path.dataset.baseWidth || path.getAttribute("stroke-width") || 2);
+      path.setAttribute("stroke-width", width.toFixed(1));
+    });
+    chart.querySelectorAll(".regional-flow-pulse.selected").forEach(path => {
+      path.classList.remove("selected");
+      const base = chart.querySelector(`.regional-flow-line[data-flow-id="${CSS.escape(path.dataset.flowId || "")}"]`);
+      const width = Number(base?.dataset.baseWidth || path.getAttribute("stroke-width") || 2);
+      path.setAttribute("stroke-width", regionalPulseWidth(width).toFixed(1));
+    });
+  };
+  chart.querySelector(".regional-svg-map")?.addEventListener("click", clearSelectedFlow);
+  chart.querySelectorAll(".regional-flow-line").forEach(path => path.addEventListener("click", event => {
+    event.stopPropagation();
+    if (path.classList.contains("selected")) return;
+    clearSelectedFlow();
+    const width = Number(path.dataset.baseWidth || path.getAttribute("stroke-width") || 2);
+    path.classList.add("selected");
+    path.setAttribute("stroke-width", Math.min(18, width + 4).toFixed(1));
+    const pulse = chart.querySelector(`.regional-flow-pulse[data-flow-id="${CSS.escape(path.dataset.flowId || "")}"]`);
+    if (pulse) {
+      pulse.classList.add("selected");
+      pulse.setAttribute("stroke-width", regionalPulseWidth(width + 4).toFixed(1));
+    }
+  }));
+  chart.querySelectorAll(".regional-cluster-path").forEach(path => path.addEventListener("click", () => {
+    clearSelectedFlow();
+    if (path.classList.contains("selected")) {
+      path.classList.remove("selected");
+      chart.querySelector(".regional-svg-selection-label")?.remove();
+      return;
+    }
+    chart.querySelectorAll(".regional-cluster-path.selected").forEach(el => el.classList.remove("selected"));
+    path.classList.add("selected");
+    let label = chart.querySelector(".regional-svg-selection-label");
+    if (!label) {
+      label = document.createElement("div");
+      label.className = "regional-svg-selection-label";
+      chart.appendChild(label);
+    }
+    label.innerHTML = `${escapeHtml(path.dataset.name || "Municipality")}<br><span>${escapeHtml(path.dataset.clusterLabel || "")}</span>`;
+  }));
+}
+function playRegionalMapAnimation() {
+  const chart = $("regionalMapChart"), payload = state.regionalMapPayload;
+  if (!chart || !payload || payload.metric !== "use" || !(payload.links || []).length) return;
+  state.regionalMapAnimationPaused = !state.regionalMapAnimationPaused;
+  chart.classList.toggle("regional-flow-paused", state.regionalMapAnimationPaused);
+  regionalSetPulsePlayState(chart);
+  regionalToggleAnimationButton(payload);
 }
 function populateDispatchPeriods(payload) {
   const sel = $("hourlyDispatchPeriod"); if (!sel) return;

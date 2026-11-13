@@ -118,6 +118,12 @@
     methods.forEach((m) => {
       const l = document.createElement("label");
       const safe = String(m.label || "").replace(/[<>&"]/g, (c) => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+      const help = window.IESASolverMethodHelp ? window.IESASolverMethodHelp(m) : null;
+      if (help) {
+        l.dataset.helpTitle = help.title;
+        l.dataset.help = help.short.join("\n");
+        l.dataset.helpMore = help.more;
+      }
       l.innerHTML = `<input type="radio" name="mgaSolveMethod" value="${m.id}"><span>${safe}</span>`;
       l.querySelector("input").checked = m.id === selected;
       w.appendChild(l);
@@ -151,7 +157,6 @@
     if ($("mgaHoursPerDayField")) $("mgaHoursPerDayField").classList.toggle("hidden", tsOn);
     if ($("mgaRepresentativeDaysField")) $("mgaRepresentativeDaysField").classList.toggle("hidden", !tsOn);
     if ($("mgaClusteringApproachField")) $("mgaClusteringApproachField").classList.toggle("hidden", !tsOn);
-    if ($("mgaExtremeDaysField")) $("mgaExtremeDaysField").classList.toggle("hidden", !tsOn);
   }
 
   function updateScenarioSummary() {
@@ -192,7 +197,7 @@
       wb.dataset.bound = "1";
       wb.addEventListener("change", updateScenarioSummary);
     }
-    ["mgaCostSlack", "mgaDirections", "mgaTolerance", "mgaOracleIterations", "mgaOracleBatch", "mgaExtremeDays", "mgaExtremePeriods", "mgaBoundaryRamping", "mgaConstraintGroup", "mgaClusteringApproach"].forEach((id) => {
+    ["mgaCostSlack", "mgaDirections", "mgaTolerance", "mgaOracleIterations", "mgaOracleBatch", "mgaBoundaryRamping", "mgaConstraintGroup", "mgaClusteringApproach"].forEach((id) => {
       const el = $(id);
       if (el && !el.dataset.bound) {
         el.dataset.bound = "1";
@@ -247,12 +252,14 @@
     const rows = state.campaigns || [];
     if (summary) {
       summary.textContent = error ? "Could not load campaigns." : `${rows.length} campaign${rows.length === 1 ? "" : "s"} available.`;
+      if (window.IESAExplainStatus) window.IESAExplainStatus(summary, error || summary.textContent, error ? "error" : "");
     }
     if (!list) return;
     list.innerHTML = "";
     if (error) {
       list.className = "scenario-campaign-list empty-state";
       list.textContent = String(error);
+      if (window.IESAExplainStatus) window.IESAExplainStatus(list, error, "error");
       return;
     }
     if (!rows.length) {
@@ -329,16 +336,14 @@
     const ts = ($("mgaTimeSlicingToggle") || {}).checked !== false;
     return {
       name: ($("mgaName") && $("mgaName").value) || "mga_campaign",
-      inputWorkbook: ($("mgaInputWorkbook") && $("mgaInputWorkbook").value) || "data/default_data.xlsx",
+      inputWorkbook: ($("mgaInputWorkbook") && $("mgaInputWorkbook").value) || "Input/default_data.xlsx",
       mode: ts ? "timeslice" : "full_hourly",
       periods: [...document.querySelectorAll("#mgaPeriods input:checked")].map((i) => Number(i.value)),
       representativeDays: Number(($("mgaRepresentativeDays") && $("mgaRepresentativeDays").value) || 15),
       hoursPerDay: currentHoursPerDay(),
-      clusteringApproach: ($("mgaClusteringApproach") && $("mgaClusteringApproach").value) || "kmeans_avg",
-      extremePeriods: !!($("mgaExtremePeriods") && $("mgaExtremePeriods").checked),
-      extremeDays: Number(($("mgaExtremeDays") && $("mgaExtremeDays").value) || 5),
+      clusteringApproach: ($("mgaClusteringApproach") && $("mgaClusteringApproach").value) || "k_medoids",
       boundaryRamping: !!($("mgaBoundaryRamping") && $("mgaBoundaryRamping").checked),
-      constraintGroup: ($("mgaConstraintGroup") && $("mgaConstraintGroup").value) || "Base + Bunkers + Scope3",
+      constraintGroup: ($("mgaConstraintGroup") && $("mgaConstraintGroup").value) || "Base + Bunkers + FeedStocks",
       solver: ($("mgaSolver") && $("mgaSolver").value) || "highs",
       solveMethod: currentSolveMethod(),
       costSlack: Number(($("mgaCostSlack") && $("mgaCostSlack").value) || 5),
@@ -699,7 +704,10 @@
     const completed = Number(campaign.completed || 0);
     const total = Number(campaign.total || directions.length || 0);
     if (subtitle) subtitle.textContent = campaign.name ? `${campaign.name} - ${stateText}` : "Hybrid ORACLE design previewed.";
-    if (detail) detail.textContent = campaign.stage || `Estimated max error ${formatMaybe(certificate.estimatedMaxError)} against target ${formatMaybe(certificate.targetTolerance)}.`;
+    if (detail) {
+      detail.textContent = campaign.stage || `Estimated max error ${formatMaybe(certificate.estimatedMaxError)} against target ${formatMaybe(certificate.targetTolerance)}.`;
+      if (window.IESAExplainStatus) window.IESAExplainStatus(detail, detail.textContent, stateText === "failed" ? "error" : "");
+    }
     if (status) {
       status.textContent = stateText === "completed" ? "Complete" : stateText === "running" ? "Running" : stateText === "failed" ? "Failed" : "Ready";
       status.className = `status-pill ${stateText === "completed" ? "ready" : stateText === "running" ? "warming" : stateText === "failed" ? "failed" : "muted"}`;
@@ -873,6 +881,12 @@
         <tbody>${rows}</tbody>
       </table>
     `;
+    if (window.IESAExplainStatus) {
+      el.querySelectorAll(".mga-direction-status.failed").forEach((node, idx) => {
+        const failed = fallback.filter((s) => String(s.status || "") === "failed")[idx];
+        window.IESAExplainStatus(node, failed && failed.errorMessage ? failed.errorMessage : "MGA direction failed.", "error");
+      });
+    }
   }
 
   function prettifyPhase(phase) {
@@ -985,8 +999,8 @@
     setTitle("MGA error", message);
     const detail = $("mgaProgressDetail");
     const log = $("mgaProgressLog");
-    if (detail) detail.textContent = message;
-    if (log) log.textContent = message;
+    if (detail) { detail.textContent = message; if (window.IESAExplainStatus) window.IESAExplainStatus(detail, message, "error"); }
+    if (log) { log.textContent = message; if (window.IESAExplainStatus) window.IESAExplainStatus(log, message, "error"); }
   }
 
   function bindStandalone() {

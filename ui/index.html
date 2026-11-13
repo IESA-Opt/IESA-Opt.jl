@@ -6,7 +6,8 @@
   <title>IESA-Opt Runner</title>
   <link rel="icon" type="image/png" href="/assets/iesa-opt-logo-rect.png">
   <link rel="apple-touch-icon" href="/assets/iesa-opt-logo-rect.png">
-  <link rel="stylesheet" href="/styles.css?v=topbar-search-20260615">
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <link rel="stylesheet" href="/styles.css?v=map-gpkg-20261110">
 </head>
 <body>
   <div id="connectionBanner" class="conn-banner" role="status" aria-live="polite" aria-hidden="true">
@@ -24,6 +25,11 @@
         <span class="topbar-search-text">Search the UI&hellip;</span>
         <kbd class="topbar-search-kbd">Ctrl K</kbd>
       </button>
+      <button id="uiHelpToggle" class="topbar-help-toggle" type="button" aria-pressed="false" title="Show contextual help icons">
+        <span class="topbar-help-label">Help</span>
+        <span class="topbar-help-switch" aria-hidden="true"><span class="topbar-help-knob"></span></span>
+        <span class="topbar-help-state">Off</span>
+      </button>
     </div>
   </header>
 
@@ -39,34 +45,34 @@
     <button class="tab-button active" data-section="main" data-tab="run" type="button">Setup</button>
     <button class="tab-button" data-section="main" data-tab="progress" type="button">Progress</button>
     <button class="tab-button" data-section="main" data-tab="results" type="button">Results</button>
-    <button class="tab-button" data-section="scenario" data-tab="scenario-setup" type="button">Parameter Space</button>
-    <button class="tab-button" data-section="scenario" data-tab="scenario-progress" type="button">Progress</button>
-    <button class="tab-button" data-section="scenario" data-tab="scenario-results" type="button">Results</button>
-    <button class="tab-button" data-section="scenario" data-tab="scenario-analysis" type="button">Analysis</button>
-    <button class="tab-button" data-section="mga" data-tab="mga-setup" type="button">Configure</button>
-    <button class="tab-button" data-section="mga" data-tab="mga-progress" type="button">Progress</button>
-    <button class="tab-button" data-section="mga" data-tab="mga-results" type="button">Results</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-input" type="button">Input overview</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-atlas" type="button">Technology atlas</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-costs" type="button">Cost assumptions</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-activity" type="button">Activity map</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-activity-deps" type="button">Coupled Sectors</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-details" type="button">Flow details</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-profiles" type="button">Profiles 3D</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-policy" type="button">Policy</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-model" type="button">Model browser</button>
-    <button class="tab-button" data-section="explorer" data-tab="explorer-tech" type="button">Technology dependencies</button>
-    <button class="tab-button" data-section="about" data-tab="about" type="button">Overview</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-setup" type="button" hidden>Parameter Space</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-progress" type="button" hidden>Progress</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-results" type="button" hidden>Results</button>
+    <button class="tab-button" data-section="scenario" data-tab="scenario-analysis" type="button" hidden>Analysis</button>
+    <button class="tab-button" data-section="mga" data-tab="mga-setup" type="button" hidden>Configure</button>
+    <button class="tab-button" data-section="mga" data-tab="mga-progress" type="button" hidden>Progress</button>
+    <button class="tab-button" data-section="mga" data-tab="mga-results" type="button" hidden>Results</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-input" type="button" hidden>Input overview</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-atlas" type="button" hidden>Technology atlas</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-costs" type="button" hidden>Cost assumptions</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-activity" type="button" hidden>Activity map</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-activity-deps" type="button" hidden>Coupled Sectors</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-details" type="button" hidden>Flow details</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-profiles" type="button" hidden>Profiles 3D</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-policy" type="button" hidden>Policy</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-model" type="button" hidden>Model browser</button>
+    <button class="tab-button" data-section="explorer" data-tab="explorer-tech" type="button" hidden>Technology dependencies</button>
+    <button class="tab-button" data-section="about" data-tab="about" type="button" hidden>Overview</button>
   </nav>
 
   <main>
     <section id="tab-run" class="tab-panel active">
       <form id="runForm" class="run-layout">
         <aside class="run-sidebar">
-          <section class="panel run-card">
+          <section class="panel run-card" data-help="Shows the current single-run setup and starts the solve.\nThe summary updates as you choose solver and workbook." data-help-more="This card is the command center for the Run workspace. It displays the selected solver and output format, then submits the current scenario, temporal, solver, reporting, and extension settings to the Julia backend when you choose Run model.">
             <p class="eyebrow">Transition solve</p>
             <h2 id="runTitle">Ready to run</h2>
-            <button id="runButton" class="primary-button" type="submit">Run model</button>
+            <button id="runButton" class="primary-button" type="submit" data-help="Starts one optimization run with the visible settings.\nThe UI switches to Progress when the job is accepted." data-help-more="The submitted run includes the selected workbook, solve years, temporal representation, solver, solve method, CPU thread limit, reporting flags, output naming choice, and enabled model extensions such as MultiRegion and Cluster land use.">Run model</button>
             <p id="runHint" class="subtle">Loading solver settings.</p>
             <dl class="summary-list">
               <div><dt>Solver</dt><dd id="selectedSolverLabel">-</dd></div>
@@ -74,54 +80,56 @@
               <div><dt>Output</dt><dd>DuckDB</dd></div>
             </dl>
           </section>
-
-          <section class="panel compact-panel">
-            <h2>Solver Settings</h2>
-            <label class="field"><span>Solver</span><select id="solver"></select></label>
-            <div id="solverDetails" class="subtle detail-text"></div>
-            <div class="field"><span>Solve method</span><div id="solveMethod" class="segmented vertical"></div></div>
-            <label class="field"><span>CPU threads</span><div class="range-pair"><input id="threads" type="range" min="0" max="64" value="0"><input id="threadsNumber" type="number" min="0" max="64" value="0"></div></label>
-          </section>
         </aside>
 
         <div class="run-main">
-          <section class="panel compact-panel">
-            <div class="panel-title"><h2>Scenario</h2><span class="subtle" id="scenarioSummary">Default workbook</span></div>
-            <div class="form-grid two">
-              <label class="field"><span>Scenario database</span><select id="inputWorkbook"></select></label>
-              <div class="field"><span>Or pick a file</span><div class="browse-row"><button id="browseInputButton" class="secondary-button" type="button">Browse&hellip;</button><button id="clearCustomInputButton" class="secondary-button hidden" type="button">Clear</button></div></div>
-              <div id="customInputDisplay" class="field span-2 hidden"><span>Selected file</span><div id="customInputDisplayPath" class="custom-input-path"></div></div>
-              <div class="field span-2"><span>Years selection</span><div id="periods" class="choice-row dense"></div></div>
-            </div>
-          </section>
-
           <div class="main-grid">
-            <section class="panel compact-panel">
-              <h2>Solve Mode</h2>
-              <label class="toggle-field"><span>Time slicing</span><input id="timeSlicingToggle" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span></label>
-              <label id="representativeDaysField" class="field"><span>Representative days</span><div class="range-pair"><input id="representativeDays" type="range" min="1" max="100" value="15"><input id="representativeDaysNumber" type="number" min="1" max="100" value="15"></div></label>
-              <label class="field"><span>Time slices</span><input id="totalSlices" type="text" value="720" readonly></label>
+            <section class="panel compact-panel" data-help="Chooses the workbook and solve years.\nThis is the base scenario for the run." data-help-more="Input workbook lists the Excel workbooks exposed by the local UI from Input/. Browse lets you select another Excel workbook from disk. Years selection controls the model periods included in the optimization.">
+              <div class="panel-title"><h2>Scenario</h2><span class="subtle" id="scenarioSummary">Default workbook</span></div>
+              <div class="form-grid two">
+                <label class="field" data-help="Selects the input workbook for this run.\nEach workbook defines technologies, profiles, costs, and policies." data-help-more="The workbook is read into ModelData before sets, derived parameters, variables, constraints, and objective terms are built. Changing it can alter the available years, nodes, technologies, profiles, and policy data."><span>Input workbook</span><select id="inputWorkbook"></select></label>
+                <div class="field" data-help="Uses a workbook outside the preset list.\nClear returns to the selected input workbook." data-help-more="Browse asks the local Julia server to open a file picker. The chosen workbook path is submitted instead of the workbook dropdown until Clear is selected."><span>Or pick a file</span><div class="browse-row"><button id="browseInputButton" class="secondary-button" type="button" data-help="Open a file picker for an Excel input workbook.\nThe selected file overrides the dropdown for this run." data-help-more="Use this when testing a new workbook or a file outside the repository Input folder. The run uses the selected path exactly as shown in Selected file.">Browse&hellip;</button><button id="clearCustomInputButton" class="secondary-button hidden" type="button" data-help="Removes the manually selected workbook.\nThe workbook dropdown becomes active again." data-help-more="This does not delete or change the workbook. It only clears the custom path stored in the UI for the current session.">Clear</button></div></div>
+                <div id="customInputDisplay" class="field span-2 hidden" data-help="Shows the workbook path selected with Browse.\nThis path is what the backend will load." data-help-more="If this field is visible, the custom path overrides Input workbook. Clear it to use one of the listed workbooks instead."><span>Selected file</span><div id="customInputDisplayPath" class="custom-input-path"></div></div>
+                <div class="field span-2" data-help="Chooses which model periods to solve.\nAt least one year should be selected." data-help-more="The selected years become `periods_solve` for the run. Investment, stock, annual balance, policy, and temporal constraints are generated over these periods according to the selected solve mode."><span>Years selection</span><div id="periods" class="choice-row dense"></div></div>
+              </div>
             </section>
 
-            <section class="panel compact-panel">
-              <h2>Temporal Resolution</h2>
-              <div id="hoursPerDayField" class="field hidden"><span>Hours in a day</span><div id="hoursPerDay" class="choice-row compact"></div></div>
-              <label id="clusteringApproachField" class="field"><span>Clustering approach</span><select id="clusteringApproach"></select></label>
-              <label id="extremeDaysField" class="field"><span>Extreme days</span><input id="extremeDays" type="number" min="0" max="30" value="5"></label>
+            <section class="panel compact-panel" data-help="Chooses representative-day or full-hourly solving.\nThis controls how much hourly detail is optimized." data-help-more="With Time slicing on, the model clusters the year into representative days and solves weighted time slices. With Time slicing off, the model uses the full-hourly path with the selected hours-per-day grouping.">
+              <h2>Solve Mode</h2>
+              <label class="toggle-field" data-help="Switches between time-slice and full-hourly mode.\nOn means representative-day time slicing." data-help-more="On: representative days, clustering approach, and boundary ramping shape the temporal approximation. Off: full-hourly mode is used, representative-day controls are hidden, and Hours in a day controls the full-hourly grouping."><span>Time slicing</span><input id="timeSlicingToggle" type="checkbox" checked><span class="toggle-track" aria-hidden="true"></span></label>
+              <label id="representativeDaysField" class="field" data-help="Sets how many representative days are used.\nMore days usually improves fidelity but increases solve size." data-help-more="Representative days are multiplied by 24 hours to produce the time-slice horizon. Increasing this value can capture more temporal diversity, but it also adds variables and constraints."><span>Representative days</span><div class="range-pair"><input id="representativeDays" type="range" min="1" max="100" value="15"><input id="representativeDaysNumber" type="number" min="1" max="100" value="15"></div></label>
+              <label class="field" data-help="Displays the total optimized time slices.\nIt updates from the selected solve mode." data-help-more="In time-slice mode this is representative days times 24. In full-hourly mode this is 365 days times the selected hours-per-day representation."><span>Time slices</span><input id="totalSlices" type="text" value="720" readonly></label>
             </section>
           </div>
 
-          <section class="panel compact-panel">
+          <div class="main-grid">
+            <section class="panel compact-panel" data-help="Chooses optimizer backend and algorithm settings.\nThese settings are sent unchanged to the solve job." data-help-more="Solver selects the available optimization package, Solve method selects the algorithm preset exposed by the UI, and CPU threads limits how much parallelism the solver can use. Solver availability and version are detected by the local Julia server.">
+              <h2>Solver Settings</h2>
+              <label class="field" data-help="Selects the optimizer backend.\nUnavailable solvers are shown but disabled." data-help-more="The backend determines which optimizer solves the JuMP model. HiGHS is bundled; Gurobi appears when the package and license are available in this Julia environment."><span>Solver</span><select id="solver"></select></label>
+              <div id="solverDetails" class="subtle detail-text"></div>
+              <div class="field" data-help="Selects the solver algorithm preset.\nAvailable methods depend on the selected solver." data-help-more="Examples include barrier, barrier with crossover, concurrent, primal simplex, and dual simplex. The backend maps the UI choice to solver attributes such as Gurobi Method or HiGHS solver options."><span>Solve method</span><div id="solveMethod" class="segmented vertical"></div></div>
+              <label class="field" data-help="Limits CPU threads for the solver.\nZero lets the solver choose automatically." data-help-more="Thread count affects solver memory use and wall-clock time. Large barrier solves may use much more memory as thread count rises, so reducing threads can sometimes make difficult runs more stable."><span>CPU threads</span><div class="range-pair"><input id="threads" type="range" min="0" max="64" value="0"><input id="threadsNumber" type="number" min="0" max="64" value="0"></div></label>
+            </section>
+
+            <section class="panel compact-panel" data-help="Configures temporal detail inside the selected solve mode.\nVisible controls change when Time slicing is toggled." data-help-more="In full-hourly mode, Hours in a day sets hourly aggregation for each calendar day. In time-slice mode, the clustering approach controls representative-day construction.">
+              <h2>Temporal Resolution</h2>
+              <div id="hoursPerDayField" class="field hidden" data-help="Sets full-hourly hours-per-day grouping.\nShown only when Time slicing is off." data-help-more="Allowed values divide 24 hours into coarser or finer blocks. Lower values preserve more intraday detail and usually increase the LP size."><span>Hours in a day</span><div id="hoursPerDay" class="choice-row compact"></div></div>
+              <label id="clusteringApproachField" class="field" data-help="Chooses the representative-day clustering method.\nShown only in time-slice mode." data-help-more="TulipaClustering.jl selects representative days from normalized hourly profiles and prices. The default k_medoids method picks actual calendar days as representatives; k_means uses cluster-average days."><span>Clustering approach</span><select id="clusteringApproach"></select></label>
+            </section>
+          </div>
+
+          <section class="panel compact-panel" data-help="Controls reporting, diagnostics, extensions, and output naming.\nThese settings do not change the selected workbook." data-help-more="Reporting options control which result tables and diagnostics are written. Advanced toggles can also enable optional model extensions such as MultiRegion or Cluster land use before the model is built.">
             <details open>
-              <summary>Reporting and advanced settings</summary>
+              <summary data-help="Opens or closes secondary run options.\nThe visible settings are still submitted with the run." data-help-more="Use this area for output detail, infeasibility diagnostics, representative-day edge handling, optional extensions, and output folder naming.">Reporting and advanced settings</summary>
               <div class="form-grid three advanced-grid">
-                <label class="field checkbox"><input id="hourlyReports" type="checkbox" checked><span>Hourly reports</span></label>
-                <label class="field checkbox"><input id="showViolations" type="checkbox"><span>Show violations</span></label>
-                <label class="field checkbox"><input id="extremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
-                <label class="field checkbox"><input id="boundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
-                <label class="field"><span>Constraint group</span><select id="constraintGroup"></select></label>
-                <label class="field"><span>Output name</span><select id="outputMode"><option value="automatic">Automatic</option><option value="custom">Custom</option></select></label>
-                <label id="outputNameWrap" class="field hidden"><span>Custom output folder</span><input id="outputName" type="text" placeholder="my_run_name"></label>
+                <label class="field checkbox" data-help="Writes hourly or time-slice dispatch reports.\nTurning it off reduces output volume." data-help-more="When enabled, the result writer exports detailed operational tables used by dispatch, profiles, storage, and hourly chart views where available."><input id="hourlyReports" type="checkbox" checked><span>Hourly reports</span></label>
+                <label class="field checkbox" data-help="Requests infeasibility diagnostics when a run fails.\nUseful for debugging constraints and bounds." data-help-more="When enabled, the backend attempts violation reporting or IIS-style diagnostics depending on solver support. It can add post-solve time but is valuable when a model is infeasible or nearly infeasible."><input id="showViolations" type="checkbox"><span>Show violations</span></label>
+                <label class="field checkbox" data-help="Links representative-day boundaries for ramping.\nIt reduces artificial jumps between day edges." data-help-more="Boundary ramping adds temporal consistency around representative-day transitions. It can improve operating realism in time-slice mode, with a modest increase in constraint count."><input id="boundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
+                <label class="field checkbox" data-help="Enables the MultiRegion regional-cap extension.\nOff leaves the core model unchanged." data-help-more="When on, Julia adds MultiRegion constraints: grouped regional techStock caps, regional techUse caps discovered from the workbook, interconnection export/import and HVNS caps, CCUS inside/outside caps, imported hydrogen/ammonia/natural-gas caps, ammonia wCCUS/eSMR caps, plus special nuclear and geothermal stock caps. It also applies the MultiRegion stock-bound data convention where blank cells act as zero bounds and -1 disables a stock bound. When off, none of these constraints or stock-bound conventions are applied; md.params.extensions stays empty for this extension."><input id="multiRegionToggle" type="checkbox"><span>MultiRegion</span></label>
+                <label class="field checkbox" data-help="Enables the industrial-cluster land-use limit.\nOff leaves the core model unchanged." data-help-more="When on, Julia adds one 2050 constraint per industrial cluster CLn (AIMMS c_ClusterSpace_Limit): the installed stock of every CLn_ technology, weighted by its space requirement from Technologies column DS &quot;Space (Ha)&quot; [Hectare/UoC], cannot exceed the cluster's available area from the Parameters rows CLn_AvailableArea [Hectare]. Clusters without an available area are skipped, so workbooks without land-use data are unaffected. The run log reports the land used per cluster after every solve, with the limit on or off."><input id="landUseToggle" type="checkbox"><span>Cluster land use</span></label>
+                <label class="field" data-help="Selects the AIMMS constraint group." data-help-more="Base excludes bunker and feedstock emission caps. The other groups enable the named caps. MultiRegion and land-use controls are enabled by default to match AIMMS and remain independent overrides."><span>Constraint group</span><select id="constraintGroup"></select></label>
+                <label class="field" data-help="Controls the output folder name.\nAutomatic creates a timestamped run folder." data-help-more="Automatic names the output using the run configuration and current timestamp. Custom lets you type a folder-friendly name for easier comparison and later loading."><span>Output name</span><select id="outputMode"><option value="automatic">Automatic</option><option value="custom">Custom</option></select></label>
+                <label id="outputNameWrap" class="field hidden" data-help="Sets the custom output folder suffix.\nUse a short, filesystem-safe name." data-help-more="This value is sent to the backend when Output name is Custom. It should describe the run without relying on spaces or special characters."><span>Custom output folder</span><input id="outputName" type="text" placeholder="my_run_name"></label>
               </div>
             </details>
           </section>
@@ -146,17 +154,37 @@
           <div id="outputList" class="output-list empty-state">Loading outputs.</div>
         </aside>
         <section class="results-main">
-          <section id="comparisonPanel" class="panel span-2 comparison-panel hidden">
+          <div class="results-subpage-nav span-2" role="tablist" aria-label="Results pages">
+            <button class="results-subpage-button active" type="button" data-results-subpage="summary">Costs &amp; solve</button>
+            <button class="results-subpage-button" type="button" data-results-subpage="map">Regional map</button>
+            <button class="results-subpage-button" type="button" data-results-subpage="figures">Other figures</button>
+          </div>
+          <section id="comparisonPanel" class="panel span-2 comparison-panel hidden" data-results-page="summary">
             <div class="panel-title"><h2>Comparison</h2><span id="compareStatus" class="subtle">Select outputs in the sidebar.</span></div>
             <div class="split-tables"><div id="compareTable" class="table-wrap"></div><div id="compareCostTable" class="table-wrap"></div></div>
           </section>
-          <div id="metricGrid" class="metric-grid span-2"></div>
-          <section class="panel"><div class="panel-title"><h2>System Costs</h2><div class="panel-toolbar"><span id="resultsOutput" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="systemCostsTable">Show table</button></div></div><div id="systemCostsChart" class="bar-chart empty-state">No results loaded.</div><div id="systemCostsTable" class="table-wrap hidden"></div></section>
-          <section class="panel"><div class="panel-title"><h2>Solve Time And Solver Stats</h2><div class="panel-toolbar"><button type="button" class="toggle-table-button secondary-button" data-target="solverSettingsTable">Show table</button></div></div><div id="timingChart" class="bar-chart empty-state">No results loaded.</div><div id="solverSettingsTable" class="table-wrap hidden"></div></section>
-          <section class="panel single-only"><div class="panel-title"><h2>CO<sub>2</sub> Price</h2><div class="panel-toolbar"><span class="subtle">Shadow price of the emission cap (EUR / tCO<sub>2</sub>eq)</span><button type="button" class="toggle-table-button secondary-button" data-target="co2PriceTable">Show table</button></div></div><div id="co2PriceChart" class="bar-chart empty-state">No CO<sub>2</sub> price available.</div><div id="co2PriceTable" class="table-wrap hidden"></div></section>
-          <section class="panel single-only"><div class="panel-title"><h2>Activity Prices</h2><div class="panel-toolbar"><span class="subtle">Shadow prices of balance constraints (EUR / unit)</span><button type="button" class="toggle-table-button secondary-button" data-target="activityPricesTable">Show table</button></div></div><div id="activityPricesTable" class="table-wrap hidden empty-state">No activity prices available.</div></section>
-          <section class="panel span-2 single-only"><div class="panel-title"><h2>Power System Capacities</h2><div class="panel-toolbar"><span class="subtle">techStock filtered to power-system technologies</span><button type="button" class="toggle-table-button secondary-button" data-target="powerCapacityTable">Show table</button></div></div><div id="powerCapacityChart" class="bar-chart empty-state">No results loaded.</div><div id="powerCapacityTable" class="table-wrap hidden"></div></section>
-          <section class="panel span-2 single-only">
+          <div id="metricGrid" class="metric-grid span-2" data-results-page="summary"></div>
+          <section class="panel" data-results-page="summary"><div class="panel-title"><h2>System Costs</h2><div class="panel-toolbar"><span id="resultsOutput" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="systemCostsTable">Show table</button></div></div><div id="systemCostsChart" class="bar-chart empty-state">No results loaded.</div><div id="systemCostsTable" class="table-wrap hidden"></div></section>
+          <section class="panel" data-results-page="summary"><div class="panel-title"><h2>Solve Time And Solver Stats</h2><div class="panel-toolbar"><button type="button" class="toggle-table-button secondary-button" data-target="solverSettingsTable">Show table</button></div></div><div id="timingChart" class="bar-chart empty-state">No results loaded.</div><div id="solverSettingsTable" class="table-wrap hidden"></div></section>
+          <section id="regionalTradePanel" class="panel span-2 single-only hidden" data-results-page="map">
+            <div class="panel-title"><h2>Regional Trade Map</h2>
+              <div class="panel-toolbar">
+                <label class="field inline"><span>Metric</span><select id="regionalMapMetric"><option value="stock">Tech stock capacity</option><option value="use" selected>Net tech use flow</option></select></label>
+                <label class="field inline"><span>Commodity</span><select id="regionalMapCommodity"><option value="all">All</option></select></label>
+                <label class="field inline"><span>Period</span><select id="regionalMapPeriod"></select></label>
+                <label class="field inline" title="GeoPackage from ui/assets/maps used for the cluster shapes and power/gas nodes"><span>Map</span><select id="regionalMapFile"></select></label>
+                <button id="regionalMapPlay" type="button" class="secondary-button">Play</button>
+                <span id="regionalMapStatus" class="subtle"></span>
+                <button type="button" class="toggle-table-button secondary-button" data-target="regionalMapTable">Show table</button>
+              </div>
+            </div>
+            <div id="regionalMapChart" class="map-chart empty-state">No regional trade map available.</div>
+            <div id="regionalMapTable" class="table-wrap hidden"></div>
+          </section>
+          <section class="panel single-only" data-results-page="figures"><div class="panel-title"><h2>CO<sub>2</sub> Price</h2><div class="panel-toolbar"><span class="subtle">Shadow price of the emission cap (EUR / tCO<sub>2</sub>eq)</span><button type="button" class="toggle-table-button secondary-button" data-target="co2PriceTable">Show table</button></div></div><div id="co2PriceChart" class="bar-chart empty-state">No CO<sub>2</sub> price available.</div><div id="co2PriceTable" class="table-wrap hidden"></div></section>
+          <section class="panel single-only" data-results-page="figures"><div class="panel-title"><h2>Activity Prices</h2><div class="panel-toolbar"><span class="subtle">Shadow prices of balance constraints (EUR / unit)</span><button type="button" class="toggle-table-button secondary-button" data-target="activityPricesTable">Show table</button></div></div><div id="activityPricesTable" class="table-wrap hidden empty-state">No activity prices available.</div></section>
+          <section class="panel span-2 single-only" data-results-page="figures"><div class="panel-title"><h2>Power System Capacities</h2><div class="panel-toolbar"><span class="subtle">techStock filtered to power-system technologies</span><button type="button" class="toggle-table-button secondary-button" data-target="powerCapacityTable">Show table</button></div></div><div id="powerCapacityChart" class="bar-chart empty-state">No results loaded.</div><div id="powerCapacityTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only" data-results-page="figures">
             <div class="panel-title"><h2>Hourly Dispatch</h2>
               <div class="panel-toolbar">
                 <label class="field inline"><span>Node</span><select id="hourlyDispatchNode"></select></label>
@@ -169,7 +197,7 @@
             </div>
             <div id="hourlyDispatchChart" class="profile-chart empty-state">No results loaded.</div>
           </section>
-          <section class="panel span-2 single-only">
+          <section class="panel span-2 single-only" data-results-page="figures">
             <div class="panel-title"><h2>Flexibility Analysis</h2>
               <div class="panel-toolbar">
                 <label class="field inline"><span>Technology</span><select id="flexTech"></select></label>
@@ -184,8 +212,8 @@
             <div id="flexChart" class="profile-chart empty-state">No results loaded.</div>
             <div id="flexIndicatorsTable" class="table-wrap hidden"></div>
           </section>
-          <section class="panel span-2 single-only"><div class="panel-title"><h2>Emissions</h2><div class="panel-toolbar"><label class="field inline"><span>Group by</span><select id="emissionsGroupBy"><option value="activity">Activity</option><option value="sector">Sector</option><option value="subsector">Subsector</option><option value="sector_kev">KEV Sector</option><option value="category">Category</option></select></label><label class="field inline"><span>Period</span><select id="emissionsPeriod"><option value="">All</option></select></label><span id="emissionsStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="emissionsTable">Show table</button></div></div><div id="emissionsChart" class="bar-chart empty-state">No emissions data.</div><div id="emissionsTable" class="table-wrap hidden"></div></section>
-          <section class="panel span-2 single-only"><div class="panel-title"><h2>Supply / Demand by Activity</h2><div class="panel-toolbar"><label class="field inline"><span>Activity</span><select id="supplyDemandActivity"></select></label><label class="field inline"><span>Period</span><select id="supplyDemandPeriod"><option value="">All</option></select></label><span id="supplyDemandStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="supplyDemandTable">Show table</button></div></div><div id="supplyDemandChart" class="bar-chart empty-state">Select an activity to view supply and demand.</div><div id="supplyDemandTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only" data-results-page="figures"><div class="panel-title"><h2>Emissions</h2><div class="panel-toolbar"><label class="field inline"><span>Group by</span><select id="emissionsGroupBy"><option value="activity">Activity</option><option value="sector">Sector</option><option value="subsector">Subsector</option><option value="sector_kev">KEV Sector</option><option value="category">Category</option></select></label><label class="field inline"><span>Period</span><select id="emissionsPeriod"><option value="">All</option></select></label><span id="emissionsStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="emissionsTable">Show table</button></div></div><div id="emissionsChart" class="bar-chart empty-state">No emissions data.</div><div id="emissionsTable" class="table-wrap hidden"></div></section>
+          <section class="panel span-2 single-only" data-results-page="figures"><div class="panel-title"><h2>Supply / Demand by Activity</h2><div class="panel-toolbar"><label class="field inline"><span>Activity</span><select id="supplyDemandActivity"></select></label><label class="field inline"><span>Period</span><select id="supplyDemandPeriod"><option value="">All</option></select></label><span id="supplyDemandStatus" class="subtle"></span><button type="button" class="toggle-table-button secondary-button" data-target="supplyDemandTable">Show table</button></div></div><div id="supplyDemandChart" class="bar-chart empty-state">Select an activity to view supply and demand.</div><div id="supplyDemandTable" class="table-wrap hidden"></div></section>
         </section>
       </section>
     </section>
@@ -219,7 +247,7 @@
           <section class="panel compact-panel">
             <div class="panel-title"><h2>Base scenario</h2><span class="subtle" id="scScenarioSummary">Default workbook</span></div>
             <div class="form-grid two">
-              <label class="field"><span>Scenario database</span><select id="scInputWorkbook"></select></label>
+              <label class="field"><span>Input workbook</span><select id="scInputWorkbook"></select></label>
               <div class="field"><span>Or pick a file</span><div class="browse-row"><button id="scBrowseInputButton" class="secondary-button" type="button">Browse&hellip;</button><button id="scClearCustomInputButton" class="secondary-button hidden" type="button">Clear</button></div></div>
               <div id="scCustomInputDisplay" class="field span-2 hidden"><span>Selected file</span><div id="scCustomInputDisplayPath" class="custom-input-path"></div></div>
               <div class="field span-2"><span>Years selection</span><div id="scPeriods" class="choice-row dense"></div></div>
@@ -284,7 +312,6 @@
               <h2>Temporal Resolution</h2>
               <div id="scHoursPerDayField" class="field hidden"><span>Hours in a day</span><div id="scHoursPerDay" class="choice-row compact"></div></div>
               <label id="scClusteringApproachField" class="field"><span>Clustering approach</span><select id="scClusteringApproach"></select></label>
-              <label id="scExtremeDaysField" class="field"><span>Extreme days</span><input id="scExtremeDays" type="number" min="0" max="30" value="5"></label>
             </section>
           </div>
 
@@ -294,7 +321,6 @@
               <div class="form-grid three advanced-grid">
                 <label class="field checkbox"><input id="scHourlyReports" type="checkbox" checked><span>Hourly reports</span></label>
                 <label class="field checkbox"><input id="scShowViolations" type="checkbox"><span>Show violations</span></label>
-                <label class="field checkbox"><input id="scExtremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
                 <label class="field checkbox"><input id="scBoundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
                 <label class="field"><span>Constraint group</span><select id="scConstraintGroup"></select></label>
                 <label class="field"><span>Output naming</span><select id="scOutputMode"><option value="automatic">Automatic</option><option value="custom">Custom prefix</option></select></label>
@@ -436,7 +462,7 @@
           <section class="panel compact-panel">
             <div class="panel-title"><h2>Scenario</h2><span id="mgaScenarioSummary" class="subtle">Default workbook</span></div>
             <div class="form-grid two">
-              <label class="field"><span>Scenario database</span><select id="mgaInputWorkbook"></select></label>
+              <label class="field"><span>Input workbook</span><select id="mgaInputWorkbook"></select></label>
               <label class="field"><span>Campaign name</span><input id="mgaName" type="text" value="mga_campaign"></label>
               <div class="field span-2"><span>Years selection</span><div id="mgaPeriods" class="choice-row dense"></div></div>
             </div>
@@ -454,7 +480,6 @@
               <h2>Temporal Resolution</h2>
               <div id="mgaHoursPerDayField" class="field hidden"><span>Hours in a day</span><div id="mgaHoursPerDay" class="choice-row compact"></div></div>
               <label id="mgaClusteringApproachField" class="field"><span>Clustering approach</span><select id="mgaClusteringApproach"></select></label>
-              <label id="mgaExtremeDaysField" class="field"><span>Extreme days</span><input id="mgaExtremeDays" type="number" min="0" max="30" value="5"></label>
             </section>
           </div>
 
@@ -462,7 +487,6 @@
             <details open>
               <summary>Reporting and advanced settings</summary>
               <div class="form-grid three advanced-grid">
-                <label class="field checkbox"><input id="mgaExtremePeriods" type="checkbox" checked><span>Force extreme periods</span></label>
                 <label class="field checkbox"><input id="mgaBoundaryRamping" type="checkbox" checked><span>Boundary ramping</span></label>
                 <label class="field"><span>Constraint group</span><select id="mgaConstraintGroup"></select></label>
               </div>
@@ -508,7 +532,7 @@
           </div>
         </div>
         <div class="stage-steps mga-stage-steps">
-          <div class="stage-step" id="mgaStagePrepare"><span class="stage-dot"></span><div><strong>Prepare data</strong><span>Clusters, extreme periods</span></div></div>
+          <div class="stage-step" id="mgaStagePrepare"><span class="stage-dot"></span><div><strong>Prepare data</strong><span>Representative days</span></div></div>
           <div class="stage-step" id="mgaStageBaseline"><span class="stage-dot"></span><div><strong>Baseline</strong><span>Least-cost LP + cap</span></div></div>
           <div class="stage-step" id="mgaStageVmm"><span class="stage-dot"></span><div><strong>VMM seeds</strong><span>Variable-by-variable bounds</span></div></div>
           <div class="stage-step" id="mgaStageSeed"><span class="stage-dot"></span><div><strong>Parallel seeds</strong><span>Low-discrepancy directions</span></div></div>
@@ -592,7 +616,7 @@
               <p id="explorerAtlasStatus" class="subtle">Loading inputs.</p>
             </div>
           </div>
-          <label class="field"><span>Scenario database</span><select id="explorerAtlasWorkbook"></select></label>
+          <label class="field"><span>Input workbook</span><select id="explorerAtlasWorkbook"></select></label>
           <label class="field"><span>Period</span><select id="explorerAtlasPeriod"></select></label>
           <button id="explorerRefreshAtlas" class="primary-button" type="button">Refresh overview</button>
           <div id="atlasMetricCards" class="atlas-metric-grid"></div>
@@ -747,7 +771,7 @@
               <p id="explorerModelStatus" class="subtle">Loading inputs.</p>
             </div>
           </div>
-          <label class="field"><span>Scenario database</span><select id="explorerModelWorkbook"></select></label>
+          <label class="field"><span>Input workbook</span><select id="explorerModelWorkbook"></select></label>
           <label class="field"><span>Period</span><select id="explorerModelPeriod"></select></label>
           <label class="field"><span>Model shape</span><select id="explorerModelMode"><option value="timeslice">Time-slice preview</option><option value="annual">Annual</option><option value="full_hourly">Full-hourly</option></select></label>
           <label class="field"><span>Representative days</span><input id="explorerModelRepDays" type="number" min="1" max="30" value="1"></label>
@@ -784,7 +808,7 @@
               <p id="explorerGraphStatus" class="subtle">Loading inputs.</p>
             </div>
           </div>
-          <label class="field"><span>Scenario database</span><select id="explorerGraphWorkbook"></select></label>
+          <label class="field"><span>Input workbook</span><select id="explorerGraphWorkbook"></select></label>
           <label class="field"><span>Period</span><select id="explorerGraphPeriod"></select></label>
           <label class="field"><span>Diagram detail</span><select id="explorerDiagramDetail"><option value="group" selected>Sector/category groups</option><option value="technology">Individual technologies</option></select></label>
           <label class="field"><span>Max activities</span><div class="range-pair"><input id="explorerMaxActivities" type="range" min="5" max="80" value="14"><input id="explorerMaxActivitiesNumber" type="number" min="1" max="120" value="14"></div></label>
@@ -834,30 +858,43 @@
         </ul>
         <p>The tabs below the section bar are filtered automatically: only the tabs that belong to the active section are shown. Each tab is described below together with every option it exposes.</p>
 
-        <h3>Setup tab</h3>
-        <p>This is the launchpad for a new optimisation. The left side fixes the solver; the right side fixes the scenario, temporal resolution, and reporting flags. Press <strong>Run model</strong> to start; the page will switch to <strong>Progress</strong> automatically.</p>
+        <h3>Help and navigation</h3>
+        <p>The upper-right toolbar contains the Julia status pill, the UI search box, and a <strong>Help</strong> switch below search. Help is <strong>off by default</strong> so the workspace stays uncluttered. Turn it on to show small <strong>i</strong> icons next to controls, headings, buttons, generated radio buttons, and generated checkboxes.</p>
+        <ul class="about-list">
+          <li><strong>Help switch</strong> &mdash; toggles contextual help anchors on and off. When it is off, the <strong>i</strong> icons are hidden and no hover help opens.</li>
+          <li><strong>i icons</strong> &mdash; hover or focus an icon to open a pointed help dialog. The dialog points to the icon that triggered it.</li>
+          <li><strong>Read more</strong> &mdash; expands the dialog with extra detail. After expanding, the dialog stays open while the pointer is nearby, closes after the pointer remains outside for about one second, and closes immediately when the user clicks elsewhere.</li>
+          <li><strong>Search the UI</strong> &mdash; opens the keyboard-search dialog for workspaces, tabs, and About-page references. Use <kbd>Ctrl K</kbd> to open it quickly.</li>
+          <li><strong>Workspace tabs</strong> &mdash; only tabs belonging to the active top-level workspace are shown. For example, Single run shows only Setup, Progress, and Results; Scenario Space shows Parameter Space, Progress, Results, and Analysis.</li>
+        </ul>
+
+        <h3>Single run workspace</h3>
+        <p>Single run launches and reviews one optimisation at a time. Its three tabs follow the normal run lifecycle: <em>Setup</em> defines the model and solver options, <em>Progress</em> watches the active solve, and <em>Results</em> inspects completed output folders.</p>
+
+        <h4>Setup tab</h4>
+        <p>This is the launchpad for a new optimisation. The left summary card starts the run; the main setup area groups Scenario beside Solve Mode, then Solver Settings beside Temporal Resolution. Press <strong>Run model</strong> to start; the page will switch to <strong>Progress</strong> automatically.</p>
         <ul class="about-list">
           <li><strong>Solver</strong> &mdash; chooses the optimisation backend (HiGHS, Gurobi, etc.). The detail line shows the solver version detected on the system.</li>
-          <li><strong>Solve method</strong> &mdash; algorithm hint passed to the solver (for example <em>simplex</em>, <em>barrier</em>, <em>auto</em>). Available options depend on the selected solver.</li>
+          <li><strong>Solve method</strong> &mdash; algorithm hint passed to the solver (for example <em>simplex</em>, <em>barrier</em>, <em>auto</em>). Available options depend on the selected solver. With Help icons on, each method has its own <strong>Read more</strong> explanation; for example, Barrier is described as an interior-point LP method that often works well on large models and can use parallel CPU threads.</li>
           <li><strong>CPU threads</strong> &mdash; threads given to the solver; <em>0</em> lets the solver pick.</li>
-          <li><strong>Scenario database</strong> &mdash; picks one of the input workbooks bundled in the <code>data/</code> folder.</li>
+          <li><strong>Input workbook</strong> &mdash; picks one of the Excel workbooks bundled in the <code>Input/</code> folder.</li>
           <li><strong>Browse&hellip;</strong> &mdash; selects an Excel/Parquet file from anywhere on disk; <strong>Clear</strong> reverts to the dropdown selection.</li>
           <li><strong>Years selection</strong> &mdash; chooses which model years (periods) to solve. Multiple years may be selected to run a transition path.</li>
           <li><strong>Time slicing</strong> &mdash; when on, the model runs on representative days; when off, it runs on full chronological hours.</li>
           <li><strong>Representative days</strong> &mdash; number of typical days the clustering algorithm produces (only relevant with time slicing on).</li>
           <li><strong>Time slices</strong> &mdash; total operating time slices used by the model, derived from representative days &times; hours per day.</li>
           <li><strong>Hours in a day</strong> &mdash; number of intra-day time slices in a representative day. The 24 hours of the day are aggregated into this many sequential clusters, so chronology within the day is preserved (24 = full hourly resolution, 12 = pairs of consecutive hours, 8 = triplets, 6 = four-hour slices, 4 = six-hour slices, 3 = eight-hour slices, 2 = twelve-hour slices, 1 = single daily slice).</li>
-          <li><strong>Clustering approach</strong> &mdash; algorithm used to pick representative days (e.g. <em>k-means</em>, <em>hierarchical</em>).</li>
-          <li><strong>Extreme days</strong> &mdash; how many extreme days (peak demand, low VRES) are forced into the representative-day set on top of the regular clusters.</li>
+          <li><strong>Clustering approach</strong> &mdash; TulipaClustering.jl method: <em>k_medoids</em> (default) or <em>k_means</em>. Calendar days use fitted convex weights by default. There is no separate forced extreme-day step.</li>
           <li><strong>Hourly reports</strong> &mdash; if checked, hourly profiles are written to the output database (larger files, richer plots).</li>
           <li><strong>Show violations</strong> &mdash; relaxes every constraint with an elastic slack at penalty <code>1e7</code> per unit (<code>JuMP.relax_with_penalty!</code>) so the solve always returns a feasible point. After the solve the run log lists the constraints whose slack is non&#8209;zero, ranked by magnitude. When this option is <em>off</em> and the model comes back <code>INFEASIBLE</code>, an IIS / conflict analysis is run automatically and the offending constraint names plus a heuristic suggestion are written to the log (works on Gurobi/CPLEX/Xpress; HiGHS support depends on its conflict refinement build).</li>
-          <li><strong>Force extreme periods</strong> &mdash; ensures the extreme days selected above are guaranteed to appear in the solved problem.</li>
           <li><strong>Boundary ramping</strong> &mdash; enforces ramping limits across the boundary between adjacent representative days.</li>
+          <li><strong>MultiRegion</strong> &mdash; activates the MultiRegion regional-cap extension. When on, it adds grouped regional stock/use caps and applies the MultiRegion stock-bound data convention; when off, the core model is unchanged by this extension.</li>
+          <li><strong>Cluster land use</strong> &mdash; activates the industrial-cluster land-use limit (AIMMS <code>c_ClusterSpace_Limit</code>). When on, the 2050 stock of each cluster's <code>CLn_</code> technologies, weighted by <em>Space (Ha)</em> (Technologies column DS), may not exceed that cluster's <code>CLn_AvailableArea</code> (Parameters sheet). Off by default; workbooks without land-use data are unaffected either way. The run log lists the land used per cluster after each solve.</li>
           <li><strong>Constraint group</strong> &mdash; chooses a preset of policy constraints to activate (carbon caps, RES targets, etc.).</li>
           <li><strong>Output name</strong> &mdash; <em>Automatic</em> derives a folder name from the timestamp and configuration; <em>Custom</em> lets you type one.</li>
         </ul>
 
-        <h3>Progress tab</h3>
+        <h4>Progress tab</h4>
         <p>Live status for the run that is currently solving (or the last one started).</p>
         <ul class="about-list">
           <li><strong>Status pill</strong> &mdash; <em>Idle</em>, <em>Running</em>, <em>Solving</em>, <em>Completed</em>, or <em>Failed</em>.</li>
@@ -868,8 +905,8 @@
           <li><strong>Open results</strong> &mdash; appears once a run finishes and jumps to its output in the Results tab.</li>
         </ul>
 
-        <h3>Results tab</h3>
-        <p>Reads finished output folders and renders charts and tables. The sidebar lists every output found under <code>Output/</code> and <code>Output_Batch/</code>.</p>
+        <h4>Results tab</h4>
+        <p>Reads finished output folders and renders charts and tables. The sidebar lists outputs found under <code>Output/</code>.</p>
         <ul class="about-list">
           <li><strong>Refresh</strong> &mdash; rescans the output folders.</li>
           <li><strong>Compare selected</strong> &mdash; opens the comparison view for the runs currently ticked in the sidebar (also triggered automatically when two or more runs are selected).</li>
@@ -896,11 +933,11 @@
         <p>Scenario Space sweeps an entire parameter space rather than a single point. You define which workbook inputs are uncertain (and over what range), pick a sampling method, and the workspace launches one IESA-Opt solve per sampled variant in parallel. The four tabs split the lifecycle: <em>Parameter Space</em> (set up + validate the design), <em>Progress</em> (watch many workers solve), <em>Results</em> (browse the cross-variant outcome space), and <em>Analysis</em> (Scenario Discovery and global sensitivity analysis on the completed runs).</p>
 
         <h4>Parameter Space tab</h4>
-        <p>The setup screen for a campaign. Mirrors Single Run for the model definition (workbook, periods, time-slicing, representative days, extreme periods, reporting flags, advanced settings) but adds the campaign-level controls.</p>
+        <p>The setup screen for a campaign. Mirrors Single Run for the model definition (workbook, periods, time-slicing, representative days, reporting flags, advanced settings) but adds the campaign-level controls.</p>
         <ul class="about-list">
           <li><strong>Solver and Solve method</strong> &mdash; same options as Single Run; whichever solver is picked here is used by every variant in the campaign.</li>
           <li><strong>Total CPU threads</strong> + <strong>Threads per worker</strong> &mdash; the global thread budget is split across <em>Parallel workers</em> (one IESA-Opt solve per worker). Threads per worker is computed automatically as <code>floor(threads &divide; workers)</code>.</li>
-          <li><strong>Campaign name</strong> &mdash; folder name under <code>Output_Batch/</code> where every variant&apos;s output, the consolidated <code>campaign.json</code>, and the validated parameter space CSV are written.</li>
+          <li><strong>Campaign name</strong> &mdash; folder name under <code>Output/</code> where every variant&apos;s output, the consolidated campaign metadata, and validated parameter space are written.</li>
           <li><strong>GSA method</strong> &mdash; selects the global sensitivity analysis pipeline that the <em>Analysis</em> tab will run on the completed campaign: <em>rank</em> (Spearman rank correlations, sampled with Latin hypercube), <em>moment_delta</em> (Borgonovo-style moment-independent delta indices, also LHS), <em>morris</em> (Morris elementary effects with mu / mu* / sigma metrics, requires Morris sampling), or <em>sobol</em> (first-order Sobol variance indices, requires Sobol sampling). The hint line under the dropdown explains the implied sampler.</li>
           <li><strong>Sampling method</strong> &mdash; <em>Latin hypercube</em>, <em>Morris</em>, <em>Sobol</em>, or <em>Factorial</em>. Locked to a compatible choice when the GSA method requires a specific sampler.</li>
           <li><strong>Number of variants</strong> + <strong>Random seed</strong> &mdash; controls how many points are drawn (and how many implied IESA-Opt evaluations the chosen GSA will perform &mdash; the read-only <em>Implied evaluations</em> field shows the actual count, which exceeds <em>Number of variants</em> for Morris and Sobol).</li>
@@ -927,7 +964,7 @@
         <p>Browses the outcome space of every completed variant in a chosen campaign. The left sidebar lists every Scenario Space campaign captured by the server (newest first); click one to load its variants. The main panel shows the cross-variant outcome scatter:</p>
         <ul class="about-list">
           <li><strong>Cost &times; CO<sub>2</sub> price scatter</strong> &mdash; one marker per completed variant; X-axis is total system cost, Y-axis is the average CO<sub>2</sub> price. Hover for the variant ID and the sampled parameter values that produced that point.</li>
-          <li><strong>Refresh</strong> &mdash; rescans <code>Output_Batch/</code> for new campaigns without reloading the page.</li>
+          <li><strong>Refresh</strong> &mdash; rescans <code>Output/</code> for new campaigns without reloading the page.</li>
         </ul>
 
         <h4>Analysis tab</h4>
@@ -938,7 +975,7 @@
         </ul>
 
         <h3>Scenario Explorer workspace</h3>
-        <p>The Scenario Explorer is read-only. It does not solve anything &mdash; it is a structured way to inspect a workbook (the static inputs) and the JuMP model that IESA-Opt would build from it (the generated structure). Useful when debugging input data, comparing two workbooks, or understanding how the optimisation is wired together. The ten tabs are independent; switch between them freely. Most tabs offer a <em>Scenario database</em> + <em>Period</em> selector to scope the view.</p>
+        <p>The Scenario Explorer is read-only. It does not solve anything &mdash; it is a structured way to inspect a workbook (the static inputs) and the JuMP model that IESA-Opt would build from it (the generated structure). Useful when debugging input data, comparing two workbooks, or understanding how the optimisation is wired together. The ten tabs are independent; switch between them freely. Most tabs offer an <em>Input workbook</em> + <em>Period</em> selector to scope the view.</p>
 
         <h4>Input overview tab</h4>
         <p>The starting point. Pick a workbook and a period, then click <em>Refresh overview</em> to summarise the workbook.</p>
@@ -1023,7 +1060,7 @@
         <h4>Configure tab</h4>
         <p>Defines the campaign and previews the seed directions before any solve runs.</p>
         <ul class="about-list">
-          <li><strong>Workbook + temporal mode + periods + representative days + extreme periods</strong> &mdash; same controls as the Single Run setup; they pin the underlying IESA-Opt model that every alternative will solve.</li>
+          <li><strong>Workbook + temporal mode + periods + representative days</strong> &mdash; same controls as the Single Run setup; they pin the underlying IESA-Opt model that every alternative will solve.</li>
           <li><strong>Solver and Solve method</strong> &mdash; chooses the LP backend used for the baseline and every alternative. Gurobi <em>barrier_crossover</em> is the default when a license is available; HiGHS <em>barrier</em> is the cross-platform fallback.</li>
           <li><strong>Cost slack (%)</strong> &mdash; how far above the least-cost optimum the alternatives are allowed to go (typically 1&ndash;10%). Larger slack means more design freedom and more diverse alternatives.</li>
           <li><strong>Directions</strong> &mdash; total number of alternatives to solve. Split automatically between VMM seed directions, low-discrepancy parallel seeds, and ORACLE refinement directions.</li>
@@ -1086,10 +1123,11 @@
       </div>
     </div>
   </div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/vendor/plotly-full.min.js"></script>
-  <script src="/app.js?v=topbar-search-20260615"></script>
-  <script src="/app.scenario.js"></script>
-  <script src="/app.explorer.js"></script>
-  <script src="/app.mga.js?v=mga-investments-20260614"></script>
+  <script src="/app.js?v=map-gpkg-20261110"></script>
+  <script src="/app.scenario.js?v=error-help-20260618"></script>
+  <script src="/app.explorer.js?v=flow-detail-hover-value-20260619"></script>
+  <script src="/app.mga.js?v=error-help-20260618"></script>
 </body>
 </html>

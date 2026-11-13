@@ -201,6 +201,7 @@ Base.@kwdef mutable struct ModelParams
     shedding_inLoad::Float64 = 0.0
     social_discount_rate::Float64 = 0.04
     ActiveConstraintSet::String = ""
+    constraint_group::String = ""
 
     # Numeric stability
     numeric_epsilon::Float64 = 1e-9
@@ -209,9 +210,10 @@ Base.@kwdef mutable struct ModelParams
     solver_options::Dict{String,Any} = Dict{String,Any}()
 
     # Clustering control
-    clustering_approach::Symbol = :kmeans_avg
+    clustering_approach::Symbol = :k_medoids
+    clustering_distance::Symbol = :cosine
     clustering_seed::Int = 42
-    ts_extremePeriods::Bool = true
+    ts_extremePeriods::Bool = false
     ts_extremeDays_count::Int = 5
     ts_capacityProfile_autoMode::Bool = true
     ts_capacityProfile_autoFloor::Float64 = 0.23
@@ -228,7 +230,6 @@ Base.@kwdef mutable struct ModelParams
     ts_dayMix_PGD_maxIter::Int = 80
     ts_dayMix_PGD_lr::Float64 = 0.05
     ts_dayMix_PGD_tol::Float64 = 1e-6
-    ts_hullClustering_sinkhornFix::Bool = true
 
     # External clustering override (load mapDay_repDay from IESA-Opt 1.0-exported parquet
     # to bypass Julia's k-means and extreme-day promotion). Used by Julia↔IESA-Opt 1.0
@@ -338,6 +339,15 @@ Base.@kwdef mutable struct ModelParams
     decom_planned::Dict{Tuple{Symbol,Int},Float64}            = Dict()
     decom_plannedSel::Dict{Tuple{Symbol,Int},Float64}         = Dict()  # filtered to periods_solve
     retrofit_relations::Dict{Tuple{Symbol,Symbol},Bool}       = Dict()
+    # ---- Derived from retrofit_relations by `derive_sets!` -----------------
+    # Sparse retrofit support: AIMMS materializes only `retrofit_relations(it,jt)==true`
+    # entries before sending to Gurobi, but a dense Julia (it×jt×ps) variable
+    # creates ~|tech|^2 redundant cols/rows that Gurobi's presolve must remove.
+    # We pre-compute the active pair list and the per-tech in/out adjacency to
+    # build a sparse `retrofitting` variable.
+    retrofit_pairs::Vector{Tuple{Symbol,Symbol}}              = Tuple{Symbol,Symbol}[]
+    retrofit_in_by_tech::Dict{Symbol,Vector{Symbol}}          = Dict()  # t -> [it : (it,t) is a pair]
+    retrofit_out_by_tech::Dict{Symbol,Vector{Symbol}}         = Dict()  # t -> [jt : (t,jt) is a pair]
     cumulative_CO2storage::Dict{Symbol,Float64}               = Dict()  # per node
     emissionTargetAir::Dict{Tuple{Symbol,Int},Float64}        = Dict()
     emissionTargetAll::Dict{Tuple{Symbol,Int},Float64}        = Dict()
@@ -371,9 +381,9 @@ Base.@kwdef mutable struct ModelParams
     cumulativeUP_DW_dQtfe_helper_TS::Dict{Tuple{Int,Symbol,Int},Float64}        = Dict()  # IESA-Opt 1.0 (hc,tfe,p) helper used by cumulativeUP/DW_dQtfe_TS
     cumulative_dQtfe_rhs_TS::Dict{Tuple{Int,Symbol,Int},Float64}                = Dict()  # IESA-Opt 1.0 (qc,tfe,p) RHS aggregated by quarter
     cumulativeS_dQtfv_helper1_TS::Dict{Tuple{Symbol,Int},Float64}               = Dict()  # IESA-Opt 1.0 (tfv,hc) profile-of-EVuse / avg_speed
-    cumulativeS_dQtfv_helper2_TS::Dict{Tuple{Symbol,Int},Float64}               = Dict()  # IESA-Opt 1.0 (tfv,hc) currently always 0
-    ev_min_soc_fraction_default::Float64                                        = 0.2     # IESA-Opt 1.0 line ~3978 default min SoC fraction
-    ev_v2g_power_fraction_default::Float64                                      = 0.8     # IESA-Opt 1.0 line ~3982 default V2G discharge fraction
+    cumulativeS_dQtfv_helper2_TS::Dict{Tuple{Symbol,Int},Float64}               = Dict()
+    ev_min_soc_fraction_default::Float64                                        = 0.0
+    ev_v2g_power_fraction_default::Float64                                      = 1.0
 
     # Shedding parameters
     shed_capacity::Dict{Tuple{Symbol,Int},Float64}            = Dict()
@@ -437,7 +447,7 @@ Base.@kwdef mutable struct ModelParams
     dS_hourly::Dict{Tuple{Symbol,Symbol},Float64}             = Dict()
     dW_hourly::Dict{Tuple{Symbol,Symbol},Float64}             = Dict()
     period_weight::Dict{Int,Float64}                          = Dict()
-    p_epsilon::Float64                                        = 0.0001
+    p_epsilon::Float64                                        = 0.0
 
     # ----------------------------------------------------- Policy / regulatory targets
     # Hard-coded values from IESA-Opt 1.0 lines 20913-21015. Period-indexed in PJ or fraction.
@@ -501,6 +511,17 @@ Base.@kwdef mutable struct ModelParams
     closure_days_BE::Dict{Symbol,Vector{Int}}                 = Dict()
     rolling_window_hours_q::Dict{Int,Vector{Int}}             = Dict()  # q → hours in 4h window
     rolling_window_hours_r::Dict{Int,Vector{Int}}             = Dict()  # r → hours in 3d window
+
+    # =========================================================================
+    # Project-specific extensions (opt-in, NOT part of the core model)
+    # See src/extensions/README.md for the architecture and removal steps.
+    # =========================================================================
+    extensions::Set{Symbol}                                   = Set([:multi_region, :land_use])
+
+    # Cluster land-use limit (`:land_use`, AIMMS `c_ClusterSpace_Limit`).
+    # Always read when present in the workbook; only constrains when enabled.
+    techSpace::Dict{Symbol,Float64}                           = Dict()  # AIMMS p_techSpace: Technologies!DS "Space (Ha)" [Hectare/UoC]
+    clusterAvailableArea::Dict{Symbol,Float64}                = Dict()  # AIMMS p_clusterAvailableArea: Parameters "CLn_AvailableArea" rows [Hectare]
 end
 
 # ----------------------------------------------------------------------------
@@ -528,7 +549,7 @@ ModelData() = ModelData(ModelSets(), ModelParams())
     RunResult
 
 Captures one solver invocation. Mirrors the fields tracked by IESA-Opt 1.0
-`RecordRunStatistics` / `run_summary.csv`.
+`RecordRunStatistics` and the current run-statistics result table.
 """
 struct RunResult
     output_folder::String

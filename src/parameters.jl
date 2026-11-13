@@ -46,6 +46,8 @@ function compute_derived_params!(md::ModelData)
     compute_emission_target_aggregates!(md)
     compute_tech_activity!(md)
     init_policy_targets!(md)
+    # Extension data conventions (no-op unless extension is enabled).
+    # Komar AIMMS convention for techStock_min/max — see multi_region.jl.
     return md
 end
 
@@ -169,16 +171,25 @@ end
     compute_temporal_helpers!(md)
 
 Build `dayPer_hour`, `hoursindayPer_hour`, `firstHourOfDay`, `lastHourOfDay`,
-`prev_hour`, `next_hour` (cyclic) from `hours_orig` and `hoursPer_day`.
+`prev_hour`, `next_hour` (cyclic) from `s.hours` (FH-resolution set,
+length = 365 × hoursPer_day) and `hoursPer_day`.
+
+Must be called AFTER `derive_sets!` populates `s.hours`.
 """
 function compute_temporal_helpers!(md::ModelData)
     s = md.sets
     p = md.params
 
+    # Skip if either no data was loaded (s.hours_orig empty → can't derive)
+    # or hoursPer_day is non-positive.
     isempty(s.hours_orig) && return md
     p.hoursPer_day <= 0 && return md
 
-    n_hours = length(s.hours_orig)
+    # Use the FH-resolution hour set, NOT the raw 8760 set. `s.hours` is
+    # populated by `derive_sets!` to `1..(365 * hoursPer_day)`.
+    isempty(s.hours) && return md
+
+    n_hours = length(s.hours)
     n_days  = div(n_hours, p.hoursPer_day)
 
     empty!(p.dayPer_hour)
@@ -206,19 +217,18 @@ function compute_temporal_helpers!(md::ModelData)
     # Approximations: week = ((d-1) ÷ 7) + 1 (capped at 53), month = `monthPer_hourOrig`
     # if loaded, else 12 equal bins; season = (month-1) ÷ 3 + 1 mapped; semester = (month-1) ÷ 6 + 1.
     days_per_range = max(1, p.daysPer_range)
-    hours_per_quarter = max(1, p.hoursPer_quarter_cluster)
+    hours_per_quarter = _fh_hours_per_quarter(p)
 
-    for h in s.hours_orig
+    for h in s.hours
         d  = div(h - 1, p.hoursPer_day) + 1
         hd = mod(h - 1, p.hoursPer_day) + 1
         p.dayPer_hour[h] = d
         p.hoursindayPer_hour[h] = hd
         # slice_width_hours = how many actual clock-hours this slice represents.
-        # For FH 24h: 1.0; for FH 12h: 2.0; for FH 8h: 3.0; for AS: variable
+        # For FH 24h: 1.0; for FH 12h: 2.0; for FH 8h: 3.0; for FH 1h: 24.0
         p.slice_width_hours[h] = 24.0 / p.hoursPer_day
         p.hoursPerDayEffective[h] = Float64(p.hoursPer_day)
-        # quarter-hour window: (h-1) ÷ hours_per_quarter + 1
-        p.quarterPer_hour[h] = div(h - 1, hours_per_quarter) + 1
+        p.quarterPer_hour[h] = ceil(Int, h // hours_per_quarter)
         # range (r_dayWindow): typically 3 days. range r = (d-1) ÷ days_per_range + 1
         p.rangePer_hour[h] = div(d - 1, days_per_range) + 1
     end
@@ -227,11 +237,14 @@ function compute_temporal_helpers!(md::ModelData)
     for d in 1:n_days
         # week (1..53): 1-based 7-day buckets, day 365 → week 53
         wk = min(53, div(d - 1, 7) + 1)
-        # month (1..12): try to pull from monthPer_hourOrig at first hour of day,
-        # else fall back to even 12-month split (365/12 ≈ 30.42 days/month)
-        first_h_of_d = (d - 1) * p.hoursPer_day + 1
+        # month (1..12): try to pull from monthPer_hourOrig at first RAW hour of day,
+        # else fall back to even 12-month split (365/12 ≈ 30.42 days/month).
+        # NB: monthPer_hourOrig is keyed on RAW 1..8760 indices, so we must use
+        # the raw 24-hour-resolution first-hour-of-day index, not the FH one.
+        first_h_of_d_fh  = (d - 1) * p.hoursPer_day + 1
+        first_h_of_d_raw = (d - 1) * 24 + 1
         mo = if !isempty(p.monthPer_hourOrig)
-            get(p.monthPer_hourOrig, first_h_of_d, max(1, min(12, div(d - 1, 31) + 1)))
+            get(p.monthPer_hourOrig, first_h_of_d_raw, max(1, min(12, div(d - 1, 31) + 1)))
         else
             max(1, min(12, div(d - 1, 31) + 1))
         end
@@ -244,12 +257,12 @@ function compute_temporal_helpers!(md::ModelData)
         p.semesterPer_day[d] = sem
         p.rangePer_day[d]    = div(d - 1, days_per_range) + 1
 
-        p.firstHourOfDay[d] = first_h_of_d
+        p.firstHourOfDay[d] = first_h_of_d_fh
         p.lastHourOfDay[d]  = d * p.hoursPer_day
     end
 
     # Per-hour week/month/season/semester (propagate from day)
-    for h in s.hours_orig
+    for h in s.hours
         d = p.dayPer_hour[h]
         p.weekPer_hour[h]     = get(p.weekPer_day, d, 1)
         p.monthPer_hour[h]    = get(p.monthPer_day, d, 1)
@@ -257,9 +270,9 @@ function compute_temporal_helpers!(md::ModelData)
         p.semesterPer_hour[h] = get(p.semesterPer_day, d, 1)
     end
 
-    first_h = first(s.hours_orig)
-    last_h  = last(s.hours_orig)
-    for h in s.hours_orig
+    first_h = first(s.hours)
+    last_h  = last(s.hours)
+    for h in s.hours
         p.prev_hour[h] = h == first_h ? last_h  : h - 1
         p.next_hour[h] = h == last_h  ? first_h : h + 1
     end
@@ -715,20 +728,10 @@ end
 """
     compute_flex_loss_split!(md)
 
-Mirror the IESA-Opt 1.0 storage loss definitions used by the solver-facing run:
-    flex_loss_discharge          (raw input from sheet column BD; loaded into
-                                  `flex_losses_legacy[t]` here)
-    flex_loss_discharge_eff(tb) = min(flex_loss_discharge(tb), 0.99)
-    flex_loss_charge(tb)        = flex_loss_discharge(tb)
-
-`flex_standing_loss_effective` is left at 0.0 unless explicit input data has
-already populated it. The target IESA-Opt 1.0 MPS has storage-state coefficients of
-exactly -1, so the declaration InitialData is not active in the generated LP.
-
-Despite its name, IESA-Opt 1.0 `flex_loss_discharge_eff` is the *loss* fraction
-(capped at 0.99 to keep `1/(1-loss)` finite), NOT the discharge efficiency.
-Constraints use `(1 - flex_loss_charge)` and `1/(1 - flex_loss_discharge_eff)`,
-so feeding in a small loss yields ≈1 inverse-efficiency multipliers.
+Populate both legacy aliases from AIMMS `flex_losses` (workbook column BD).
+They describe one round-trip loss, not independent charge and discharge losses.
+Storage states use `(1-loss)*UP + DW`; closed-loop balances use `UP + DW/(1-loss)`.
+The supplied AIMMS model has no standing-loss term, so its effective value is zero.
 
 Callers can override these by writing into the dicts directly after read.
 """
@@ -736,9 +739,10 @@ function compute_flex_loss_split!(md::ModelData)
     p = md.params
 
     for (t, total_loss) in p.flex_losses_legacy
+        0.0 <= total_loss < 1.0 || error("flex_losses for $t must be in [0, 1), got $total_loss")
         # Already populated by an upstream source: don't overwrite
         haskey(p.flex_loss_charge, t)         || (p.flex_loss_charge[t]         = total_loss)
-        haskey(p.flex_loss_discharge_eff, t)  || (p.flex_loss_discharge_eff[t]  = min(total_loss, 0.99))
+        haskey(p.flex_loss_discharge_eff, t)  || (p.flex_loss_discharge_eff[t]  = total_loss)
     end
 
     empty!(p.flex_standing_loss_effective)
@@ -789,6 +793,15 @@ function compute_flex_indicators!(md::ModelData)
     return md
 end
 
+function _ev_journey_helper(profile, hour::Int, n_hours::Int, horizon::Real)
+    horizon < 1.0 && return 0.0
+    total = sum((profile(next_hour) for next_hour in (hour + 1):min(n_hours, floor(Int, hour + horizon))); init = 0.0)
+    if hour >= n_hours + 1 - horizon
+        total += sum((profile(next_hour) for next_hour in 1:min(n_hours, ceil(Int, hour - n_hours + horizon) - 1)); init = 0.0)
+    end
+    return total
+end
+
 # -----------------------------------------------------------------------------
 # Cluster-resolution flex helpers (post-clustering)
 # IESA-Opt 1.0 lines 4543/4698/4793/4842 region — RHS aggregates and EV helpers.
@@ -801,7 +814,7 @@ Populate cluster-dependent helper parameters used by the TS flex constraints:
 - `cumulativeS_dQtfv_helper1_TS[(tfv, hc)]` =
       `hourly_profiles_cluster[hc, profileType_EVuse[tfv]] / avg_speed[tfv]`
   (IESA-Opt 1.0 — used in EV cumulative state of charge `cumulativeS_dQtfv_TS`).
-- `cumulativeS_dQtfv_helper2_TS[(tfv, hc)]` = 0 (IESA-Opt 1.0 default).
+- `cumulativeS_dQtfv_helper2_TS[(tfv, hc)]` is the weighted calendar journey requirement.
 - `cumulativeUP_DW_dQtfe_helper_TS[(hc, tfe, ps)]` =
       `hourly_profiles_cluster[hc, profileType_tech[tfe]] *
        activity_balances[tfe, flex_activity[tfe], ps]`
@@ -831,27 +844,21 @@ function compute_flex_TS_helpers!(md::ModelData)
 
     pss = isempty(s.periods_solve) ? s.periods : s.periods_solve
 
-    # 0. IESA-Opt 1.0 line ~7682:
-    #     repDayWeight_range(rd, r)    := sum[id | mapDay_repDay(id)=rd ∧ rangePer_day(id)=r,    1]
-    #     repDayWeight_week(rd, w)     := sum[id | mapDay_repDay(id)=rd ∧ weekPer_day(id)=w,     1]
-    #     repDayWeight_month(rd, m)    := sum[id | mapDay_repDay(id)=rd ∧ monthPer_day(id)=m,    1]
-    #     repDayWeight_season(rd, sn)  := sum[id | mapDay_repDay(id)=rd ∧ seasonPer_day(id)=sn,  1]
-    #     repDayWeight_semester(rd, b) := sum[id | mapDay_repDay(id)=rd ∧ semesterPer_day(id)=b, 1]
-    # i.e. for each (rd, scope) the count of calendar days that map to rd AND fall in that scope.
+    # Calendar-scope totals include all fitted day weights, not only the largest assignment.
     # Used by balanceR/W/M/S/B_deltaQd_TS (lines 4708-4724) and balanceW_deltaHchp_TS (line ~3608).
     # If left empty, those constraints become 0=0 and impose NO round-trip-loss balance — which
     # silently makes weekly/monthly/seasonal storage techs (PNL03_02/04, etc.) "free".
-    for (d, rd) in p.mapDay_repDay
+    for ((d, rd), day_weight) in p.dayMix_weight
         r  = get(p.rangePer_day,    d, 0)
         w  = get(p.weekPer_day,     d, 0)
         mo = get(p.monthPer_day,    d, 0)
         sn = get(p.seasonPer_day,   d, 0)
         bm = get(p.semesterPer_day, d, 0)
-        if r  != 0; key = (rd, r);  p.repDayWeight_range[key]    = get(p.repDayWeight_range,    key, 0.0) + 1.0; end
-        if w  != 0; key = (rd, w);  p.repDayWeight_week[key]     = get(p.repDayWeight_week,     key, 0.0) + 1.0; end
-        if mo != 0; key = (rd, mo); p.repDayWeight_month[key]    = get(p.repDayWeight_month,    key, 0.0) + 1.0; end
-        if sn != 0; key = (rd, sn); p.repDayWeight_season[key]   = get(p.repDayWeight_season,   key, 0.0) + 1.0; end
-        if bm != 0; key = (rd, bm); p.repDayWeight_semester[key] = get(p.repDayWeight_semester, key, 0.0) + 1.0; end
+        if r  != 0; key = (rd, r);  p.repDayWeight_range[key]    = get(p.repDayWeight_range,    key, 0.0) + day_weight; end
+        if w  != 0; key = (rd, w);  p.repDayWeight_week[key]     = get(p.repDayWeight_week,     key, 0.0) + day_weight; end
+        if mo != 0; key = (rd, mo); p.repDayWeight_month[key]    = get(p.repDayWeight_month,    key, 0.0) + day_weight; end
+        if sn != 0; key = (rd, sn); p.repDayWeight_season[key]   = get(p.repDayWeight_season,   key, 0.0) + day_weight; end
+        if bm != 0; key = (rd, bm); p.repDayWeight_semester[key] = get(p.repDayWeight_semester, key, 0.0) + day_weight; end
     end
     # repDayWeight_year[rd] = #days mapped to rd (== dayWeight[rd]); kept for completeness even
     # though IESA-Opt 1.0 balanceY_deltaQd_TS uses dayWeight directly.
@@ -864,10 +871,27 @@ function compute_flex_TS_helpers!(md::ModelData)
         prof_t = get(p.profileType_EVuse, tfv, Symbol(""))
         spd    = get(p.avg_speed, tfv, 0.0)
         (prof_t == Symbol("") || spd == 0.0) && continue
+        slots = p.hoursPer_day_cluster
+        horizon = get(p.avg_journey, tfv, 0.0) / slots
+        journey = Dict{Int,Float64}()
+        if horizon >= 1.0
+            calendar = zeros(Float64, length(s.days) * slots)
+            for ((day, representative), weight) in p.dayMix_weight, slot in 1:slots
+                calendar[(day - 1) * slots + slot] += weight * get(p.hourly_profiles_cluster, ((representative - 1) * slots + slot, prof_t), 0.0)
+            end
+            for ((day, representative), weight) in p.dayMix_weight, slot in 1:slots
+                cluster_hour = (representative - 1) * slots + slot
+                calendar_hour = (day - 1) * slots + slot
+                requirement = _ev_journey_helper(hour -> calendar[hour], calendar_hour, length(calendar), horizon)
+                journey[cluster_hour] = get(journey, cluster_hour, 0.0) + weight * requirement
+            end
+        end
         for hc in s.hours_cluster
             v = get(p.hourly_profiles_cluster, (hc, prof_t), 0.0) / spd
             p.cumulativeS_dQtfv_helper1_TS[(tfv, hc)] = v
-            p.cumulativeS_dQtfv_helper2_TS[(tfv, hc)] = 0.0
+            representative = get(p.repDay_of_clusterHour, hc, 0)
+            day_weight = get(p.dayWeight, representative, 0.0)
+            p.cumulativeS_dQtfv_helper2_TS[(tfv, hc)] = day_weight > 0.0 ? get(journey, hc, 0.0) / day_weight : 0.0
         end
     end
 
@@ -946,7 +970,10 @@ function compute_flex_capacity!(md::ModelData)
     #     sum[itb | activity_balances(itb,yp,base_year) < 0,
     #         hourly_profilesRead(h, profileType_techRead(itb)) * activity_balances(itb,yp,base_year)]
     #     / sum[itb | activity_balances(itb,yp,base_year) < 0, activity_balances(itb,yp,base_year)]
-    # The peak over h then matters for flex_capacity. Compute resolved peak for indirect activities.
+    # The peak over h then matters for flex_capacity. If `hourly_profiles` already
+    # contains the resolved indirect profile (including FH hpd aggregation), keep
+    # that AIMMS solve-resolution peak. Otherwise fall back to reconstructing the
+    # indirect profile from raw inputs.
     ind_set = isempty(s.activities_indirect) ? Set{Symbol}() : Set(s.activities_indirect)
     if !isempty(ind_set) && !isempty(p.hourly_profilesReadOrig) &&
        !isempty(p.profileType_techRead) && !isempty(p.activity_balances)
@@ -965,6 +992,7 @@ function compute_flex_capacity!(md::ModelData)
             push!(h_orig_set, h_orig)
         end
         for (yp, cs) in consumers_for
+            haskey(peak_by_profile, yp) && continue
             denom = sum(ab for (_, ab) in cs)
             denom == 0.0 && continue
             local_peak = -Inf

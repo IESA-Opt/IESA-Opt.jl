@@ -16,19 +16,17 @@ out_*/
 out_phase*_smoke/
 Output/*
 !Output/.gitkeep
-Output_Batch/*
-!Output_Batch/.gitkeep
-data/*
-!data/.gitkeep
-!data/default_data
-!data/default_data.*
-!data/default_data/
-!data/default_data/**
-data_Batch/*
-!data_Batch/.gitkeep
-data/WY*.xlsx
-data/WY*.xlsm
-data/.iesa_cache/
+Input/*
+!Input/.gitkeep
+*.xlsx
+*.xlsm
+*.gpkg
+*.duckdb
+*.duckdb.wal
+*.parquet
+*.CSV
+*.csv
+*.data
 local/
 validation/
 *.log
@@ -51,6 +49,5 @@ validate_out.txt
 .DS_Store
 Thumbs.db
 
-# Auto-generated launcher shortcut (start-ui.ps1 (re)writes it on every
-# launch with absolute paths, so it must not be committed).
+# Legacy launcher shortcut (stored absolute paths; replaced by IESA-Opt UI.cmd).
 IESA-Opt UI.lnk

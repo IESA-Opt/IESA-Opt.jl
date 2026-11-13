@@ -22,8 +22,8 @@ const THREADS = env_int("IESA_THREADS", 5)
 const FORCE_REFRESH = env_bool("IESA_FORCE_REFRESH", false)
 const USE_CACHE = env_bool("IESA_USE_CACHE", false)
 default_workbook(scenario::AbstractString) = begin
-    scenario_path = joinpath(REPO_ROOT, "data", scenario * ".xlsx")
-    isfile(scenario_path) ? scenario_path : joinpath(REPO_ROOT, "data", "default_data.xlsx")
+    scenario_path = joinpath(REPO_ROOT, "Input", scenario * ".xlsx")
+    isfile(scenario_path) ? scenario_path : joinpath(REPO_ROOT, "Input", "default_data.xlsx")
 end
 const DATA_XLSX = env_string(
     "IESA_DATA_XLSX",
@@ -76,8 +76,8 @@ function main()
 
     md.params.n_repDays = REP_DAYS
     md.params.hoursPer_day_cluster = 24
-    md.params.clustering_approach = :kmeans_avg
-    md.params.ts_extremePeriods = true
+    md.params.clustering_approach = :k_medoids
+    md.params.ts_extremePeriods = false
     md.params.ts_extremeDays_count = 5
     md.params.ts_capacityProfile_autoMode = true
     md.params.ts_capacityProfile_autoFloor = 0.23

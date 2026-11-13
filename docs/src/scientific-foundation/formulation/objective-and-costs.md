@@ -84,7 +84,7 @@ Small `p_epsilon` terms discourage artificial cycling and help select stable sol
 \color{#7f1d1d}{C^{eps}_{ps}} = \color{#166534}{p_\epsilon} \sum_{\color{#1d4ed8}{h},\color{#1d4ed8}{t}} \left(\color{#7f1d1d}{deltaQ\_DW}(\color{#1d4ed8}{h},\color{#1d4ed8}{t},\color{#1d4ed8}{ps}) - \color{#7f1d1d}{deltaQ\_UP}(\color{#1d4ed8}{h},\color{#1d4ed8}{t},\color{#1d4ed8}{ps}) - \color{#7f1d1d}{deltaS\_shed}(\color{#1d4ed8}{h},\color{#1d4ed8}{t},\color{#1d4ed8}{ps})\right).
 ```
 
-Symbols and indices: `p_epsilon` is a small parameter. `deltaQ_DW`, `deltaQ_UP`, and `deltaS_shed` are flexibility and shedding variables indexed by hour `h`, technology `t`, and solve period `ps`.
+Symbols and indices: `p_epsilon` is a small parameter. `deltaQ_DW`, `deltaQ_UP`, and `deltaS_shed` are flexibility and shedding variables indexed by hour `h`, technology `t`, and solve period `ps`. The default is `p_epsilon = 0`, matching the supplied AIMMS model; set a positive value only for a deliberate tie-breaking study.
 
 These terms are intentionally small relative to real system costs.
 

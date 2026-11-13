@@ -95,29 +95,25 @@ function serve_ui!(; host::AbstractString = "127.0.0.1",
     if Base.Threads.nthreads() == 1
         @warn "Start Julia with --threads=auto to keep progress polling responsive during long solves"
     end
-    # The launcher script (scripts/launcher/start-ui.ps1) sets
-    # IESA_OPT_OPEN_BROWSER=0 because it polls the port itself and opens
-    # the browser once it is actually listening — that is more reliable
-    # than the @async sleep(1.0) below and avoids spawning two browser
-    # tabs when both fire at the same time.
     env_open = get(ENV, "IESA_OPT_OPEN_BROWSER", "")
     if env_open == "0" || lowercase(env_open) in ("false", "no", "off")
         open_browser = false
     end
-    if open_browser
-        @async begin
-            sleep(1.0)
-            _open_browser(url)
-        end
+    # Bind before the warm-up competes for the compiler, so the loading page sees live progress.
+    server = HTTP.serve!(_ui_handler, host, port; verbose = false)
+    try
+        _ui_handler(HTTP.Request("GET", "/api/status"))
+        open_browser && @async _open_browser(url)
+        _warm_default_workbook_cache!("Input/default_data.xlsx")
+        @info "IESA-Opt UI serving" url julia_threads = Base.Threads.nthreads()
+        wait(server)
+    finally
+        close(server)
     end
-    # Start warming the default workbook in the background so that JIT for the
-    # DuckDB-cache deserialize path is paid before the user clicks Run.
-    _warm_default_workbook_cache!("data/default_data.xlsx")
-    @info "IESA-Opt UI serving" url julia_threads = Base.Threads.nthreads()
-    HTTP.serve(_ui_handler, host, port; verbose = false)
 end
 
-function _ui_handler(req::HTTP.Request)
+# @nospecialize: one compiled handler for every request body type (each specialization costs ~15 s of JIT).
+function _ui_handler(@nospecialize(req::HTTP.Request))
     uri = HTTP.URI(req.target)
     path = isempty(uri.path) ? "/" : String(uri.path)
     query = uri.query === nothing ? nothing : String(uri.query)
@@ -134,7 +130,7 @@ function _ui_handler(req::HTTP.Request)
     end
 end
 
-function _api_response(method::String, path::String, query::Union{Nothing,String}, req::HTTP.Request)
+function _api_response(method::String, path::String, query::Union{Nothing,String}, @nospecialize(req::HTTP.Request))
     if length(path) > 1
         path = rstrip(path, '/')
     end
@@ -187,6 +183,19 @@ function _api_response(method::String, path::String, query::Union{Nothing,String
         period_raw = _config_get(body, "period", nothing)
         period = period_raw === nothing ? nothing : (period_raw isa Integer ? Int(period_raw) : (period_raw isa AbstractString && !isempty(period_raw) ? parse(Int, period_raw) : nothing))
         return _json_response(_flexibility_payload(out_dir; tech = tech, period = period))
+    elseif method == "POST" && path == "/api/outputs/regionalMap"
+        body = _json_body(req)
+        out_dir = _resolve_output_dir(String(_config_get(body, "outputDir", "")))
+        metric = String(_config_get(body, "metric", "stock"))
+        commodity = String(_config_get(body, "commodity", "all"))
+        period_raw = _config_get(body, "period", nothing)
+        period = period_raw === nothing ? nothing : (period_raw isa Integer ? Int(period_raw) : (period_raw isa AbstractString && !isempty(period_raw) ? parse(Int, period_raw) : nothing))
+        map_file = String(something(_config_get(body, "mapFile", ""), ""))
+        return _json_response(_regional_map_payload(out_dir; metric = metric, commodity = commodity, period = period, map_file = map_file))
+    elseif method == "GET" && path == "/api/maps"
+        return _json_response(Dict("maps" => _map_catalog()))
+    elseif method == "GET" && path == "/api/maps/geometry"
+        return _map_geometry_response(query)
     elseif method == "POST" && path == "/api/outputs/compare"
         body = _json_body(req)
         return _json_response(_compare_output_runs(_as_string_vector(_config_get(body, "outputDirs", String[]))))
@@ -316,6 +325,8 @@ function _mime_type(path::AbstractString)
     ext == ".html" && return "text/html; charset=utf-8"
     ext == ".css" && return "text/css; charset=utf-8"
     ext == ".js" && return "text/javascript; charset=utf-8"
+    ext == ".json" && return "application/json; charset=utf-8"
+    ext == ".geojson" && return "application/geo+json; charset=utf-8"
     ext == ".png" && return "image/png"
     ext == ".svg" && return "image/svg+xml"
     return "application/octet-stream"
@@ -323,6 +334,16 @@ end
 
 _repo_root() = normpath(joinpath(@__DIR__, ".."))
 _ui_dir() = joinpath(_repo_root(), "ui")
+
+# Folder fingerprint so the launcher can reuse a running UI; must match scripts/launcher/start_ui.jl.
+function _ui_instance_id(root::AbstractString = _repo_root())
+    path = try realpath(root) catch; normpath(root) end
+    h = 0xcbf29ce484222325
+    for byte in codeunits(lowercase(rstrip(path, ['\\', '/'])))
+        h = (h ⊻ byte) * 0x00000100000001b3
+    end
+    return string(h; base = 16, pad = 16)
+end
 
 function _open_browser(url::AbstractString)
     try
@@ -346,15 +367,16 @@ function _ui_options()
         "hoursPerDayOptions" => [24, 12, 8, 6, 4, 3, 2, 1],
         "solveMethods" => [
             Dict("id" => "barrier", "label" => "Barrier"),
+            Dict("id" => "barrier_fallback", "label" => "Barrier (fallback, 1e-5)"),
             Dict("id" => "barrier_crossover", "label" => "Barrier + crossover"),
             Dict("id" => "concurrent", "label" => "Concurrent"),
             Dict("id" => "dual_simplex", "label" => "Dual simplex"),
             Dict("id" => "primal_simplex", "label" => "Primal simplex"),
         ],
-        "clusteringApproaches" => ["kmeans_avg", "kmeans_shape", "kmedoids_shape", "maxdiss", "maxdiss_shape", "hull_convex", "hull_conical"],
-        "constraintGroups" => ["Base", "Base + Bunkers", "Base + Scope3", "Base + Bunkers + Scope3", "ADAPT", "TRANSFORM", "ADAPT + bunker aviation & navigation policy", "ADAPT with bunkers in single constraint", "Base + RFNBO targets", "Linking scenario", "Linking scenario + Scope3"],
+        "clusteringApproaches" => ["k_medoids", "k_means"],
+        "constraintGroups" => collect(_AIMMS_CONSTRAINT_GROUPS),
         "defaults" => Dict(
-            "inputWorkbook" => "data/default_data.xlsx",
+            "inputWorkbook" => "Input/default_data.xlsx",
             "periods" => [2050],
             "mode" => "timeslice",
             "hoursPerDay" => 24,
@@ -362,14 +384,14 @@ function _ui_options()
             "solver" => _preferred_default_solver_id(),
             "solveMethod" => "barrier_crossover",
             "threads" => 0,
-            "clusteringApproach" => "kmeans_avg",
-            "extremePeriods" => true,
-            "extremeDays" => 5,
+            "clusteringApproach" => "k_medoids",
             "boundaryRamping" => true,
             "hourlyReports" => true,
             "showViolations" => false,
             "outputMode" => "automatic",
-            "constraintGroup" => "Base + Bunkers + Scope3"
+            "constraintGroup" => "Base + Bunkers + FeedStocks",
+            "multiRegion" => true,
+            "landUse" => true,
         )
     )
     _warm_default_workbook_cache!(String(options["defaults"]["inputWorkbook"]))
@@ -378,7 +400,7 @@ end
 
 function _list_workbooks()
     root = _repo_root()
-    dirs = [joinpath(root, "data"), joinpath(root, "data_Batch")]
+    dirs = [joinpath(root, "Input")]
     files = String[]
     for dir in dirs
         isdir(dir) || continue
@@ -390,6 +412,42 @@ function _list_workbooks()
         end
     end
     return files
+end
+
+function _rewrite_legacy_input_workbook(value::AbstractString)
+    text = strip(String(value))
+    isempty(text) && return "Input/default_data.xlsx"
+    root = _repo_root()
+    as_posix = replace(text, '\\' => '/')
+    if !isabspath(text) && startswith(lowercase(as_posix), "data/")
+        migrated = "Input/" * as_posix[6:end]
+        old_path = normpath(joinpath(root, text))
+        new_path = normpath(joinpath(root, migrated))
+        !isfile(old_path) && isfile(new_path) && return migrated
+    elseif isabspath(text)
+        old_root = replace(normpath(joinpath(root, "data")), '\\' => '/')
+        abs_path = replace(normpath(text), '\\' => '/')
+        old_root_lc = lowercase(old_root)
+        abs_path_lc = lowercase(abs_path)
+        if abs_path_lc == old_root_lc || startswith(abs_path_lc, old_root_lc * "/")
+            suffix = relpath(normpath(text), normpath(joinpath(root, "data")))
+            migrated = suffix == "." ? normpath(joinpath(root, "Input")) : normpath(joinpath(root, "Input", suffix))
+            !isfile(normpath(text)) && isfile(migrated) && return migrated
+        end
+    end
+    return text
+end
+
+function _resolve_input_workbook(value::AbstractString; require_exists::Bool = true)
+    input_value = _rewrite_legacy_input_workbook(value)
+    input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
+    require_exists && !isfile(input_path) && error("Input workbook not found: $(input_value)")
+    rel = try
+        replace(relpath(input_path, _repo_root()), '\\' => '/')
+    catch
+        input_path
+    end
+    return input_path, rel
 end
 
 # Opens a native OS file-open dialog and returns the absolute path that the user
@@ -409,7 +467,7 @@ const _COMDLG_OFN_SIZE  = 152  # x64 OPENFILENAMEW size in bytes
 const _COMDLG_OFN_FLAGS = UInt32(0x00001000 | 0x00000800 | 0x00080000 | 0x00000008)
 function _browse_for_input_file_native()
     (Sys.iswindows() && Sys.WORD_SIZE == 64) || return nothing
-    initial_dir = joinpath(_repo_root(), "data")
+    initial_dir = joinpath(_repo_root(), "Input")
     isdir(initial_dir) || (initial_dir = _repo_root())
     # OPENFILENAMEW filter format: "<label>\0<patterns>\0…\0\0"
     filter_w  = transcode(UInt16,
@@ -449,7 +507,7 @@ function _browse_for_input_file()
     Sys.iswindows() || return ""
     native = _browse_for_input_file_native()
     native === nothing || return native
-    initial_dir = joinpath(_repo_root(), "data")
+    initial_dir = joinpath(_repo_root(), "Input")
     if !isdir(initial_dir)
         initial_dir = _repo_root()
     end
@@ -529,7 +587,7 @@ function _warm_default_workbook_cache!(input_workbook::AbstractString)
     input_path = isabspath(input_workbook) ? normpath(input_workbook) : normpath(joinpath(_repo_root(), input_workbook))
     if !isfile(input_path)
         _ui_warmup_status_update!(state = "missing", workbook = input_workbook,
-                                  message = "Workbook not found at $(input_workbook). Place the file under data/ and reload.",
+                                  message = "Workbook not found at $(input_workbook). Place the file under Input/ and reload.",
                                   error = "", elapsedSec = 0.0, readyAt = "")
         return nothing
     end
@@ -612,10 +670,13 @@ function _mga_config(body)
     rep_days = clamp(_as_int(_config_get(body, "representativeDays", 15), 15), 1, 365)
     hours_per_day = clamp(_as_int(_config_get(body, "hoursPerDay", 24), 24), 1, 24)
     extreme_days = clamp(_as_int(_config_get(body, "extremeDays", 5), 5), 0, 30)
-    extreme_periods = _as_bool(_config_get(body, "extremePeriods", true), true)
+    extreme_periods = _as_bool(_config_get(body, "extremePeriods", false), false)
     boundary_ramping = _as_bool(_config_get(body, "boundaryRamping", true), true)
     solver = lowercase(String(_config_get(body, "solver", _preferred_default_solver_id())))
     solve_method = lowercase(String(_config_get(body, "solveMethod", "barrier_crossover")))
+    input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
+    _, input_rel = _resolve_input_workbook(input_value; require_exists = false)
+    clustering = Symbol(lowercase(String(_config_get(body, "clusteringApproach", "k_medoids"))))
     return Dict{String,Any}(
         "name" => isempty(strip(name)) ? "mga_campaign" : strip(name),
         "directions" => n_directions,
@@ -625,16 +686,19 @@ function _mga_config(body)
         "oracleIterations" => oracle_iterations,
         "oracleBatch" => oracle_batch,
         "tolerance" => tolerance,
-        "inputWorkbook" => String(_config_get(body, "inputWorkbook", "data/default_data.xlsx")),
+        "inputWorkbook" => input_rel,
         "periods" => _as_int_vector(_config_get(body, "periods", [2050])),
         "mode" => mode,
         "representativeDays" => rep_days,
         "hoursPerDay" => hours_per_day,
-        "clusteringApproach" => String(_config_get(body, "clusteringApproach", "kmeans_avg")),
+        "clusteringApproach" => String(clustering),
+        "clusteringDistance" => lowercase(String(_config_get(body, "clusteringDistance", _default_clustering_distance(clustering)))),
         "extremePeriods" => extreme_periods,
         "extremeDays" => extreme_days,
         "boundaryRamping" => boundary_ramping,
-        "constraintGroup" => String(_config_get(body, "constraintGroup", "Base + Bunkers + Scope3")),
+        "constraintGroup" => _normalize_constraint_group(String(_config_get(body, "constraintGroup", last(_AIMMS_CONSTRAINT_GROUPS)))),
+        "multiRegion" => _as_bool(_config_get(body, "multiRegion", true), true),
+        "landUse" => _as_bool(_config_get(body, "landUse", true), true),
         "solver" => solver,
         "solveMethod" => solve_method,
         "method" => String(_config_get(body, "method", "hybrid-oracle-mga")),
@@ -646,6 +710,7 @@ function _mga_exact_config(cfg::Dict{String,Any})
     mode = mode_text in ("full_hourly", "full-hourly", "fh") ? :fh : :ts
     periods = _as_int_vector(get(cfg, "periods", [2050]))
     period = isempty(periods) ? 2050 : first(periods)
+    clustering = Symbol(String(get(cfg, "clusteringApproach", "k_medoids")))
     return MGAExactConfig(
         directions = Int(cfg["directions"]),
         cost_slack = Float64(cfg["costSlack"]),
@@ -660,10 +725,13 @@ function _mga_exact_config(cfg::Dict{String,Any})
         period = period,
         representative_days = Int(get(cfg, "representativeDays", 15)),
         hours_per_day = Int(get(cfg, "hoursPerDay", 24)),
-        clustering = Symbol(String(get(cfg, "clusteringApproach", "kmeans_avg"))),
-        extreme_periods = Bool(get(cfg, "extremePeriods", true)),
+        clustering = clustering,
+        clustering_distance = Symbol(String(get(cfg, "clusteringDistance", _default_clustering_distance(clustering)))),
+        extreme_periods = Bool(get(cfg, "extremePeriods", false)),
         extreme_days = Int(get(cfg, "extremeDays", 5)),
         boundary_ramping = Bool(get(cfg, "boundaryRamping", true)),
+        constraint_group = _normalize_constraint_group(String(get(cfg, "constraintGroup", last(_AIMMS_CONSTRAINT_GROUPS)))),
+        extensions = _model_extensions(cfg),
     )
 end
 
@@ -966,6 +1034,7 @@ function _ui_warmup_status_snapshot()
         elapsed = round(_ui_elapsed_since_serve_start(), digits = 2)
         snapshot["elapsedSec"] = elapsed
     end
+    snapshot["instance"] = _ui_instance_id()
     return snapshot
 end
 
@@ -1001,7 +1070,7 @@ function _warm_compile_run_paths!(md::ModelData)
         md_copy.params.hoursPer_day = 24
         md_copy.params.n_repDays = 1
         md_copy.params.hoursPer_day_cluster = 24
-        md_copy.params.clustering_approach = :kmeans_avg
+        md_copy.params.clustering_approach = :k_medoids
         md_copy.params.ts_extremePeriods = false
         md_copy.params.ts_extremeDays_count = 0
         md_copy.params.ts_boundaryRamping = true
@@ -1209,14 +1278,8 @@ function _ui_data_cache_path(input_path::AbstractString)
 end
 
 function _resolve_explorer_input(body)
-    input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
-    input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
-    isfile(input_path) || error("Input workbook not found: $(input_value)")
-    rel = try
-        replace(relpath(input_path, _repo_root()), '\\' => '/')
-    catch
-        input_path
-    end
+    input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
+    input_path, rel = _resolve_input_workbook(input_value)
     return input_path, rel
 end
 
@@ -1641,6 +1704,7 @@ function _prepare_explorer_model_data!(md::ModelData; period::Int, mode::Symbol,
     md.params.n_repDays = max(1, representative_days)
     md.params.hoursPer_day_cluster = 24
     md.params.clustering_approach = clustering
+    md.params.clustering_distance = _default_clustering_distance(clustering)
     md.params.ts_extremePeriods = false
     md.params.ts_extremeDays_count = 0
     md.params.ts_boundaryRamping = true
@@ -1702,13 +1766,15 @@ end
 function _explorer_model_browser(body)
     input_path, workbook = _resolve_explorer_input(body)
     md = _read_ui_data_cached(input_path)
+    md.params.constraint_group = _normalize_constraint_group(String(_config_get(body, "constraintGroup", last(_AIMMS_CONSTRAINT_GROUPS))))
+    md.params.extensions = _model_extensions(body)
     periods = _explorer_periods(md)
     period = _explorer_selected_period(body, periods)
     mode_raw = lowercase(String(_config_get(body, "mode", "timeslice")))
     mode = mode_raw in ("full_hourly", "fh", "full-hourly") ? :fh : (mode_raw == "annual" ? :annual : :ts)
     representative_days = clamp(_as_int(_config_get(body, "representativeDays", 1), 1), 1, 30)
     hours_per_day = clamp(_as_int(_config_get(body, "hoursPerDay", 24), 24), 1, 24)
-    clustering = Symbol(String(_config_get(body, "clusteringApproach", "kmeans_avg")))
+    clustering = Symbol(String(_config_get(body, "clusteringApproach", "k_medoids")))
 
     _, prepare_seconds = _elapsed() do
         _prepare_explorer_model_data!(md; period = period, mode = mode, representative_days = representative_days, hours_per_day = hours_per_day, clustering = clustering)
@@ -2297,6 +2363,26 @@ end
 
 _short_error(err) = first(split(sprint(showerror, err), '\n'))
 
+# Area occupied per industrial cluster in the solved stock (AIMMS
+# `p_clusterSpace_used`). Reported whenever the workbook has land-use data and
+# the solve produced values, so runs with the limit on and off can be compared.
+function _report_land_use!(job_id::AbstractString, model::JuMP.Model, vars, md::ModelData)
+    rows = try
+        JuMP.has_values(model) ? land_use_report(vars, md) : NamedTuple[]
+    catch err
+        _job_update!(job_id; stage = "solve", message = "Could not compute cluster land use: $(_short_error(err))")
+        return
+    end
+    isempty(rows) && return
+    limit = :land_use in md.params.extensions ? "ON" : "OFF"
+    lines = String["Cluster land use (limit $(limit); the limit applies to $(_LU_PERIOD) only):"]
+    for r in rows
+        share = r.available > 0 ? " ($(round(100 * r.used / r.available; digits = 1))%)" : ""
+        push!(lines, "  • $(r.cluster) $(r.period): $(round(r.used; digits = 1)) of $(round(r.available; digits = 1)) ha$(share)")
+    end
+    _job_update!(job_id; stage = "solve", message = join(lines, "\n"))
+end
+
 # Report constraints whose elastic slack is non-zero after a "Show
 # violations" run.  Emits a single multi-line job log message so users
 # can see the worst offenders in the Progress tab.
@@ -2409,9 +2495,8 @@ function _start_ui_job!(raw_config)
 end
 
 function _normalize_run_config(raw_config)
-    input_value = String(_config_get(raw_config, "inputWorkbook", "data/default_data.xlsx"))
-    input_path = isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
-    isfile(input_path) || error("Input workbook not found: $input_value")
+    input_value = String(_config_get(raw_config, "inputWorkbook", "Input/default_data.xlsx"))
+    input_path, input_rel = _resolve_input_workbook(input_value)
 
     mode_raw = lowercase(String(_config_get(raw_config, "mode", "timeslice")))
     mode = mode_raw in ("full_hourly", "fh", "full-hourly") ? "full_hourly" : "timeslice"
@@ -2421,19 +2506,10 @@ function _normalize_run_config(raw_config)
     output_mode = lowercase(String(_config_get(raw_config, "outputMode", "automatic")))
     output_name = String(_config_get(raw_config, "outputName", ""))
     scenario_name = splitext(basename(input_path))[1]
-    if output_mode == "custom" && !isempty(strip(output_name))
-        out_name = _sanitize_run_name(output_name)
-    else
-        stamp = Dates.format(now(), "yymmdd_HHMMSS")
-        rep_days = _as_int(_config_get(raw_config, "representativeDays", 15), 15)
-        hours_per_day = _as_int(_config_get(raw_config, "hoursPerDay", 24), 24)
-        mode_tag = mode == "timeslice" ? "$(rep_days)rd" : "$(hours_per_day)h"
-        periods_tag = isempty(periods) ? "" : join(string.(periods), "-")
-        out_name = isempty(periods_tag) ? "$(stamp)_$(mode_tag)" : "$(stamp)_$(mode_tag)_$(periods_tag)"
-    end
-
-    return Dict{String,Any}(
-        "inputWorkbook" => replace(relpath(input_path, _repo_root()), '\\' => '/'),
+    clustering = Symbol(lowercase(String(_config_get(raw_config, "clusteringApproach", "k_medoids"))))
+    output_stamp = Dates.format(now(), "yyyymmdd-HHMM")
+    config = Dict{String,Any}(
+        "inputWorkbook" => input_rel,
         "inputPath" => input_path,
         "scenario" => scenario_name,
         "periods" => periods,
@@ -2443,17 +2519,81 @@ function _normalize_run_config(raw_config)
         "solver" => lowercase(String(_config_get(raw_config, "solver", "highs"))),
         "solveMethod" => lowercase(String(_config_get(raw_config, "solveMethod", "barrier_crossover"))),
         "threads" => _as_int(_config_get(raw_config, "threads", 0), 0),
-        "clusteringApproach" => lowercase(String(_config_get(raw_config, "clusteringApproach", "kmeans_avg"))),
-        "extremePeriods" => _as_bool(_config_get(raw_config, "extremePeriods", true), true),
+        "clusteringApproach" => String(clustering),
+        "clusteringDistance" => lowercase(String(_config_get(raw_config, "clusteringDistance", _default_clustering_distance(clustering)))),
+        "extremePeriods" => _as_bool(_config_get(raw_config, "extremePeriods", false), false),
         "extremeDays" => _as_int(_config_get(raw_config, "extremeDays", 5), 5),
         "boundaryRamping" => _as_bool(_config_get(raw_config, "boundaryRamping", true), true),
         "hourlyReports" => _as_bool(_config_get(raw_config, "hourlyReports", true), true),
         "showViolations" => _as_bool(_config_get(raw_config, "showViolations", false), false),
-        "constraintGroup" => String(_config_get(raw_config, "constraintGroup", "Base + Bunkers + Scope3")),
+        "multiRegion" => _as_bool(_config_get(raw_config, "multiRegion", true), true),
+        "landUse" => _as_bool(_config_get(raw_config, "landUse", true), true),
+        "constraintGroup" => _normalize_constraint_group(String(_config_get(raw_config, "constraintGroup", last(_AIMMS_CONSTRAINT_GROUPS)))),
         "outputMode" => output_mode,
-        "outputName" => out_name,
-        "outputDir" => normpath(joinpath(_repo_root(), "Output", out_name))
+        "outputStamp" => output_stamp,
     )
+    # Automatic names get their node count once the workbook is read
+    # (see `_finalize_output_dir!`).
+    out_name = output_mode == "custom" && !isempty(strip(output_name)) ?
+        _sanitize_run_name(output_name) : _auto_output_name(config, nothing)
+    config["outputMode"] = output_mode == "custom" && !isempty(strip(output_name)) ? "custom" : "automatic"
+    config["outputName"] = out_name
+    config["outputDir"] = normpath(joinpath(_repo_root(), "Output", out_name))
+    return config
+end
+
+# Automatic output folder name: {N}Nodes_{resolution}_{clustering}_{yyyymmdd-HHMM},
+# e.g. 30Nodes_15RDx24h_kmedoids_20260512-1430 or 30Nodes_FH24h_noclustering_20260512-1430.
+function _auto_output_name(config::AbstractDict, n_nodes::Union{Nothing,Integer})
+    if config["mode"] == "timeslice"
+        resolution = "$(config["representativeDays"])RDx24h"
+        clustering = replace(lowercase(String(config["clusteringApproach"])), r"[^a-z0-9]+" => "")
+        config["extremePeriods"] === true && (clustering *= "-$(config["extremeDays"])ext")
+    else
+        resolution = "FH$(config["hoursPerDay"])h"
+        clustering = "noclustering"
+    end
+    parts = String[resolution, clustering, String(config["outputStamp"])]
+    n_nodes === nothing || pushfirst!(parts, "$(n_nodes)Nodes")
+    return join(parts, "_")
+end
+
+# Regional workbooks prefix activities with their node (CL1_..CLn_); national workbooks count as one node.
+# Types!H is not used because the template keeps spare CLn entries beyond the node count.
+function _model_node_count(md::ModelData)
+    used = Set{String}()
+    for a in md.sets.activities_original
+        m = match(r"^CL(\d+)_", String(a))
+        m === nothing || push!(used, m.captures[1])
+    end
+    return isempty(used) ? 1 : length(used)
+end
+
+function _finalize_output_dir!(job_id::String, config::Dict{String,Any}, md::ModelData)
+    config["outputMode"] == "automatic" || return config["outputDir"]
+    root = joinpath(_repo_root(), "Output")
+    base = _auto_output_name(config, _model_node_count(md))
+    name = base
+    suffix = 1
+    while ispath(joinpath(root, name))
+        suffix += 1
+        name = "$(base)_$(suffix)"
+    end
+    lock(UI_JOBS_LOCK)
+    try
+        config["outputName"] = name
+        config["outputDir"] = normpath(joinpath(root, name))
+    finally
+        unlock(UI_JOBS_LOCK)
+    end
+    return config["outputDir"]
+end
+
+function _model_extensions(config)
+    extensions = Set{Symbol}()
+    _as_bool(_config_get(config, "multiRegion", true), true) && push!(extensions, :multi_region)
+    _as_bool(_config_get(config, "landUse", true), true) && push!(extensions, :land_use)
+    return extensions
 end
 
 function _sanitize_run_name(name::AbstractString)
@@ -2598,6 +2738,7 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         md.params.n_repDays = max(1, config["representativeDays"])
         md.params.hoursPer_day_cluster = 24
         md.params.clustering_approach = Symbol(config["clusteringApproach"])
+        md.params.clustering_distance = Symbol(config["clusteringDistance"])
         md.params.ts_extremePeriods = config["extremePeriods"]
         md.params.ts_extremeDays_count = max(0, config["extremeDays"])
         md.params.ts_boundaryRamping = config["boundaryRamping"]
@@ -2608,6 +2749,14 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         md.params.ts_capacityProfile_envelopeMode = 0
         md.params.dayMix_softness = 0.0
         md.params.dayMix_weightType = :auto
+        md.params.constraint_group = config["constraintGroup"]
+        md.params.extensions = _model_extensions(config)
+        if :multi_region in md.params.extensions
+            _job_update!(job_id; stage = "reading", message = "MultiRegion extension is ENABLED for this run")
+        end
+        if :land_use in md.params.extensions
+            _job_update!(job_id; stage = "reading", message = "Cluster land-use limit is ENABLED for this run")
+        end
         _job_update!(job_id; stage = "reading", message = "Selected solve periods: $(join(string.(selected_periods), ", "))")
 
         _job_update!(job_id; stage = "preparing", message = "Deriving sets and parameters for periods $(selected_periods)")
@@ -2617,6 +2766,9 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         end
         stage_times["derive_sec"] = derive_seconds
         _job_update!(job_id; stage = "preparing", message = "Derived sets and parameters in $(derive_seconds) seconds")
+        if :land_use in md.params.extensions
+            _job_update!(job_id; stage = "preparing", message = land_use_plan(md))
+        end
 
         if mode == :ts
             _check_cancel(job_id) && throw(UICancelled("Run was stopped before clustering."))
@@ -2639,17 +2791,13 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         # residual "Other" segment shrinks.
         local optimizer, attrs, effective_solver, model
         _, optimizer_init_seconds = _elapsed() do
-            optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path, rep_days = config["representativeDays"])
+            optimizer, attrs, effective_solver = _optimizer_for_ui_run(config["solver"], config["solveMethod"], config["threads"]; solver_log_path = solver_log_path, rep_days = _ui_solver_rep_days(config), hours_per_day = mode == :fh ? md.params.hoursPer_day : nothing)
             model_label = mode == :ts ? "time-slice" : "full-hourly"
             _job_update!(job_id; stage = "generation", message = "Generating $(model_label) model with $(effective_solver)", extra = Dict("effectiveSolver" => effective_solver))
             model = Model(optimizer)
-            # Disable JuMP string-name creation by default — large IESA-Opt
-            # LPs spend a non-trivial fraction of generation time / RAM on
-            # interpolating and storing constraint base_names. Keep names
-            # only when violation diagnostics are requested (slack report
-            # and IIS labels need them).
-            apply_lp_generation_speedups!(model;
-                keep_names = config["showViolations"] === true)
+            # Result reporting extracts commodity shadow prices by constraint
+            # name, and diagnostics also need readable constraint labels.
+            apply_lp_generation_speedups!(model; keep_names = true)
             _set_job_model!(job_id, model)
         end
         stage_times["optimizer_init_sec"] = optimizer_init_seconds
@@ -2686,6 +2834,12 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         _job_update!(job_id; stage = "solve", message = "Solving with $(effective_solver) using $(config["solveMethod"]) on $(n_rows) rows and $(n_cols) columns")
         _, solve_seconds = _elapsed() do
             _optimize_with_solver_progress!(model, job_id, effective_solver, solver_log_path)
+            if lowercase(String(effective_solver)) == "gurobi" &&
+               termination_status(model) == MOI.LOCALLY_SOLVED && !_check_cancel(job_id)
+                _job_update!(job_id; stage = "solve", message = "Barrier ended sub-optimal; re-solving with the homogeneous Barrier algorithm")
+            end
+            gurobi_suboptimal_fallback!(model, attrs;
+                optimize_fn = m -> _optimize_with_solver_progress!(m, job_id, effective_solver, solver_log_path))
         end
         stage_times["solve_sec"] = solve_seconds
         term = string(termination_status(model))
@@ -2710,8 +2864,16 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         elseif term == "INFEASIBLE"
             _report_iis!(job_id, model, effective_solver)
         end
+        _report_land_use!(job_id, model, vars, md)
 
-        out_dir = config["outputDir"]
+        if !JuMP.has_values(model)
+            message = "$(effective_solver) ended with $(term) (primal status $(primal)); no solution is available, so no results were written. Solver log: $(solver_log_path)"
+            _job_update!(job_id; status = "failed", stage = "failed", message = message,
+                         extra = Dict("error" => message, "resultReady" => false))
+            return nothing
+        end
+
+        out_dir = _finalize_output_dir!(job_id, config, md)
         mkpath(out_dir)
         rr = RunResult(
             out_dir, now(), mode,
@@ -2755,6 +2917,18 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
             stage_times["total_sec"] = round(time() - total_start, digits = 3)
             _write_ui_run_metadata(out_dir, config, stage_times, rr, effective_solver, attrs; progress = writer_progress)
         end
+        _job_update!(job_id; stage = "writing", message = "Writing AIMMS-compatible CSV files")
+        try
+            csv_written, csv_seconds = _elapsed() do
+                write_aimms_csv_results(model, vars, md, out_dir; mode = mode,
+                    hourly_reports = config["hourlyReports"] === true,
+                    total_costs = obj, progress = writer_progress)
+            end
+            merge!(written, csv_written)
+            _job_update!(job_id; stage = "writing", message = "Wrote $(length(csv_written)) AIMMS-compatible CSV files in $(csv_seconds) seconds")
+        catch err
+            _job_update!(job_id; stage = "writing", message = "AIMMS-compatible CSV export failed: $(_short_error(err)). DuckDB results are unaffected.")
+        end
         rel_out = replace(relpath(out_dir, _repo_root()), '\\' => '/')
         _job_update!(job_id; status = "completed", stage = "done", message = "Run complete. Results are in $(rel_out)", extra = Dict("outputDir" => out_dir, "resultReady" => true, "written" => [String(k) for k in keys(written)]))
     catch err
@@ -2770,7 +2944,10 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
     return nothing
 end
 
-function _optimizer_for_ui_run(requested_solver::AbstractString, method::AbstractString, threads::Integer; solver_log_path::AbstractString = "", rep_days::Union{Nothing,Integer} = nothing)
+# Representative-day tuning disables Gurobi scaling and is unsuitable for full-hourly models.
+_ui_solver_rep_days(config) = config["mode"] == "timeslice" ? config["representativeDays"] : nothing
+
+function _optimizer_for_ui_run(requested_solver::AbstractString, method::AbstractString, threads::Integer; solver_log_path::AbstractString = "", rep_days::Union{Nothing,Integer} = nothing, hours_per_day::Union{Nothing,Integer} = nothing)
     solver = lowercase(String(requested_solver))
     solver = solver == "auto" ? _choose_auto_solver() : solver
     if solver == "highs"
@@ -2780,6 +2957,9 @@ function _optimizer_for_ui_run(requested_solver::AbstractString, method::Abstrac
     elseif solver == "gurobi"
         attrs = default_gurobi_attributes(; threads = Int(threads), rep_days = rep_days)
         _apply_gurobi_method!(attrs, method)
+        if lowercase(String(method)) == "barrier"
+            _apply_full_hour_gurobi_attributes!(attrs; hours_per_day, rep_days)
+        end
         isempty(solver_log_path) || (attrs["LogFile"] = solver_log_path)
         return gurobi_optimizer(; attrs), attrs, "Gurobi"
     elseif solver == "cplex"
@@ -2857,7 +3037,16 @@ function _apply_gurobi_method!(attrs::Dict{String,Any}, method::AbstractString)
     if m == "barrier"
         attrs["Method"] = 2
         attrs["Crossover"] = 0
+        attrs["BarHomogeneous"] = -1
+        attrs["NumericFocus"] = 1
+    elseif m == "barrier_fallback"
+        # Mirrors PyPSA-Eur's `gurobi-fallback` preset for numerically difficult LPs.
+        attrs["Method"] = 2
+        attrs["Crossover"] = 0
         attrs["BarHomogeneous"] = 1
+        attrs["BarConvTol"] = 1e-5
+        attrs["FeasibilityTol"] = 1e-5
+        attrs["OptimalityTol"] = 1e-5
     elseif m == "barrier_crossover"
         attrs["Method"] = 2
         attrs["Crossover"] = -1
@@ -2883,6 +3072,13 @@ function _apply_highs_method!(attrs::Dict{String,Any}, method::AbstractString)
     if m == "barrier"
         attrs["solver"] = "ipm"
         attrs["run_crossover"] = "off"
+        attrs["simplex_iteration_limit"] = Int(typemax(Int32))
+    elseif m == "barrier_fallback"
+        attrs["solver"] = "ipm"
+        attrs["run_crossover"] = "off"
+        attrs["primal_feasibility_tolerance"] = 1e-5
+        attrs["dual_feasibility_tolerance"] = 1e-5
+        attrs["ipm_optimality_tolerance"] = 1e-4
         attrs["simplex_iteration_limit"] = Int(typemax(Int32))
     elseif m == "barrier_crossover"
         attrs["solver"] = "ipm"
@@ -2916,6 +3112,12 @@ function _cplex_attributes(method::AbstractString, threads::Int)
     if m == "barrier"
         attrs["CPX_PARAM_LPMETHOD"] = 4
         attrs["CPX_PARAM_BARCROSSALG"] = 0
+    elseif m == "barrier_fallback"
+        attrs["CPX_PARAM_LPMETHOD"] = 4
+        attrs["CPX_PARAM_SOLUTIONTYPE"] = 2
+        attrs["CPX_PARAM_BAREPCOMP"] = 1e-5
+        attrs["CPX_PARAM_EPRHS"] = 1e-5
+        attrs["CPX_PARAM_EPOPT"] = 1e-5
     elseif m == "barrier_crossover"
         attrs["CPX_PARAM_LPMETHOD"] = 4
         attrs["CPX_PARAM_BARCROSSALG"] = -1
@@ -2939,6 +3141,12 @@ function _xpress_attributes(method::AbstractString, threads::Int)
     if m == "barrier"
         attrs["DEFAULTALG"] = 3
         attrs["CROSSOVER"] = 0
+    elseif m == "barrier_fallback"
+        attrs["DEFAULTALG"] = 3
+        attrs["CROSSOVER"] = 0
+        attrs["BARGAPSTOP"] = 1e-5
+        attrs["BARPRIMALSTOP"] = 1e-5
+        attrs["BARDUALSTOP"] = 1e-5
     elseif m == "barrier_crossover"
         attrs["DEFAULTALG"] = 3
         attrs["CROSSOVER"] = 1
@@ -3026,8 +3234,11 @@ function _extract_co2_prices(model, md::ModelData)
                 # `<= cap` minimization: shadow_price ≤ 0; the implied CO2 price
                 # (cost of one more tCO2 of headroom) is its absolute magnitude.
                 # IESA-Opt 1.0 reports EUR/tCO2; with objective in MEUR and
-                # caps in MtonCO2 the ratio is already in EUR/tCO2.
-                abs(shadow_price(con))
+                # caps in MtonCO2 the ratio is already in EUR/tCO2. The
+                # objective is discounted, so divide by the social discount
+                # factor to get the price in the period's own money, like
+                # AIMMS CO2_price_single and CO2_price.CSV.
+                abs(shadow_price(con)) / get(md.params.social_discount_factor, ps, 1.0)
             catch
                 NaN
             end
@@ -3069,7 +3280,8 @@ function _extract_emission_prices(model, md::ModelData)
                 end
                 con === nothing && continue
                 price = try
-                    abs(shadow_price(con))
+                    # Undiscounted EUR/tCO2eq, as in _extract_co2_prices.
+                    abs(shadow_price(con)) / get(md.params.social_discount_factor, ps, 1.0)
                 catch
                     NaN
                 end
@@ -3246,6 +3458,10 @@ function _write_ui_run_metadata(out_dir::AbstractString, config::Dict{String,Any
         push!(settings, ("solve_method", String(config["solveMethod"])))
         push!(settings, ("n_repDays", string(rr.n_repDays)))
         push!(settings, ("hoursPer_day", string(rr.hoursPer_day)))
+        push!(settings, ("constraintGroup", String(config["constraintGroup"])))
+        # Optional model extensions
+        push!(settings, ("multiRegion", string(get(config, "multiRegion", false) === true)))
+        push!(settings, ("landUse", string(get(config, "landUse", false) === true)))
         # Sizing
         push!(settings, ("n_rows", string(rr.n_rows)))
         push!(settings, ("n_cols", string(rr.n_cols)))
@@ -3299,7 +3515,7 @@ end
 
 function _output_roots()
     root = _repo_root()
-    return [joinpath(root, "Output"), joinpath(root, "Output_Batch")]
+    return [joinpath(root, "Output")]
 end
 
 function _is_child_path(path::AbstractString, root::AbstractString)
@@ -3313,7 +3529,7 @@ function _resolve_output_dir(output_id::AbstractString)
     isempty(cleaned) && error("No output folder was selected")
     parts = [part for part in split(cleaned, '/') if !isempty(part)]
     candidate = isabspath(cleaned) ? normpath(cleaned) : normpath(joinpath(_repo_root(), parts...))
-    any(root -> _is_child_path(candidate, root), _output_roots()) || error("Output folder is outside Output/ or Output_Batch/: $output_id")
+    any(root -> _is_child_path(candidate, root), _output_roots()) || error("Output folder is outside Output/: $output_id")
     isdir(candidate) || error("Output folder does not exist: $output_id")
     return candidate
 end
@@ -3377,11 +3593,6 @@ function _output_run_summary(out_dir::AbstractString)
         "totalSeconds" => get(timing, "total_sec", get(stats, "total_seconds", nothing)),
         "solveSeconds" => get(timing, "solve_sec", get(stats, "solve_seconds", nothing)),
     )
-end
-
-function _first_row(path::AbstractString)
-    rows = _read_table_rows(path, 1)
-    return isempty(rows) ? Dict{String,Any}() : first(rows)
 end
 
 function _first_result_row(out_dir::AbstractString, table_name::AbstractString)
@@ -3664,11 +3875,6 @@ function _read_parquet_df(path::AbstractString)
     return DataFrames.DataFrame(Parquet2.Dataset(path))
 end
 
-function _read_table_rows(path::AbstractString, limit::Int)
-    df = _read_parquet_df(path)
-    return _df_rows(df, limit)
-end
-
 function _df_rows(df::DataFrames.DataFrame, limit::Int = 100)
     isempty(df) && return Vector{Dict{String,Any}}()
     rows = Vector{Dict{String,Any}}()
@@ -3761,6 +3967,368 @@ function _to_int_safe(x)::Union{Nothing,Int}
         return f === nothing ? nothing : Int(round(f))
     end
     return nothing
+end
+
+function _to_float_safe(x)::Union{Nothing,Float64}
+    x === missing && return nothing
+    x === nothing && return nothing
+    x isa Real && return isfinite(Float64(x)) ? Float64(x) : nothing
+    if x isa AbstractString
+        s = strip(String(x))
+        isempty(s) && return nothing
+        v = tryparse(Float64, s)
+        return v === nothing || !isfinite(v) ? nothing : v
+    end
+    return nothing
+end
+
+function _xc_cluster_id(text)::Union{Nothing,Int}
+    value = strip(String(text))
+    m = match(r"\bCL\s*(\d+)\b"i, value)
+    m === nothing && (m = match(r"^(\d+)$", value))
+    m === nothing && return nothing
+    return tryparse(Int, m.captures[1])
+end
+
+function _xc_endpoint_id(text)::Union{Nothing,String}
+    value = String(text)
+    m = match(r"\bCL\s*(\d+)\b"i, value)
+    m !== nothing && return "CL$(m.captures[1])"
+    m = match(r"\bNS\s*(\d+)\b"i, value)
+    m !== nothing && return "NS$(m.captures[1])"
+    (occursin(r"\b(Denmark|Danish)\b"i, value) || occursin(r"\bDK\b", value)) && return "DK"
+    (occursin(r"\b(United Kingdom|Great Britain|Britain)\b"i, value) || occursin(r"\bUK\b", value) || occursin(r"\bGB\b", value)) && return "UK"
+    (occursin(r"\b(Norway|Norwey|Norwegian)\b"i, value) || occursin(r"\bNO\b", value)) && return "NO"
+    (occursin(r"\b(Germany|German)\b"i, value) || occursin(r"\bDE\b", value)) && return "DE"
+    (occursin(r"\b(Belgium|Belgian)\b"i, value) || occursin(r"\bBE\b", value)) && return "BE"
+    occursin(r"\bEU\b"i, value) && return "DE"
+    return nothing
+end
+
+function _xc_endpoint_label(id::AbstractString)
+    s = String(id)
+    s == "CL1" && return "Noordzeekanaalgebied"
+    s == "CL2" && return "Noord-Nederland"
+    s == "CL3" && return "Chemelot"
+    s == "CL4" && return "Zeeland/West Brabant"
+    s == "CL5" && return "Rotterdam-Moerdijk"
+    startswith(s, "CL") && return s
+    startswith(s, "NS") && return s
+    s in ("DK", "UK", "NO", "DE", "BE") && return s
+    return s
+end
+
+function _xc_endpoint_cluster(id::AbstractString)::Union{Nothing,Int}
+    m = match(r"^CL(\d+)$", String(id))
+    m === nothing && return nothing
+    return tryparse(Int, m.captures[1])
+end
+
+function _xc_trade_commodity(row::AbstractDict)
+    text = lowercase(join((
+        string(get(row, "tech", "")),
+        string(get(row, "name", "")),
+        string(get(row, "sector", "")),
+        string(get(row, "subsector", "")),
+        string(get(row, "activity", "")),
+        string(get(row, "label", "")),
+    ), " "))
+    if occursin("ccus", text) || occursin("_ccs_", text) || occursin(" ccs ", text) || occursin("- ccs", text)
+        return "ccus"
+    elseif occursin("hydrogen", text) || occursin("_hyd", text) || occursin(" hyd", text)
+        return "hydrogen"
+    elseif occursin("natural gas", text) || occursin(" gas ", text) || occursin("gas pool", text)
+        return "natural_gas"
+    elseif occursin("electricity", text) || occursin("power", text) || occursin("peu", text) || occursin("pnl", text)
+        return "electricity"
+    end
+    return "other"
+end
+
+function _regional_map_inferred_node_level(out_dir::AbstractString, link_by_tech::Dict{String,Dict{String,Any}})
+    cluster_ids = Set{Int}()
+    path_hint = match(r"(\d+)\s*node"i, replace(String(out_dir), ['_', '-'] => " "))
+    path_hint === nothing || push!(cluster_ids, parse(Int, path_hint.captures[1]))
+    nodes_df = _read_result_df(out_dir, "nodes_meta")
+    if !isempty(nodes_df) && "node" in names(nodes_df)
+        for value in nodes_df.node
+            cluster = _xc_cluster_id(string(value))
+            cluster === nothing || push!(cluster_ids, cluster)
+        end
+    end
+    for link in values(link_by_tech)
+        src_cluster = _xc_endpoint_cluster(string(link["source"]))
+        dst_cluster = _xc_endpoint_cluster(string(link["target"]))
+        src_cluster === nothing || push!(cluster_ids, src_cluster)
+        dst_cluster === nothing || push!(cluster_ids, dst_cluster)
+    end
+    return isempty(cluster_ids) ? 0 : maximum(cluster_ids)
+end
+
+function _xc_trade_links(out_dir::AbstractString)
+    meta_df = _read_result_df(out_dir, "tech_meta")
+    isempty(meta_df) && return Dict{String,Dict{String,Any}}()
+    rows = _df_rows(meta_df, nrow(meta_df))
+    links = Dict{String,Dict{String,Any}}()
+    for row in rows
+        string(get(row, "category", "")) == "XC Trade" || continue
+        src = _xc_endpoint_id(get(row, "subsector", ""))
+        dst = _xc_endpoint_id(get(row, "sector", ""))
+        src === nothing && continue
+        dst === nothing && continue
+        src == dst && continue
+        tech = string(get(row, "tech", ""))
+        isempty(tech) && continue
+        commodity = _xc_trade_commodity(row)
+        links[tech] = Dict{String,Any}(
+            "tech" => tech,
+            "name" => string(get(row, "name", "")),
+            "source" => src,
+            "target" => dst,
+            "commodity" => commodity,
+            "sector" => string(get(row, "sector", "")),
+            "subsector" => string(get(row, "subsector", "")),
+        )
+    end
+    return links
+end
+
+function _commodity_label(id::AbstractString)
+    id == "electricity" && return "Electricity"
+    id == "natural_gas" && return "Natural gas"
+    id == "hydrogen" && return "Hydrogen"
+    id == "ccus" && return "CCUS"
+    id == "other" && return "Other"
+    id == "all" && return "All"
+    return String(id)
+end
+
+function _regional_map_periods(out_dir::AbstractString)
+    periods = Set{Int}()
+    for table in ("techStock", "tech_use_TS", "tech_use_h", "tech_use")
+        df = _read_result_df(out_dir, table)
+        isempty(df) && continue
+        "period" in names(df) || continue
+        for value in df.period
+            p = _to_int_safe(value)
+            p === nothing || push!(periods, p)
+        end
+    end
+    return sort!(collect(periods))
+end
+
+function _regional_map_input_workbook(out_dir::AbstractString)
+    settings = _read_result_df(out_dir, "solver_settings")
+    if !isempty(settings) && all(name in names(settings) for name in ("attribute", "value"))
+        for row in _df_rows(settings, nrow(settings))
+            string(get(row, "attribute", "")) == "inputWorkbook" || continue
+            workbook = strip(string(get(row, "value", "")))
+            isempty(workbook) || return workbook
+        end
+    end
+    return "Input/default_data.xlsx"
+end
+
+function _regional_map_unit_info(out_dir::AbstractString, link_by_tech::Dict{String,Dict{String,Any}}, metric_id::AbstractString)
+    kind = metric_id == "use" ? "UoA" : "UoC"
+    fallback = Dict{String,Any}("kind" => kind, "unit" => "", "label" => "")
+    isempty(link_by_tech) && return fallback
+    try
+        input_path, _ = _resolve_input_workbook(_regional_map_input_workbook(out_dir); require_exists = true)
+        md = _read_ui_data_cached(input_path)
+        counts = Dict{String,Float64}()
+        for tech in keys(link_by_tech)
+            t = Symbol(tech)
+            unit_sym = if metric_id == "use"
+                act = get(md.params.activityPer_tech, t, get(md.params.activityPer_techOrig, t, Symbol("")))
+                get(md.params.act_units, act, Symbol(kind))
+            else
+                get(md.params.tech_units, t, Symbol(kind))
+            end
+            unit = strip(string(unit_sym))
+            (isempty(unit) || unit == kind) && continue
+            counts[unit] = get(counts, unit, 0.0) + 1.0
+        end
+        isempty(counts) && return fallback
+        unit = first(sort!(collect(keys(counts)); by = u -> (-counts[u], u)))
+        return Dict{String,Any}("kind" => kind, "unit" => unit, "label" => unit)
+    catch err
+        @debug "Regional map unit lookup failed" err
+        return fallback
+    end
+end
+
+function _regional_map_payload(out_dir::AbstractString; metric::AbstractString = "stock", commodity::AbstractString = "all", period::Union{Nothing,Integer} = nothing, map_file::AbstractString = "")
+    link_by_tech = _xc_trade_links(out_dir)
+    periods = _regional_map_periods(out_dir)
+    sel_period = period === nothing ? (isempty(periods) ? 0 : periods[end]) : Int(period)
+    sel_period in periods || (sel_period = isempty(periods) ? 0 : periods[end])
+    metric_id = lowercase(strip(String(metric))) in ("use", "techuse", "flow", "flows") ? "use" : "stock"
+    commodity_id = lowercase(strip(String(commodity)))
+    commodity_id = commodity_id in ("all", "electricity", "natural_gas", "hydrogen", "ccus", "other") ? commodity_id : "all"
+
+    level = _regional_map_inferred_node_level(out_dir, link_by_tech)
+
+    all_commodities = sort!(collect(Set{String}(string(link["commodity"]) for link in values(link_by_tech))))
+    commodity_options = [Dict("id" => "all", "label" => "All")]
+    for id in ("electricity", "natural_gas", "hydrogen", "ccus", "other")
+        id in all_commodities && push!(commodity_options, Dict("id" => id, "label" => _commodity_label(id)))
+    end
+
+    unit_info = _regional_map_unit_info(out_dir, link_by_tech, metric_id)
+    links = metric_id == "use" ?
+        _regional_map_use_links(out_dir, link_by_tech, sel_period, commodity_id, unit_info) :
+        _regional_map_stock_links(out_dir, link_by_tech, sel_period, commodity_id, unit_info)
+
+    return Dict{String,Any}(
+        "available" => !isempty(link_by_tech),
+        "metric" => metric_id,
+        "commodity" => commodity_id,
+        "periods" => periods,
+        "selectedPeriod" => sel_period,
+        "nodeLevel" => level,
+        "assets" => _regional_map_assets(level, map_file),
+        "commodityOptions" => commodity_options,
+        "unit" => unit_info,
+        "links" => links["links"],
+        "frames" => get(links, "frames", Vector{Dict{String,Any}}()),
+        "stats" => Dict(
+            "xcTechs" => length(link_by_tech),
+            "shownLinks" => length(links["links"]),
+            "commodities" => all_commodities,
+        ),
+    )
+end
+
+function _regional_map_stock_links(out_dir::AbstractString, link_by_tech::Dict{String,Dict{String,Any}}, period::Int, commodity::String, unit_info::Dict{String,Any})
+    stock_df = _read_result_df(out_dir, "techStock")
+    isempty(stock_df) && return Dict("links" => Vector{Dict{String,Any}}(), "unit" => unit_info)
+    directed = Dict{Tuple{String,String,String},Float64}()
+    for row in _df_rows(stock_df, nrow(stock_df))
+        p = _to_int_safe(get(row, "period", nothing))
+        p === period || continue
+        tech = string(get(row, "tech", ""))
+        link = get(link_by_tech, tech, nothing)
+        link === nothing && continue
+        comm = string(link["commodity"])
+        commodity == "all" || comm == commodity || continue
+        v = _to_float_safe(get(row, "value", nothing))
+        v === nothing && continue
+        abs(v) < 1e-9 && continue
+        key = (string(link["source"]), string(link["target"]), comm)
+        directed[key] = get(directed, key, 0.0) + v
+    end
+
+    pair_values = Dict{Tuple{String,String,String},Tuple{Float64,Float64}}()
+    for ((src, dst, comm), v) in directed
+        a, b = src <= dst ? (src, dst) : (dst, src)
+        prev = get(pair_values, (a, b, comm), (0.0, 0.0))
+        pair_values[(a, b, comm)] = src == a ? (max(prev[1], abs(v)), prev[2]) : (prev[1], max(prev[2], abs(v)))
+    end
+    rows = Vector{Dict{String,Any}}()
+    for ((a, b, comm), (ab, ba)) in pair_values
+        value = max(ab, ba)
+        value > 1e-9 || continue
+        push!(rows, Dict{String,Any}(
+            "source" => a,
+            "target" => b,
+            "sourceLabel" => _xc_endpoint_label(a),
+            "targetLabel" => _xc_endpoint_label(b),
+            "commodity" => comm,
+            "commodityLabel" => _commodity_label(comm),
+            "value" => value,
+            "unit" => unit_info,
+            "reverseValue" => ba,
+            "metric" => "stock",
+            "directional" => false,
+        ))
+    end
+    sort!(rows; by = row -> -Float64(row["value"]))
+    return Dict("links" => rows, "unit" => unit_info)
+end
+
+function _regional_map_use_links(out_dir::AbstractString, link_by_tech::Dict{String,Dict{String,Any}}, period::Int, commodity::String, unit_info::Dict{String,Any})
+    directed = Dict{Tuple{String,String,String},Float64}()
+    by_time = Dict{Tuple{Int,String,String,String},Float64}()
+    for (table, time_col) in (("tech_use_TS", "hc"), ("tech_use_h", "hour"), ("tech_use", ""))
+        use_df = _read_result_df(out_dir, table)
+        isempty(use_df) && continue
+        has_time = !isempty(time_col) && time_col in names(use_df)
+        for row in _df_rows(use_df, nrow(use_df))
+            p = _to_int_safe(get(row, "period", nothing))
+            p === period || continue
+            tech = string(get(row, "tech", ""))
+            link = get(link_by_tech, tech, nothing)
+            link === nothing && continue
+            comm = string(link["commodity"])
+            commodity == "all" || comm == commodity || continue
+            v = _to_float_safe(get(row, "value", nothing))
+            v === nothing && continue
+            abs(v) < 1e-12 && continue
+            src, dst = string(link["source"]), string(link["target"])
+            key = (src, dst, comm)
+            directed[key] = get(directed, key, 0.0) + v
+            if has_time
+                t = _to_int_safe(get(row, time_col, nothing))
+                t === nothing || (by_time[(t, src, dst, comm)] = get(by_time, (t, src, dst, comm), 0.0) + v)
+            end
+        end
+    end
+    links = _regional_map_net_links(directed, "use", unit_info)
+    frames = _regional_map_net_frames(by_time, unit_info)
+    return Dict("links" => links, "frames" => frames, "unit" => unit_info)
+end
+
+function _regional_map_net_links(directed::Dict{Tuple{String,String,String},Float64}, metric::AbstractString, unit_info::Dict{String,Any})
+    pair_keys = Set{Tuple{String,String,String}}()
+    for (src, dst, comm) in keys(directed)
+        a, b = src <= dst ? (src, dst) : (dst, src)
+        push!(pair_keys, (a, b, comm))
+    end
+    rows = Vector{Dict{String,Any}}()
+    for (a, b, comm) in pair_keys
+        ab = get(directed, (a, b, comm), 0.0)
+        ba = get(directed, (b, a, comm), 0.0)
+        net = ab - ba
+        abs(net) > 1e-9 || continue
+        src, dst = net >= 0 ? (a, b) : (b, a)
+        push!(rows, Dict{String,Any}(
+            "source" => src,
+            "target" => dst,
+            "sourceLabel" => _xc_endpoint_label(src),
+            "targetLabel" => _xc_endpoint_label(dst),
+            "commodity" => comm,
+            "commodityLabel" => _commodity_label(comm),
+            "value" => abs(net),
+            "unit" => unit_info,
+            "forwardValue" => ab,
+            "reverseValue" => ba,
+            "signedNet" => net,
+            "metric" => String(metric),
+            "directional" => true,
+        ))
+    end
+    sort!(rows; by = row -> -Float64(row["value"]))
+    return rows
+end
+
+function _regional_map_net_frames(by_time::Dict{Tuple{Int,String,String,String},Float64}, unit_info::Dict{String,Any})
+    isempty(by_time) && return Vector{Dict{String,Any}}()
+    times = sort!(collect(Set{Int}(t for (t, _, _, _) in keys(by_time))))
+    frames = Vector{Dict{String,Any}}()
+    max_frames = 80
+    step = max(1, cld(length(times), max_frames))
+    for t in times[1:step:end]
+        directed = Dict{Tuple{String,String,String},Float64}()
+        for ((tt, src, dst, comm), v) in by_time
+            tt == t || continue
+            directed[(src, dst, comm)] = get(directed, (src, dst, comm), 0.0) + v
+        end
+        links = _regional_map_net_links(directed, "use", unit_info)
+        shown = isempty(links) ? links : links[1:min(length(links), 60)]
+        push!(frames, Dict{String,Any}("time" => t, "links" => shown))
+    end
+    return frames
 end
 
 function _power_capacities(out_dir::AbstractString)
@@ -4702,8 +5270,9 @@ function _parse_indices_cell(s::AbstractString)
 end
 
     function _scenario_input_path(body)::String
-        input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
-        return isabspath(input_value) ? normpath(input_value) : normpath(joinpath(_repo_root(), input_value))
+        input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
+        input_path, _ = _resolve_input_workbook(input_value; require_exists = false)
+        return input_path
     end
 
     function _parse_excel_cell_ref(cell::AbstractString)
@@ -4990,7 +5559,7 @@ function _scenario_leaf_validation(spec::CampaignSpec, input_path::AbstractStrin
     return (; errors, warnings)
 end
 
-function _validate_scenario_direct_run_spec(spec::CampaignSpec, input_path::AbstractString = normpath(joinpath(_repo_root(), "data/default_data.xlsx")))
+function _validate_scenario_direct_run_spec(spec::CampaignSpec, input_path::AbstractString = normpath(joinpath(_repo_root(), "Input", "default_data.xlsx")))
     v = validate_spec(spec)
     errors = String.(v.errors)
     warnings = String.(v.warnings)
@@ -5011,7 +5580,7 @@ field/indices rows are also accepted for backward compatibility. The
 validation path must reject rows without per-row bounds before this function
 is called.
 """
-function _row_to_leaf_target(row, input_path::AbstractString = normpath(joinpath(_repo_root(), "data/default_data.xlsx")))
+function _row_to_leaf_target(row, input_path::AbstractString = normpath(joinpath(_repo_root(), "Input", "default_data.xlsx")))
     if row.min === nothing || row.max === nothing
         throw(ArgumentError("Live-run rows require Min and Max on every row."))
     end
@@ -5136,7 +5705,7 @@ function _scenario_run(body)
         )
 
         # Workbook + solver settings
-        input_value = String(_config_get(body, "inputWorkbook", "data/default_data.xlsx"))
+        input_value = String(_config_get(body, "inputWorkbook", "Input/default_data.xlsx"))
         isfile(input_path) || return Dict{String,Any}(
             "ok" => false,
             "errors" => ["Input workbook not found: $input_value"],
@@ -5149,6 +5718,7 @@ function _scenario_run(body)
         mode_sym = mode_raw in ("fh", "full_hourly", "full-hourly") ? :fh :
                    mode_raw in ("annual",) ? :annual : :ts
         periods = _as_int_vector(_config_get(body, "periods", [2050]))
+        temporal_config = _scenario_temporal_config(body, mode_sym)
 
         # Allocate id and snapshot
         id = "camp_" * Dates.format(now(), "yyyymmdd_HHMMSS") * "_" * randstring(6)
@@ -5164,6 +5734,7 @@ function _scenario_run(body)
             :threads_per_worker => threads_per_worker,
             :solver             => solver_sym,
             :mode               => mode_sym,
+            :temporal_config    => temporal_config,
             # Filled in by _prepare_campaign_state! on the first run; reused
             # by every subsequent /resume so we never re-read the workbook.
             :base_md            => nothing,
@@ -5262,6 +5833,29 @@ function _campaign_state(id::AbstractString)
     end
 end
 
+function _scenario_temporal_config(body, mode::Symbol)
+    representative_days = _as_int(_config_get(body, "representativeDays", 15), 15)
+    hours_per_day = _as_int(_config_get(body, "hoursPerDay", 24), 24)
+    clustering = Symbol(lowercase(String(_config_get(body, "clusteringApproach", "k_medoids"))))
+    if mode == :ts
+        1 <= representative_days <= 365 || error("representativeDays must be between 1 and 365")
+        clustering in _TULIPA_METHODS || error("Unsupported clusteringApproach :$clustering")
+    elseif mode == :fh
+        (hours_per_day > 0 && 24 % hours_per_day == 0) || error("hoursPerDay must divide 24")
+    end
+    return (
+        n_repDays = representative_days,
+        hoursPer_day = mode == :ts ? 24 : hours_per_day,
+        hoursPer_day_cluster = 24,
+        clustering_approach = clustering,
+        clustering_distance = Symbol(lowercase(String(_config_get(body, "clusteringDistance", _default_clustering_distance(clustering))))),
+        ts_extremePeriods = false,
+        ts_boundaryRamping = _as_bool(_config_get(body, "boundaryRamping", true), true),
+        constraint_group = _normalize_constraint_group(String(_config_get(body, "constraintGroup", last(_AIMMS_CONSTRAINT_GROUPS)))),
+        extensions = _model_extensions(body),
+    )
+end
+
 """
     _prepare_campaign_state!(id)
 
@@ -5282,6 +5876,9 @@ function _prepare_campaign_state!(id::String)
                              detail = "Reading workbook", advance = false)
     end
     md = _read_ui_data_cached(state[:input_path])
+    for (field, value) in pairs(state[:temporal_config])
+        setfield!(md.params, field, value)
+    end
     periods = state[:periods]
     if !isempty(periods)
         selected = [p for p in periods if p in md.sets.periods]

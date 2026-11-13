@@ -12,7 +12,6 @@ module IESAOpt
 using JuMP
 using DataFrames
 using XLSX
-using CSV
 using Clustering
 using Statistics
 using LinearAlgebra
@@ -21,6 +20,7 @@ using Printf
 using Random
 using Dates
 using Logging
+using Parquet2
 import MathOptInterface as MOI
 using PrecompileTools
 
@@ -51,7 +51,7 @@ include("data_writing.jl")
 include("solver_settings.jl")
 
 # ---------------------------------------------------------------------------
-# Phase 2+: model assembly (skeleton includes; bodies land per phase)
+# Phase 2+: model assembly
 include("model/variables.jl")
 include("model/stock.jl")
 include("model/balance.jl")
@@ -64,17 +64,6 @@ include("model/ts.jl")
 include("model/infrastructure.jl")
 include("model/policy.jl")
 include("model/cyclic_closures.jl")
-# include("model/capacity.jl")
-# include("model/ramping.jl")
-# include("model/emissions.jl")
-# include("model/shedding.jl")
-# include("model/chp.jl")
-# include("model/storage.jl")
-# include("model/backlog.jl")
-# include("model/reservoir.jl")
-# include("model/gasbuffer.jl")
-# include("model/interconnect.jl")
-# include("model/ts_extras.jl")
 
 # ---------------------------------------------------------------------------
 # Phase 5+: clustering
@@ -85,31 +74,41 @@ include("clustering.jl")
 include("solve.jl")
 # Diagnostics for infeasible / near-infeasible runs (Show violations + IIS)
 include("violations.jl")
-# include("postprocess.jl")
 include("writers.jl")
+include("aimms_csv.jl")
 
 # ---------------------------------------------------------------------------
-# Scenario-space exploration
+# Workflow: Scenario Space exploration
 # Phase 1: spec parsing + sampling, no model touch
-include("scenario/spec.jl")
-include("scenario/sampling.jl")
+include("workflows/scenario_space/spec.jl")
+include("workflows/scenario_space/sampling.jl")
 # Phase 2: in-place LP mutation (constraint-ref manifest + per-variant apply)
-include("scenario/manifest.jl")
-include("scenario/variant.jl")
+include("workflows/scenario_space/manifest.jl")
+include("workflows/scenario_space/variant.jl")
 # Phase 3: campaign runner (serial + Distributed.jl worker pool)
-include("scenario/runner.jl")
+include("workflows/scenario_space/runner.jl")
 # Phase 4: high-level orchestrator + result persistence
-include("scenario/orchestrator.jl")
-include("scenario/persistence.jl")
+include("workflows/scenario_space/orchestrator.jl")
+include("workflows/scenario_space/persistence.jl")
 # Phase 5: analysis helpers (objective_table, sensitivity_scan, pareto_front)
-include("scenario/analysis.jl")
+include("workflows/scenario_space/analysis.jl")
 
-# MGA extension helpers. These define reduced-space hybrid ORACLE planning
-# utilities but do not execute during normal single-run solves.
-include("mga/hybrid_oracle.jl")
+# Workflow: MGA reduced-space hybrid ORACLE planning helpers. These utilities
+# do not execute during normal single-run solves.
+include("workflows/mga/hybrid_oracle.jl")
+
+# ---------------------------------------------------------------------------
+# Project-specific extensions (opt-in, NOT part of the core model)
+# Each extension is gated on a Symbol in `md.params.extensions::Set{Symbol}`,
+# populated by a UI toggle. With an empty set the core model is unchanged.
+# See src/extensions/README.md for how to add or remove extensions cleanly.
+# ---------------------------------------------------------------------------
+include("extensions/land_use.jl")
+include("extensions/multi_region.jl")
+include("extensions/extensions.jl")
 
 include("ui_server.jl")
-# include("sweeps.jl")
+include("ui_maps.jl")
 
 # ---------------------------------------------------------------------------
 # Exports
@@ -124,7 +123,7 @@ export compute_emission_target_aggregates!
 export compute_tech_activity!, init_policy_targets!
 export write_sets_dump, write_params_dump, write_run_summary, write_run_statistics
 export default_gurobi_attributes, gurobi_tuned_attributes_for_repdays, default_highs_attributes
-export gurobi_optimizer, highs_optimizer, apply_solver_attributes!
+export gurobi_optimizer, highs_optimizer, apply_solver_attributes!, gurobi_suboptimal_fallback!
 # Phase 2: annual LP
 export AnnualVars, add_annual_variables!
 export add_stock_constraints!, add_balance_constraints!, add_objective!
@@ -142,9 +141,8 @@ export add_infrastructure_constraints!
 export add_policy_constraints!
 export add_cyclic_closures!
 # Phase 7: writers
-export write_parquet_results, write_duckdb_results
+export write_parquet_results, write_duckdb_results, write_aimms_csv_results
 export serve_ui!
-# Phase 7+: export sweep_ts_postfix
 
 # Scenario-space exploration (Phase 1)
 export ParameterRow, CampaignSpec, SampleMatrix
@@ -199,7 +197,7 @@ end
 # Failures inside the workload are warned but never abort the package build.
 # ---------------------------------------------------------------------------
 @setup_workload begin
-    _precompile_workbook = normpath(joinpath(@__DIR__, "..", "data", "default_data.xlsx"))
+    _precompile_workbook = normpath(joinpath(@__DIR__, "..", "Input", "default_data.xlsx"))
     _precompile_skip = get(ENV, "IESA_OPT_SKIP_PRECOMPILE", "0") == "1"
     @compile_workload begin
         if !_precompile_skip && isfile(_precompile_workbook)
@@ -214,7 +212,7 @@ end
                         _md_copy.params.hoursPer_day = 24
                         _md_copy.params.n_repDays = 1
                         _md_copy.params.hoursPer_day_cluster = 24
-                        _md_copy.params.clustering_approach = :kmeans_avg
+                        _md_copy.params.clustering_approach = :k_medoids
                         _md_copy.params.ts_extremePeriods = false
                         _md_copy.params.ts_extremeDays_count = 0
                         _md_copy.params.ts_boundaryRamping = true
@@ -236,6 +234,22 @@ end
                 end
             catch err
                 @warn "IESA-Opt.jl precompile workload failed (package still loaded successfully)" err
+            end
+        end
+        # The HTTP connection task specialised on _ui_handler otherwise takes ~60 s to JIT on the first browser request.
+        if !_precompile_skip
+            _server = nothing
+            try
+                _server = HTTP.serve!(_ui_handler, "127.0.0.1", 0; verbose = false)
+                _base = "http://127.0.0.1:$(HTTP.port(_server))"
+                _close = ["Connection" => "close"]
+                HTTP.get(_base * "/api/status"; headers = _close, status_exception = false)
+                HTTP.get(_base * "/"; headers = _close, status_exception = false)
+                HTTP.post(_base * "/api/precompile-probe", _close, "{}"; status_exception = false)
+            catch err
+                @warn "IESA-Opt.jl UI server precompile workload failed (package still loaded successfully)" err
+            finally
+                _server === nothing || close(_server)
             end
         end
     end

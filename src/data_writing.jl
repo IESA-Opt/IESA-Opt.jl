@@ -1,14 +1,14 @@
 # =============================================================================
-# data_writing.jl — CSV dumpers for sets, parameters, and run results
+# data_writing.jl — parquet dumpers for sets, parameters, and run results
 #
-# Produces flat CSV files for diff and inspection workflows.
+# Produces flat parquet files for diff and inspection workflows.
 #
 # Output schemas:
-#   write_sets_dump(md, dir)         → <dir>/sets.csv          [set, member]
-#   write_params_dump(md, dir)       → <dir>/params_scalar.csv [param, value]
-#                                       <dir>/params_indexed.csv [param, key, value]
-#   write_run_summary(result, dir)   → <dir>/summary.csv       [metric, value]
-#   write_run_statistics(result, dir)→ <dir>/statistics.csv    [metric, value]
+#   write_sets_dump(md, dir)         → <dir>/sets.parquet          [set, member]
+#   write_params_dump(md, dir)       → <dir>/params_scalar.parquet [param, value]
+#                                       <dir>/params_indexed.parquet [param, key, value]
+#   write_run_summary(result, dir)   → <dir>/summary.parquet       [metric, value]
+#   write_run_statistics(result, dir)→ <dir>/statistics.parquet    [metric, value]
 #
 # All writers create `dir` (recursively) if it does not exist.
 # =============================================================================
@@ -17,12 +17,12 @@
     write_sets_dump(md::ModelData, dir::AbstractString) -> String
 
 Write every populated ModelSets field as `(set_name, member)` rows in
-`<dir>/sets.csv`. Empty sets are skipped. Returns the absolute path to the
-written CSV.
+`<dir>/sets.parquet`. Empty sets are skipped. Returns the absolute path to the
+written parquet file.
 """
 function write_sets_dump(md::ModelData, dir::AbstractString)
     isdir(dir) || mkpath(dir)
-    path = joinpath(dir, "sets.csv")
+    path = joinpath(dir, "sets.parquet")
     s = md.sets
 
     rows = Vector{NamedTuple{(:set_name, :member),Tuple{String,String}}}()
@@ -36,20 +36,16 @@ function write_sets_dump(md::ModelData, dir::AbstractString)
         end
     end
 
-    if isempty(rows)
-        CSV.write(path, DataFrame(set_name=String[], member=String[]))
-    else
-        CSV.write(path, DataFrame(rows))
-    end
+    _write_parquet_dump(path, isempty(rows) ? DataFrame(set_name=String[], member=String[]) : DataFrame(rows))
     return path
 end
 
 """
     write_params_dump(md::ModelData, dir::AbstractString) -> Tuple{String,String}
 
-Write scalar and indexed parameters to two CSVs:
-- `<dir>/params_scalar.csv`  schema `(param_name, value)`
-- `<dir>/params_indexed.csv` schema `(param_name, key, value)`
+Write scalar and indexed parameters to two parquet files:
+- `<dir>/params_scalar.parquet`  schema `(param_name, value)`
+- `<dir>/params_indexed.parquet` schema `(param_name, key, value)`
 
 Dict-valued parameters become rows with `key` formatted as
 `"(a, b)"` or `"a"` (string-joined tuple elements). Returns `(scalar_path,
@@ -57,8 +53,8 @@ indexed_path)`.
 """
 function write_params_dump(md::ModelData, dir::AbstractString)
     isdir(dir) || mkpath(dir)
-    scalar_path  = joinpath(dir, "params_scalar.csv")
-    indexed_path = joinpath(dir, "params_indexed.csv")
+    scalar_path  = joinpath(dir, "params_scalar.parquet")
+    indexed_path = joinpath(dir, "params_indexed.parquet")
     p = md.params
 
     scalar_rows  = Vector{NamedTuple{(:param_name, :value),Tuple{String,String}}}()
@@ -83,17 +79,8 @@ function write_params_dump(md::ModelData, dir::AbstractString)
         # Skip everything else (function refs, complex composite types)
     end
 
-    if isempty(scalar_rows)
-        CSV.write(scalar_path, DataFrame(param_name=String[], value=String[]))
-    else
-        CSV.write(scalar_path, DataFrame(scalar_rows))
-    end
-
-    if isempty(indexed_rows)
-        CSV.write(indexed_path, DataFrame(param_name=String[], key=String[], value=String[]))
-    else
-        CSV.write(indexed_path, DataFrame(indexed_rows))
-    end
+    _write_parquet_dump(scalar_path, isempty(scalar_rows) ? DataFrame(param_name=String[], value=String[]) : DataFrame(scalar_rows))
+    _write_parquet_dump(indexed_path, isempty(indexed_rows) ? DataFrame(param_name=String[], key=String[], value=String[]) : DataFrame(indexed_rows))
     return scalar_path, indexed_path
 end
 
@@ -101,11 +88,11 @@ end
     write_run_summary(result::RunResult, dir::AbstractString) -> String
 
 Write run-level summary metrics (objective, solve_time, status, etc.) to
-`<dir>/summary.csv`. Returns the absolute path.
+`<dir>/summary.parquet`. Returns the absolute path.
 """
 function write_run_summary(result::RunResult, dir::AbstractString)
     isdir(dir) || mkpath(dir)
-    path = joinpath(dir, "summary.csv")
+    path = joinpath(dir, "summary.parquet")
 
     rows = NamedTuple{(:metric, :value),Tuple{String,String}}[
         (metric="termination_status", value=result.termination_status),
@@ -121,7 +108,7 @@ function write_run_summary(result::RunResult, dir::AbstractString)
         (metric="clustering_approach",value=String(result.clustering_approach)),
         (metric="timestamp",          value=string(result.timestamp)),
     ]
-    CSV.write(path, DataFrame(rows))
+    _write_parquet_dump(path, DataFrame(rows))
     return path
 end
 
@@ -129,11 +116,11 @@ end
     write_run_statistics(result::RunResult, dir::AbstractString) -> String
 
 Write model-size statistics (n_rows, n_cols, n_nnz, iterations) to
-`<dir>/statistics.csv`. Returns the absolute path.
+`<dir>/statistics.parquet`. Returns the absolute path.
 """
 function write_run_statistics(result::RunResult, dir::AbstractString)
     isdir(dir) || mkpath(dir)
-    path = joinpath(dir, "statistics.csv")
+    path = joinpath(dir, "statistics.parquet")
 
     rows = NamedTuple{(:metric, :value),Tuple{String,String}}[
         (metric="n_rows",             value=string(result.n_rows)),
@@ -142,7 +129,12 @@ function write_run_statistics(result::RunResult, dir::AbstractString)
         (metric="n_iterations",       value=string(result.n_iterations)),
         (metric="barrier_iterations", value=string(result.barrier_iterations)),
     ]
-    CSV.write(path, DataFrame(rows))
+    _write_parquet_dump(path, DataFrame(rows))
+    return path
+end
+
+function _write_parquet_dump(path::AbstractString, df::DataFrame)
+    Parquet2.writefile(path, df)
     return path
 end
 

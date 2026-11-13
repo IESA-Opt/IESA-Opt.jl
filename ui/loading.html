@@ -2,11 +2,9 @@
 <!--
   IESA-Opt.jl local UI — bootstrap / loading page.
 
-  scripts/launcher/start-ui.bat / start-ui.ps1 open this page from disk
-  (file://) the moment the launcher starts, so the user sees a friendly
-  screen within a fraction of a second instead of waiting ~10 s for Julia
-  to bind port 8123. The page polls http://127.0.0.1:8123/api/status and
-  redirects to the real UI as soon as the server is reachable.
+  Template: scripts/launcher/start_ui.jl opens a temp copy with the chosen
+  port substituted for 8123. The page polls /api/status and redirects to
+  the real UI once warm-up has finished.
 -->
 <html lang="en">
 <head>
@@ -147,9 +145,9 @@
     <p id="elapsed" class="elapsed">0.0 s elapsed</p>
 
     <p class="hint">
-      Startup typically takes about <strong>20 seconds</strong>; after a
-      Julia upgrade or package change it can take 60–90 s while packages
-      precompile. Keep the launcher window open while the UI is running.
+      Startup usually takes <strong>30 seconds to 3 minutes</strong>; the first
+      start after moving the folder or updating Julia/packages can take longer.
+      Keep the IESA-Opt.jl window open; it shows progress and any errors.
       If nothing happens, you can open the UI manually:
       <br>
       <a id="manualLink" class="manual-link" href="http://127.0.0.1:8123/">http://127.0.0.1:8123/</a>
@@ -204,10 +202,10 @@
           .then(function (j) {
             if (done) return;
             var state = j && j.state;
-            if (state === "ready") {
+            if (state === "ready" || state === "failed" || state === "missing") {
               done = true;
               progress.classList.add("done");
-              setStage("Server ready, opening UI…", "ready");
+              setStage(state === "ready" ? "Server ready, opening UI…" : (j.message || "Opening UI…"), state === "ready" ? "ready" : "warn");
               // Brief pause so the user sees the green confirmation.
               setTimeout(redirect, 350);
               return;
@@ -236,12 +234,9 @@
 
       function updateStageByElapsed() {
         var t = elapsedSec();
-        if (t < 5)        setStage("Waiting for Julia server…");
-        else if (t < 12)  setStage("Loading Julia packages…");
-        else if (t < 25)  setStage("Compiling solver bindings…");
-        else if (t < 45)  setStage("Almost there — building the model cache…");
-        else if (t < 120) setStage("This is taking longer than usual…", "warn");
-        else              setStage("Still waiting — check the launcher window for errors.", "warn");
+        if (t < 5)        setStage("Starting Julia…");
+        else if (t < 180) setStage("Loading Julia packages…");
+        else              setStage("Still compiling — the first start after moving or updating can take several minutes.");
       }
 
       // Kick off the first poll as soon as the page is interactive.
