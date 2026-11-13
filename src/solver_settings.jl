@@ -101,6 +101,31 @@ function _apply_full_hour_gurobi_attributes!(attrs::Dict{String,Any};
 end
 
 """
+    gurobi_suboptimal_fallback!(model, attrs; optimize_fn = optimize!) -> Bool
+
+Barrier without crossover can stop with Gurobi "Sub-optimal termination" (reported by JuMP as `LOCALLY_SOLVED`)
+on numerically difficult LPs, e.g. regional full-hourly models. In that case re-solve with the homogeneous
+Barrier algorithm (`BarHomogeneous=1`), and if that still ends sub-optimal, once more with crossover. Returns
+`true` when a fallback ran and records the step used as `SuboptimalFallback` in `attrs`. Normal Barrier runs
+are untouched.
+"""
+function gurobi_suboptimal_fallback!(model::JuMP.Model, attrs::AbstractDict; optimize_fn::Function = optimize!)
+    get(attrs, "Method", -1) == 2 && get(attrs, "Crossover", -1) == 0 || return false
+    termination_status(model) == MOI.LOCALLY_SOLVED || return false
+    occursin("gurobi", lowercase(solver_name(model))) || return false
+    if get(attrs, "BarHomogeneous", -1) != 1
+        set_optimizer_attribute(model, "BarHomogeneous", 1)
+        attrs["SuboptimalFallback"] = "BarHomogeneous=1"
+        optimize_fn(model)
+        termination_status(model) == MOI.LOCALLY_SOLVED || return true
+    end
+    set_optimizer_attribute(model, "Crossover", -1)
+    attrs["SuboptimalFallback"] = "BarHomogeneous=1+Crossover"
+    optimize_fn(model)
+    return true
+end
+
+"""
     default_highs_attributes() -> Dict{String,Any}
 
 Default HiGHS attributes for license-free CI / development. HiGHS interior

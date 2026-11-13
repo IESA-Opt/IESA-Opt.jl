@@ -1454,9 +1454,10 @@ function _add_chp_TS!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 set_lower_bound(dpCHP[hc, tk, ps], 0.0)
             end
 
-            # IESA-Opt 1.0 rampingUP/DW_delta{U,P}chp_TS (lines 3640-3715)
+            # IESA-Opt 1.0 rampingUP/DW_delta{U,P}chp_TS (lines 3640-3715). The current AIMMS model has no CHP
+            # ramping, so these rows are opt-in (IESA_ENABLE_CHP_RAMP=1), matching the FH path.
             slot = get(p.intradaySlot_of_clusterHour, hc, 1)
-            chp_ramp_enabled = get(ENV, "IESA_DISABLE_CHP_RAMP", "0") != "1"
+            chp_ramp_enabled = get(ENV, "IESA_ENABLE_CHP_RAMP", "0") == "1"
             apply_ramp = chp_ramp_enabled && (boundary || slot != first_slot) && prof > 0.0 && tk in s.tech_balancers
             if apply_ramp
                 hc_prev = i == 1 ? hcv[end] : hcv[i - 1]

@@ -1440,8 +1440,9 @@ function _add_chp!(m::JuMP.Model, vars::AnnualVars, md::ModelData)
                 end
             end
             # IESA-Opt 1.0 lines 3542-3556. rampingUP_deltaUchp / rampingDW_deltaUchp.
-            # Active only when hourly_profile(h, profType_tech(tk)) > 0.
-            chp_ramp_enabled = get(ENV, "IESA_DISABLE_CHP_RAMP", "0") != "1"
+            # Active only when hourly_profile(h, profType_tech(tk)) > 0. The current AIMMS model has no
+            # CHP ramping, so these rows are opt-in: IESA_ENABLE_CHP_RAMP=1.
+            chp_ramp_enabled = get(ENV, "IESA_ENABLE_CHP_RAMP", "0") == "1"
             if chp_ramp_enabled && prof > 0.0 && tk in s.tech_balancers
                 rhs_u = prof * dev_u * ramp_eff
                 if abs(rhs_u) > _IJ_COEF_EPS

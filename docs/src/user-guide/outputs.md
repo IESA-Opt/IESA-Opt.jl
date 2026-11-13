@@ -31,13 +31,15 @@ Custom output locations can be set in a local wrapper script with `IESA_OUT_DIR`
 | `tech_use_h` | Full-hourly dispatch results for full-hourly runs. |
 | `variable_values` | Complete long-format dump of every JuMP variable value, including zero-valued variables. |
 | `cluster_map` | Mapping from calendar days to representative days. |
-| `CO2_price` | Emission-cap shadow prices when the corresponding dual outputs are available. |
+| `CO2_price` | CO2 price (EUR/tCO2eq, undiscounted) by period: the dual of the NL Air emission cap, divided by the social discount factor. Written when duals are available. |
 | `activity_prices` | Annual commodity balance shadow prices by activity, period, and balance family. |
 | `activity_prices_daily` | Daily commodity balance shadow prices for daily-dispatched activities. |
 | `activity_prices_hourly` | Hourly or representative-hour commodity balance shadow prices for hourly-dispatched activities. |
-| `emission_prices` | Shadow prices for emission-cap constraint families by node and period. |
+| `emission_prices` | Emission-cap prices (EUR/tCO2eq, undiscounted) by constraint family, node, and period. |
 
 Some output files depend on the selected solve mode and enabled writer options.
+
+UI runs also write `CO2_price.CSV` in the AIMMS format. `CO2_Price` follows the AIMMS definition (`-min` of the Air, Bunker and FeedStock cap duals, divided by the discount factor). `CO2_Price_Air`, `CO2_Price_Bunker` and `CO2_Price_FS` give the price of each cap. When a cap is zero the Bunker and FeedStock duals are often not unique and can vary greatly between solvers or runs, so `CO2_Price_Air` is the value to compare.
 
 ## Reading Results
 

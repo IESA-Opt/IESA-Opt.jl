@@ -63,9 +63,33 @@ All notable changes to IESA-Opt.jl are recorded here. The format follows
   extreme-day controls and generated capacity-envelope profiles are removed.
 - Scenario Space now passes the selected temporal settings to campaign
   preparation and retains them for resume. Input caches rebuild automatically.
+- The IESA-Opt 1.0 CHP ramping constraints (`rampingUP/DW_deltaUchp`,
+  `rampingUP/DW_deltaPchp`, FH and TS) are now opt-in via
+  `IESA_ENABLE_CHP_RAMP=1`, because the current AIMMS model has no CHP
+  ramping. On the 10-node workbook they added about 130k rows at 1 h/day.
+- Gurobi Barrier runs without crossover that stop with "Sub-optimal
+  termination" (`LOCALLY_SOLVED`) are re-solved with the homogeneous Barrier
+  algorithm (`BarHomogeneous=1`), and with crossover if still sub-optimal
+  (`gurobi_suboptimal_fallback!`, used by UI runs). The step used is recorded
+  as `attr:SuboptimalFallback` in `solver_settings`.
 
 ### Fixed
 
+- The `CO2_price` and `emission_prices` DuckDB tables, the UI CO2-price chart
+  and the scenario-space `co2_price` now divide the emission-cap dual by the
+  social discount factor. They previously reported the discounted dual, which
+  for 2050 is about 0.57 times the EUR/tCO2 price in `CO2_price.CSV` and AIMMS.
+- `CO2_price.CSV` adds `CO2_Price_Air`, `CO2_Price_Bunker` and `CO2_Price_FS`
+  (the price of each emission cap). `CO2_Price` is unchanged: like AIMMS it is
+  the largest of the three, which follows the Bunker or FeedStock cap whenever
+  that cap binds. Those duals are not unique, so compare the Air price between
+  models.
+- Infrastructure-volume limits (`infraVol_H`, `infraVol_D`, FH and TS) are no
+  longer skipped for activities that no technology consumes but that have
+  flexible-demand (`deltaQ`) or gas-buffer (`deltaB_UP`) terms, matching AIMMS.
+  In the 10-node workbook this restores the hourly network limit on the CL1–CL5
+  `Heat LT Network` flexibility; without it the regional LP was a relaxation of
+  the AIMMS model.
 - Time slicing no longer becomes infeasible on representative-day energy
   shortfalls: each clustered hourly profile is rescaled once to its exact
   8760-hour annual total.

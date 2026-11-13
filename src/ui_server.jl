@@ -2834,6 +2834,12 @@ function _run_ui_job!(job_id::String, config::Dict{String,Any}, queued_start::Fl
         _job_update!(job_id; stage = "solve", message = "Solving with $(effective_solver) using $(config["solveMethod"]) on $(n_rows) rows and $(n_cols) columns")
         _, solve_seconds = _elapsed() do
             _optimize_with_solver_progress!(model, job_id, effective_solver, solver_log_path)
+            if lowercase(String(effective_solver)) == "gurobi" &&
+               termination_status(model) == MOI.LOCALLY_SOLVED && !_check_cancel(job_id)
+                _job_update!(job_id; stage = "solve", message = "Barrier ended sub-optimal; re-solving with the homogeneous Barrier algorithm")
+            end
+            gurobi_suboptimal_fallback!(model, attrs;
+                optimize_fn = m -> _optimize_with_solver_progress!(m, job_id, effective_solver, solver_log_path))
         end
         stage_times["solve_sec"] = solve_seconds
         term = string(termination_status(model))
@@ -3228,8 +3234,11 @@ function _extract_co2_prices(model, md::ModelData)
                 # `<= cap` minimization: shadow_price ≤ 0; the implied CO2 price
                 # (cost of one more tCO2 of headroom) is its absolute magnitude.
                 # IESA-Opt 1.0 reports EUR/tCO2; with objective in MEUR and
-                # caps in MtonCO2 the ratio is already in EUR/tCO2.
-                abs(shadow_price(con))
+                # caps in MtonCO2 the ratio is already in EUR/tCO2. The
+                # objective is discounted, so divide by the social discount
+                # factor to get the price in the period's own money, like
+                # AIMMS CO2_price_single and CO2_price.CSV.
+                abs(shadow_price(con)) / get(md.params.social_discount_factor, ps, 1.0)
             catch
                 NaN
             end
@@ -3271,7 +3280,8 @@ function _extract_emission_prices(model, md::ModelData)
                 end
                 con === nothing && continue
                 price = try
-                    abs(shadow_price(con))
+                    # Undiscounted EUR/tCO2eq, as in _extract_co2_prices.
+                    abs(shadow_price(con)) / get(md.params.social_discount_factor, ps, 1.0)
                 catch
                     NaN
                 end

@@ -339,16 +339,20 @@ function write_aimms_csv_results(model::JuMP.Model, vars::AnnualVars, md::ModelD
         end
     end)
 
-    emit(:aimms_CO2_price, "CO2_price.CSV", ["Node", "period", "CO2_Price"], io -> begin
+    # CO2_Price is AIMMS's CO2_price_single: -min(Air, Bunker, FS duals)/sdf.
+    # When the Bunker/FS caps bind it follows their (non-unique) duals, so the
+    # price of each cap is also written separately.
+    emit(:aimms_CO2_price, "CO2_price.CSV",
+         ["Node", "period", "CO2_Price", "CO2_Price_Air", "CO2_Price_Bunker", "CO2_Price_FS"], io -> begin
         for n in s.nodes, ps in pss
-            duals = Float64[]
-            for base in ("emTargetAir", "emTargetBunker", "emTargetFS")
-                dv = _aimms_dual(model, "$(base)[$(n),$(ps)]")
-                dv === nothing || push!(duals, dv)
-            end
-            isempty(duals) && continue
-            v = round(-minimum(duals) / sdf(ps); digits = 6)
-            iszero(v) || _aimms_row(io, (n, ps), v)
+            duals = Union{Nothing,Float64}[_aimms_dual(model, "$(base)[$(n),$(ps)]")
+                                           for base in ("emTargetAir", "emTargetBunker", "emTargetFS")]
+            all(isnothing, duals) && continue
+            existing = Float64[dv for dv in duals if dv !== nothing]
+            per_cap = Float64[dv === nothing ? 0.0 : round(-dv / sdf(ps); digits = 6) for dv in duals]
+            vals = vcat(round(-minimum(existing) / sdf(ps); digits = 6), per_cap)
+            all(iszero, vals) && continue
+            println(io, join(_aimms_q.((n, ps)), ","), ",", join(_aimms_num.(vals), ","))
         end
     end)
 

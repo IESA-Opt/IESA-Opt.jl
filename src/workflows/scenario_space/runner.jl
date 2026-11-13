@@ -71,7 +71,8 @@ function _variant_co2_price(model::JuMP.Model, md::ModelData)
             end
             con === nothing && continue
             price = try
-                abs(JuMP.shadow_price(con))
+                # Undiscounted EUR/tCO2eq, as in the UI's _extract_co2_prices.
+                abs(JuMP.shadow_price(con)) / get(md.params.social_discount_factor, ps, 1.0)
             catch
                 NaN
             end
