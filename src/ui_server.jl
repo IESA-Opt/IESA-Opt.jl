@@ -4664,12 +4664,13 @@ function _period_summary_payload(out_dir::AbstractString)
             label_of = Dict{String,String}()
             sign_of = Dict{String,Float64}()
             for r in _df_rows(meta2, 5_000)
-                string(get(r, "category", "")) == "Primary" || continue
+                # "XC Trade" (the electricity interconnectors) counts too: its net flow is electricity import minus export, as in CBS.
+                string(get(r, "category", "")) in ("Primary", "XC Trade") || continue
                 tid = String(get(r, "tech", ""))
                 lbl = string(get(r, "label", ""))
                 (isempty(lbl) || lbl == "Material") && continue
                 label_of[tid] = lbl
-                sign_of[tid] = startswith(strip(string(get(r, "name", ""))), "Exported") ? -1.0 : 1.0
+                sign_of[tid] = (startswith(strip(string(get(r, "name", ""))), "Exported") || occursin("Export", string(get(r, "name", "")))) ? -1.0 : 1.0
             end
             acc = Dict{Tuple{Int,String},Float64}()
             for r in _df_rows(use_df, 200_000)
@@ -4681,6 +4682,61 @@ function _period_summary_payload(out_dir::AbstractString)
                 (v === nothing || v === missing) && continue
                 key = (per, label_of[tid])
                 acc[key] = get(acc, key, 0.0) + sign_of[tid] * Float64(v)
+            end
+            # Two accounting adjustments so Opt's primary energy matches CBS / IESA-Sim's scope
+            # (accounting only - the optimisation is untouched; keep identical to python-backend
+            # code/postprocess/post_primary_energy.py):
+            # 1) International bunkers: CBS deducts them from TPES, but in the merged database the
+            #    bunker technologies consume ordinary fuels. Remove that consumption by the energy
+            #    label of the fuel. Bunker tech rule = the final-energy rule (subsector 'Bunker',
+            #    'International' in the name, or the conventional airplane).
+            # 2) Surplus as exports: an energy activity produced beyond what anything uses (Opt's
+            #    balances are ">=", e.g. joint refinery products) is booked as an export, i.e.
+            #    subtracted from its label - exactly what IESA-Sim does with overproduced energy.
+            bal_df = _read_result_df(con, out_dir, "activity_balances")
+            act_meta2 = _read_result_df(con, out_dir, "activities_meta")
+            if !isempty(bal_df) && !isempty(act_meta2) &&
+               all(c in names(bal_df) for c in ["tech", "activity", "period", "coef"]) &&
+               all(c in names(act_meta2) for c in ["activity", "type", "label"]) &&
+               all(c in names(meta2) for c in ["name", "sector", "subsector"])
+                energy_label = Dict{String,String}()
+                for r in eachrow(act_meta2)
+                    string(coalesce(r.type, "")) == "Energy" || continue
+                    lbl = string(coalesce(r.label, ""))
+                    (isempty(lbl) || lbl == "Material") && continue
+                    energy_label[String(r.activity)] = lbl
+                end
+                is_bunker = Set{String}()
+                for r in eachrow(meta2)
+                    nm = string(coalesce(r.name, "")); sub = string(coalesce(r.subsector, "")); sec = string(coalesce(r.sector, ""))
+                    (sub == "Bunker" || occursin("International", nm) ||
+                     (sec == "Transport" && occursin("Conventional Airplane", nm))) && push!(is_bunker, String(r.tech))
+                end
+                use_all = Dict{Tuple{String,Int},Float64}()
+                for r in eachrow(use_df)
+                    (ismissing(r.value) || ismissing(r.period)) && continue
+                    use_all[(String(r.tech), Int(r.period))] = Float64(r.value)
+                end
+                net = Dict{Tuple{String,Int},Float64}()   # (activity, period) => sum coef x use
+                for r in eachrow(bal_df)
+                    (ismissing(r.coef) || ismissing(r.period)) && continue
+                    act = String(r.activity)
+                    haskey(energy_label, act) || continue
+                    tid = String(r.tech); per = Int(r.period)
+                    u = get(use_all, (tid, per), 0.0)
+                    u == 0.0 && continue
+                    coef = Float64(r.coef)
+                    net[(act, per)] = get(net, (act, per), 0.0) + coef * u
+                    if tid in is_bunker && coef < 0
+                        key = (per, energy_label[act])
+                        acc[key] = get(acc, key, 0.0) + coef * u      # negative: removes bunker fuel from supply
+                    end
+                end
+                for ((act, per), v) in net
+                    v > 1e-6 || continue
+                    key = (per, energy_label[act])
+                    acc[key] = get(acc, key, 0.0) - v                  # surplus booked as export
+                end
             end
             for ((per, lbl), v) in sort(collect(acc))
                 push!(primary_by_period, Dict{String,Any}("period" => per, "label" => lbl, "value" => v))
@@ -4730,11 +4786,143 @@ function _period_summary_payload(out_dir::AbstractString)
         # activities_meta just reports none rather than failing the request.
     end
 
+    # Final energy (PJ) per end-use sector and carrier: energy carriers
+    # delivered to end-use technologies = -coef x use over the carrier
+    # activities below. Same definition as IESA-Sim's final_energy table
+    # (python-backend code/write/mod6_save_duckdb.py _final_energy_df) and
+    # reference-data/model_energy_vs_cbs.py - keep the three identical. Left
+    # out: bunkers / international transport, steel blast furnaces (CBS books
+    # their coal as transformation), the propylene plants' LPG (feedstock),
+    # and every non-carrier activity (feedstock naphtha/ammonia, heat services).
+    final_energy_by_period = Vector{Dict{String,Any}}()
+    try
+        final_sector = Dict("Residential" => "Dwellings", "Services" => "Services",
+                            "Agriculture" => "Agriculture", "Industry" => "Industry",
+                            "Transport" => "Transport")
+        carrier_of = Dict{String,String}()
+        for a in ("Electricity NL - HV", "Electricity NL - LV"); carrier_of[a] = "Electricity"; end
+        for a in ("Natural Gas HD", "Natural Gas LD", "Natural Gas LNG", "National Natural Gas"); carrier_of[a] = "Natural gas"; end
+        for a in ("Road Fuel", "Fuel Oil", "Kerosene", "Other Oil Products", "LPG"); carrier_of[a] = "Petroleum products"; end
+        carrier_of["Coal"] = "Coal"
+        for a in ("Biomass", "Wood", "Bio Diesel", "Bio Kerosene", "Bio LPG", "Vegetable Oil", "Bio Road Fuel"); carrier_of[a] = "Renewable (biomass, biofuels)"; end
+        carrier_of["Heat LT Network"] = "District heat"
+        for a in ("Hydrogen HD", "Hydrogen LD"); carrier_of[a] = "Hydrogen"; end
+
+        use_df = _read_result_df(con, out_dir, "tech_use")
+        meta3 = _read_result_df(con, out_dir, "tech_meta")
+        bal_df = _read_result_df(con, out_dir, "activity_balances")
+        act_meta = _read_result_df(con, out_dir, "activities_meta")
+        heat_acts = Set{String}()
+        if !isempty(act_meta) && all(c in names(act_meta) for c in ["activity", "label"])
+            for r in eachrow(act_meta)
+                string(coalesce(r.label, "")) == "Heat" && push!(heat_acts, String(r.activity))
+            end
+        end
+        if !isempty(use_df) && !isempty(meta3) && !isempty(bal_df) &&
+           all(c in names(meta3) for c in ["tech", "name", "sector", "subsector"]) &&
+           all(c in names(bal_df) for c in ["tech", "activity", "period", "coef"])
+            counted = Dict{String,Tuple{String,Bool}}()  # tech => (final sector, is propylene plant)
+            BF_COAL_FINAL_SHARE = 0.12
+            blast_furnaces = Set{String}()
+            feedstock_techs = Set{String}()   # hydrogen used by these is non-energy use in CBS, not final energy
+            for r in eachrow(meta3)
+                sec = string(coalesce(r.sector, ""))
+                haskey(final_sector, sec) || continue
+                nm = string(coalesce(r.name, ""))
+                sub = string(coalesce(r.subsector, ""))
+                (sub == "Bunker" || occursin("International", nm) ||
+                 (sec == "Transport" && occursin("Conventional Airplane", nm))) && continue
+                counted[String(r.tech)] = (final_sector[sec], occursin("Propylene", nm))
+                # Steel blast furnaces: only BF_COAL_FINAL_SHARE of the furnace's coal is final energy (CBS books the
+                # rest as transformation); see python-backend mod6_save_duckdb.py BLAST_FURNACE_COAL_FINAL_SHARE.
+                (sec == "Industry" && occursin("Blast furnace", nm)) && push!(blast_furnaces, String(r.tech))
+                occursin("feedstock", lowercase(nm)) && push!(feedstock_techs, String(r.tech))
+            end
+            use_of = Dict{Tuple{String,Int},Float64}()
+            for r in eachrow(use_df)
+                (ismissing(r.value) || ismissing(r.period)) && continue
+                use_of[(String(r.tech), Int(r.period))] = Float64(r.value)
+            end
+            # Naphtha crackers burn part of their naphtha as fuel: the naphtha input minus the technology's feedstock use
+            # (Feedstocks sheet, results table feedstock_use) is industry petroleum fuel in CBS. Older results have no
+            # feedstock_use table; then this rule simply does not apply. Keep identical to python-backend mod6_save_duckdb.py.
+            naphtha_fuel = Dict("Naphtha" => "Petroleum products", "Bio Naphtha" => "Renewable (biomass, biofuels)")
+            feedstock_of = Dict{Tuple{String,String},Float64}()
+            try
+                fs_df = _read_result_df(con, out_dir, "feedstock_use")
+                if !isempty(fs_df) && all(c in names(fs_df) for c in ["tech", "activity", "fraction"])
+                    for r in eachrow(fs_df)
+                        ismissing(r.fraction) && continue
+                        feedstock_of[(String(r.tech), String(r.activity))] = Float64(r.fraction)
+                    end
+                end
+            catch
+            end
+            # CHP rule (CBS): fuel burnt in a CHP is transformation, its heat is final
+            # "Heat". A counted tech producing both electricity and a Heat-label activity
+            # is a CHP: leave its fuel out, book its heat output as "District heat".
+            has_elec = Set{Tuple{String,Int}}(); has_heat = Set{Tuple{String,Int}}()
+            for r in eachrow(bal_df)
+                (ismissing(r.coef) || ismissing(r.period) || !(Float64(r.coef) > 0)) && continue
+                tid = String(r.tech); act = String(r.activity)
+                haskey(counted, tid) || continue
+                startswith(act, "Electricity NL") && push!(has_elec, (tid, Int(r.period)))
+                act in heat_acts && push!(has_heat, (tid, Int(r.period)))
+            end
+            is_chp(tid, per) = ((tid, per) in has_elec) && ((tid, per) in has_heat)
+            acc = Dict{Tuple{Int,String,String},Float64}()
+            for r in eachrow(bal_df)
+                (ismissing(r.coef) || ismissing(r.period)) && continue
+                coef = Float64(r.coef)
+                tid = String(r.tech)
+                haskey(counted, tid) || continue
+                act = String(r.activity)
+                per = Int(r.period)
+                if is_chp(tid, per)
+                    if coef > 0 && act in heat_acts
+                        key = (per, counted[tid][1], "District heat")
+                        acc[key] = get(acc, key, 0.0) + coef * get(use_of, (tid, per), 0.0)
+                    end
+                    continue
+                end
+                coef < 0 || continue
+                if haskey(naphtha_fuel, act) && haskey(feedstock_of, (tid, act))
+                    resid = -coef + feedstock_of[(tid, act)]      # |input| - |feedstock|, both coefficients are negative
+                    u2 = get(use_of, (tid, per), 0.0)
+                    if resid > 0 && u2 != 0.0
+                        key = (per, counted[tid][1], naphtha_fuel[act])
+                        acc[key] = get(acc, key, 0.0) + resid * u2
+                    end
+                    continue
+                end
+                haskey(carrier_of, act) || continue
+                sec, is_propylene = counted[tid]
+                (is_propylene && act == "LPG") && continue
+                (carrier_of[act] == "Hydrogen" && tid in feedstock_techs) && continue
+                share = 1.0
+                if tid in blast_furnaces
+                    carrier_of[act] == "Coal" || continue
+                    share = BF_COAL_FINAL_SHARE
+                end
+                u = get(use_of, (tid, per), 0.0)
+                u == 0.0 && continue
+                key = (per, sec, carrier_of[act])
+                acc[key] = get(acc, key, 0.0) - coef * u * share
+            end
+            for ((per, sec, car), v) in sort(collect(acc))
+                push!(final_energy_by_period, Dict{String,Any}("period" => per, "sector" => sec, "carrier" => car, "value" => v))
+            end
+        end
+    catch
+        # Best-effort like primary energy above.
+    end
+
     Dict{String,Any}(
         "costByPeriod" => cost_by_period,
         "techMixByPeriod" => tech_mix_by_period,
         "emissionsByPeriod" => emissions_by_period,
         "primaryByPeriod" => primary_by_period,
+        "finalEnergyByPeriod" => final_energy_by_period,
         "topTech" => top_tech_by_cost,
     )
     end

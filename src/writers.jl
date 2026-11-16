@@ -66,6 +66,7 @@ function write_parquet_results(rr::RunResult, vars::AnnualVars, md::ModelData,
         :cost_breakdown      => write_cost_breakdown_parquet,
         :cluster_map         => write_cluster_map_parquet,
         :tech_meta           => write_tech_meta_parquet,
+        :feedstock_use       => write_feedstock_use_parquet,
         :nodes_meta          => write_nodes_meta_parquet,
         :activity_balances   => write_activity_balances_parquet,
         :activities_meta     => write_activities_meta_parquet,
@@ -169,6 +170,7 @@ function write_duckdb_results(rr::RunResult, vars::AnnualVars, md::ModelData,
             :cost_breakdown      => write_cost_breakdown_parquet,
             :cluster_map         => write_cluster_map_parquet,
             :tech_meta           => write_tech_meta_parquet,
+            :feedstock_use       => write_feedstock_use_parquet,
             :nodes_meta          => write_nodes_meta_parquet,
             :activity_balances   => write_activity_balances_parquet,
             :activities_meta     => write_activities_meta_parquet,
@@ -559,6 +561,21 @@ function write_tech_meta_parquet(vars::AnnualVars, md::ModelData, path::Abstract
         label        = label_col,
         node         = node_col,
         process_type = process_col;
+        copycols = false,
+    )
+    return _write_table(df, path)
+end
+
+# feedstock_use: the Feedstocks sheet's per (technology, activity) feedstock coefficient (negative, same units as the activity balance).
+# Written with the results so a results file alone can separate a technology's fuel input from its feedstock input (final energy:
+# a naphtha cracker's naphtha minus its feedstock use is fuel). Always created, zero rows when the data has none.
+function write_feedstock_use_parquet(vars::AnnualVars, md::ModelData, path::AbstractString)
+    fs = md.params.feedstockUse_techOrig
+    keys_sorted = sort(collect(keys(fs)); by = k -> (string(k[1]), string(k[2])))
+    df = DataFrames.DataFrame(
+        tech     = String[string(k[1]) for k in keys_sorted],
+        activity = String[string(k[2]) for k in keys_sorted],
+        fraction = Float64[fs[k] for k in keys_sorted];
         copycols = false,
     )
     return _write_table(df, path)
