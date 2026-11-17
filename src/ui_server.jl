@@ -4904,6 +4904,10 @@ function _period_summary_payload(out_dir::AbstractString)
                 if tid in blast_furnaces
                     carrier_of[act] == "Coal" || continue
                     share = BF_COAL_FINAL_SHARE
+                elseif haskey(feedstock_of, (tid, act))
+                    # Feedstock is NON-ENERGY use in CBS (83140ENG: total final consumption = energy use + non-energy use, e.g. gas 2022 556.4 = 488.3 + 68.2), so for every carrier the technology's feedstock use (Feedstocks sheet, table feedstock_use) is taken off its input and only the rest counts as final energy. Blast furnaces keep their 12% coal rule. Keep identical in the three places.
+                    coef = coef - feedstock_of[(tid, act)]     # |input| - |feedstock|, both negative
+                    coef < 0 || continue
                 end
                 u = get(use_of, (tid, per), 0.0)
                 u == 0.0 && continue
