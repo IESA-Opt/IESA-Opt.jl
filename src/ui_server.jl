@@ -4804,7 +4804,8 @@ function _period_summary_payload(out_dir::AbstractString)
         for a in ("Natural Gas HD", "Natural Gas LD", "Natural Gas LNG", "National Natural Gas"); carrier_of[a] = "Natural gas"; end
         for a in ("Road Fuel", "Fuel Oil", "Kerosene", "Other Oil Products", "LPG"); carrier_of[a] = "Petroleum products"; end
         carrier_of["Coal"] = "Coal"
-        for a in ("Biomass", "Wood", "Bio Diesel", "Bio Kerosene", "Bio LPG", "Vegetable Oil", "Bio Road Fuel"); carrier_of[a] = "Renewable (biomass, biofuels)"; end
+        # Heat-pump source heat and geothermal/solar heat (activities Ambient Energy, Geothermal Energy, Solar Heat) are renewable energy delivered to the end user in CBS (ambient 11-22 PJ in dwellings, deep geothermal 7 PJ in greenhouses); counted here like biomass. Keep identical in the three places.
+        for a in ("Biomass", "Wood", "Bio Diesel", "Bio Kerosene", "Bio LPG", "Vegetable Oil", "Bio Road Fuel", "Ambient Energy", "Geothermal Energy", "Solar Heat"); carrier_of[a] = "Renewable (biomass, biofuels)"; end
         carrier_of["Heat LT Network"] = "District heat"
         for a in ("Hydrogen HD", "Hydrogen LD"); carrier_of[a] = "Hydrogen"; end
 
